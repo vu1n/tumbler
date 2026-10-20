@@ -71,6 +71,19 @@ test("broker refusals surface as errors and the command does not run", async () 
   await assert.rejects(cli(["run", "--", "true"], { TUMBLER_TTL: "0", TUMBLER_TOKEN: "tmb_bad" }), /broker 401/);
 });
 
+test("a shorter TTL on a later run is honoured by a helper started with the default", async () => {
+  await cli(["reload"]);
+  await cli(["run", "--", ...printEnv]); // starts or reuses the helper at the default TTL
+  await new Promise((r) => setTimeout(r, 1100));
+  const before = hits;
+  await cli(["run", "--", ...printEnv], { TUMBLER_TTL: "1" });
+  assert.equal(hits - before, 1);
+});
+
+test("a child killed by a signal makes tumbler fail too", async () => {
+  await assert.rejects(cli(["run", "--", "sh", "-c", "kill -TERM $$"], { TUMBLER_TTL: "0" }), (e: any) => e.signal === "SIGTERM" || e.code === 143);
+});
+
 test("the child's exit code passes through", async () => {
   await assert.rejects(cli(["run", "--", "sh", "-c", "exit 7"], { TUMBLER_TTL: "0" }), (e: any) => e.code === 7);
 });

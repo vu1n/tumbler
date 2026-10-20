@@ -17,7 +17,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
-import { homedir } from "node:os";
+import { constants, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -80,7 +80,8 @@ function daemon() {
         // gets values fetched for someone else.
         const path = envPath(req.project, req.keys), slot = createHash("sha256").update(`${req.url}\0${req.token}\0${path}`).digest("hex");
         const hit = cache.get(slot);
-        if (hit && Date.now() - hit.at < TTL) return reply({ env: hit.env });
+        // Why: the caller's TTL, not the one the helper started with, so lowering it takes effect.
+        if (hit && Date.now() - hit.at < req.ttl) return reply({ env: hit.env });
         const { env } = await brokerGet(path, { url: req.url, token: req.token });
         cache.set(slot, { at: Date.now(), env });
         reply({ env });
@@ -115,7 +116,7 @@ async function cached(req) {
 
 async function fetchEnv(project, keys) {
   if (TTL > 0) {
-    const r = await cached({ op: "get", project, keys, ...callerCfg() });
+    const r = await cached({ op: "get", project, keys, ttl: TTL, ...callerCfg() });
     if (r?.error) throw new Error(r.error);
     if (r?.env) return r.env;
   }
@@ -174,9 +175,16 @@ async function run(args) {
   // Why: under a shim, `rest[0]` is the shim's own name; resolve past the shim dir so it can't loop.
   const cmd = process.env.TUMBLER_SHIMMED ? realBinary(rest[0]) ?? die(`no ${rest[0]} on PATH outside the shims`, 127) : rest[0];
   const child = spawn(cmd, rest.slice(1), { stdio: "inherit", env: { ...process.env, ...env, TUMBLER_SHIMMED: "" } });
-  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => child.kill(sig));
+  const forward = ["SIGINT", "SIGTERM", "SIGHUP"].map((sig) => [sig, () => child.kill(sig)]);
+  for (const [sig, fn] of forward) process.on(sig, fn);
   child.on("error", (e) => die(`${rest[0]}: ${e.message}`, 127));
-  child.on("exit", (code, sig) => (sig ? process.kill(process.pid, sig) : process.exit(code ?? 1)));
+  child.on("exit", (code, sig) => {
+    if (!sig) process.exit(code ?? 1);
+    // Why: drop our forwarders first, or they'd swallow the re-raised signal and we'd exit 0.
+    for (const [s, fn] of forward) process.off(s, fn);
+    process.kill(process.pid, sig);
+    process.exit(128 + (constants.signals[sig] ?? 1)); // in case the signal is ignored here
+  });
 }
 
 function shim(tools) {
