@@ -2,7 +2,10 @@
 // tumbler — run a command with env vars from the tumbler broker. Values live only in the process
 // you run and in a short-lived in-memory cache; nothing is written to disk.
 //
-//   tumbler run [-p project] [-k A,B] -- <cmd> [args...]
+//   tumbler run [-p project] [-k A,B] [--scope a,b] -- <cmd> [args...]
+//                                    --scope asks for more scopes on the set's minted keys
+//                                    (e.g. workers:write); reads are granted at once, the rest
+//                                    wait for approval in /admin and the command doesn't start
 //   tumbler keys [-p project]        names this caller can read (never values)
 //   tumbler whoami                   which token the broker sees, and its pin
 //   tumbler auto [-p project] [--dry-run] [--force]
@@ -232,15 +235,16 @@ function manifest() {
 
 function parseFlags(args) {
   const m = manifest();
-  let project = process.env.TUMBLER_PROJECT || m.project, keys = m.keys, rest = [], picked = m.found;
+  let project = process.env.TUMBLER_PROJECT || m.project, keys = m.keys, rest = [], picked = m.found, scopes = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--") { rest = args.slice(i + 1); break; }
     if (a === "-p" || a === "--project") project = args[++i];
     else if (a === "-k" || a === "--keys") { keys = String(args[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean); picked = true; }
+    else if (a === "--scope") scopes.push(...String(args[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
     else { rest = args.slice(i); break; }
   }
-  return { project, keys, rest, picked };
+  return { project, keys, rest, picked, scopes };
 }
 
 // --- commands --------------------------------------------------------------------------------
@@ -255,9 +259,24 @@ function realBinary(tool) {
   return null;
 }
 
+// Ask the broker for more scopes on the minted keys in the set. Anything still waiting for approval
+// stops the run: the command never starts with a narrower token than it asked for, or a wider one.
+async function stepUp(project, keys, scopes) {
+  let names = keys;
+  try {
+    if (!names) names = (await brokerGet("/v1/keys" + (project ? `?project=${encodeURIComponent(project)}` : ""))).keys;
+    const r = await brokerCall("POST", "/v1/step-up" + (project ? `?project=${encodeURIComponent(project)}` : ""), { keys: names, scopes });
+    const waiting = r.grants.filter((g) => g.state !== "active" || g.requested);
+    if (waiting.length) {
+      die(waiting.map((g) => `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in /admin (grant ${g.id})`).join("\n          ") + "\n          run again once approved");
+    }
+  } catch (e) { die(e.message); }
+  try { await ask({ op: "reload" }); } catch {} // the cached env holds the narrower child
+}
+
 async function run(args) {
-  let { project, keys, rest, picked } = parseFlags(args);
-  if (!rest.length) die("usage: tumbler run [-p project] [-k A,B] -- <cmd> [args...]", 2);
+  let { project, keys, rest, picked, scopes } = parseFlags(args);
+  if (!rest.length) die("usage: tumbler run [-p project] [-k A,B] [--scope a,b] -- <cmd> [args...]", 2);
   // No .tumbler and no -k: work the set out once and write it down, so later runs and reviewers see it.
   if (!picked && !["0", "off", "false", "no"].includes((process.env.TUMBLER_AUTO ?? "").toLowerCase())) {
     // Why: neither failure may widen the set to every key the token can read. If auto can't pick,
@@ -276,6 +295,7 @@ async function run(args) {
       process.stderr.write(`tumbler: could not write ${path} (${e.code ?? e.message}); running with the ${keys.length} picked key(s) only\n`);
     }
   }
+  if (scopes.length) await stepUp(project, picked ? keys : null, scopes);
   let env;
   // Why: an empty picked set means "none", not "everything" (which is what /v1/env does with no keys).
   try { env = picked && !keys.length ? {} : await fetchEnv(project, keys); } catch (e) { die(e.message); }
@@ -312,7 +332,8 @@ switch (cmd) {
   case "auto": await auto(args); break;
   case "keys": {
     const { project } = parseFlags(args);
-    try { process.stdout.write(Object.keys(await fetchEnv(project, [])).sort().join("\n") + "\n"); } catch (e) { die(e.message); }
+    // Names only: /v1/env would mint a child for every minted key just to list it.
+    try { process.stdout.write((await brokerGet("/v1/keys" + (project ? `?project=${encodeURIComponent(project)}` : ""))).keys.join("\n") + "\n"); } catch (e) { die(e.message); }
     break;
   }
   case "whoami": try { process.stdout.write(JSON.stringify(await brokerGet("/v1/whoami")) + "\n"); } catch (e) { die(e.message); } break;

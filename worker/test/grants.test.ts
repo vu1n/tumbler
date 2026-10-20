@@ -1,0 +1,278 @@
+// Minted keys: the grant state machine, the Cloudflare provider, and `tumbler run --scope` end to end.
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import { promisify } from "node:util";
+import { handle } from "../src/app.ts";
+import { Catalog } from "../src/catalog.ts";
+import { cloudflare } from "../src/cloudflare.ts";
+import { masterKey } from "../src/crypto.ts";
+import { Grants, type Provider } from "../src/grants.ts";
+import { memoryD1 } from "./d1.ts";
+
+const PARENT = "parent-token-never-leaves";
+const ACCT = "a".repeat(32), READ = "1".repeat(32), WRITE = "2".repeat(32);
+const CONFIG = { account_id: ACCT, ttl_minutes: 30, start: ["workers:read"], scopes: { "workers:read": [READ], "workers:write": [READ, WRITE] } };
+
+// A provider that mints "child-N" and remembers what it was asked; `fail` makes the next mint throw.
+function fakeProvider() {
+  const p = { minted: [] as { scopes: string[]; parent: string }[], revoked: [] as string[], fail: false, n: 0 } as any;
+  const provider: Provider = {
+    validate() {},
+    async mint(parent, _c, scopes) {
+      if (p.fail) throw new Error("provider down");
+      p.minted.push({ parent, scopes }); p.n++;
+      return { id: `id-${p.n}`, value: `child-${p.n}` };
+    },
+    async revoke(_parent, _c, id) { p.revoked.push(id); },
+  };
+  return Object.assign(p, { provider });
+}
+
+async function setup() {
+  const db = memoryD1(), catalog = new Catalog(db, await masterKey(Buffer.alloc(32, 3).toString("base64")));
+  const fake = fakeProvider();
+  let clock = Date.parse("2026-10-20T12:00:00Z");
+  const grants = new Grants(catalog, { cloudflare: fake.provider }, () => new Date(clock));
+  await catalog.put("global", "AWS_REGION", "us-east-1");
+  await catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  const dev = await catalog.createToken("dev", ["dev"]), other = await catalog.createToken("other", ["dev"]);
+  const deps = { catalog, grants, admin: async (r: Request) => r.headers.get("x-test-admin") };
+  const call = (method: string, path: string, token?: string, body?: unknown, admin?: string) => handle(new Request(`https://t.example${path}`, {
+    method, body: body === undefined ? undefined : JSON.stringify(body),
+    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(admin ? { "x-test-admin": admin, "x-tumbler-admin": "1" } : {}) },
+  }), deps);
+  const env = (token = dev, keys = "CLOUDFLARE_API_TOKEN") => call("GET", `/v1/env?keys=${keys}`, token);
+  const tick = (min: number) => { clock += min * 60_000; };
+  return { db, catalog, grants, fake, dev, other, call, env, tick };
+}
+
+const adminGrants = async (s: Awaited<ReturnType<typeof setup>>) => (await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json()).grants;
+
+test("a read-scoped mint key goes active at once and hands out a child, never the parent", async () => {
+  const s = await setup();
+  const r = await s.env();
+  assert.equal(r.status, 200);
+  const body = await r.json();
+  assert.deepEqual(body.env, { CLOUDFLARE_API_TOKEN: "child-1" });
+  assert.deepEqual(s.fake.minted, [{ parent: PARENT, scopes: ["workers:read"] }]);
+  const [g] = await adminGrants(s);
+  assert.equal(g.state, "active");
+  assert.deepEqual(g.scopes, ["workers:read"]);
+  // The same child comes back while it has time left; nothing new is minted.
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+  assert.equal(s.fake.minted.length, 1);
+});
+
+test("the parent never appears in a response, listing or audit row", async () => {
+  const s = await setup();
+  await s.env();
+  await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  const texts = await Promise.all([
+    s.call("GET", "/admin/api/keys", undefined, undefined, "vu@example.com"), s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com"),
+    s.call("GET", "/admin/api/audit", undefined, undefined, "vu@example.com"), s.call("GET", "/v1/keys", s.dev),
+  ].map(async (p) => (await p).text()));
+  for (const t of texts) { assert.ok(!t.includes(PARENT)); assert.ok(!t.includes("child-")); }
+  const audit = JSON.stringify(s.db.raw.prepare("SELECT * FROM audit").all());
+  assert.ok(!audit.includes(PARENT) && !audit.includes("child-"));
+});
+
+test("a write start scope is pending: no token until an admin approves", async () => {
+  const s = await setup();
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: { ...CONFIG, start: ["workers:write"] } });
+  const r = await s.env();
+  assert.equal(r.status, 409);
+  assert.match((await r.json()).error, /needs approval for workers:write/);
+  assert.equal(s.fake.minted.length, 0);
+  assert.equal((await s.env()).status, 409); // still waiting, still nothing
+  const [g] = await adminGrants(s);
+  assert.equal(g.state, "pending");
+  const ok = await s.call("POST", `/admin/api/grants/${g.id}/approve`, undefined, {}, "vu@example.com");
+  assert.equal((await ok.json()).grant.state, "active");
+  assert.deepEqual(s.fake.minted[0].scopes, ["workers:write"]);
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+});
+
+test("a denied grant yields nothing, and the next request starts a new pending grant", async () => {
+  const s = await setup();
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: { ...CONFIG, start: ["workers:write"] } });
+  await s.env();
+  const [g] = await adminGrants(s);
+  await s.call("POST", `/admin/api/grants/${g.id}/deny`, undefined, {}, "vu@example.com");
+  assert.equal((await adminGrants(s)).find((x: any) => x.id === g.id).state, "denied");
+  assert.equal((await s.env()).status, 409);
+  assert.equal(s.fake.minted.length, 0);
+});
+
+test("step-up: a write scope waits while the old child keeps working, then approval mints a wider one", async () => {
+  const s = await setup();
+  await s.env();
+  const up = await (await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN", "AWS_REGION"], scopes: ["workers:write"] })).json();
+  assert.equal(up.grants.length, 1);
+  assert.deepEqual(up.grants[0].requested, ["workers:read", "workers:write"]);
+  assert.equal(up.grants[0].state, "active");
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-1"); // narrower child, unchanged
+  await s.call("POST", `/admin/api/grants/${up.grants[0].id}/approve`, undefined, {}, "vu@example.com");
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
+  assert.deepEqual(s.fake.minted[1].scopes, ["workers:read", "workers:write"]);
+  assert.deepEqual(s.fake.revoked, ["id-1"]); // the narrower child is deleted at the provider
+});
+
+test("step-up deny keeps the narrower child; unknown scopes are refused", async () => {
+  const s = await setup();
+  await s.env();
+  const up = await (await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).json();
+  await s.call("POST", `/admin/api/grants/${up.grants[0].id}/deny`, undefined, {}, "vu@example.com");
+  const [g] = await adminGrants(s);
+  assert.equal(g.state, "active"); assert.equal(g.requested, null); assert.deepEqual(g.scopes, ["workers:read"]);
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+  assert.equal((await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["zones:write"] })).status, 400);
+});
+
+test("a provider failure yields no token and leaves no live grant", async () => {
+  const s = await setup();
+  s.fake.fail = true;
+  const r = await s.env();
+  assert.equal(r.status, 500);
+  assert.equal((await s.env("x")).status, 401);
+  assert.deepEqual(await adminGrants(s), []);
+  // A static key requested with it does not come back alone either: the whole response fails.
+  assert.equal((await s.env(s.dev, "AWS_REGION,CLOUDFLARE_API_TOKEN")).status, 500);
+});
+
+test("expired grants are swept and deleted at the provider; the next request mints fresh", async () => {
+  const s = await setup();
+  await s.env();
+  s.tick(25); // under 10 minutes left: not handed out again
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
+  assert.ok(s.fake.revoked.includes("id-1"));
+  s.tick(31);
+  assert.equal(await s.grants.sweep(), 1);
+  const states = (await adminGrants(s)).map((g: any) => g.state).sort();
+  assert.deepEqual(states, ["expired", "expired"]);
+  assert.ok(s.fake.revoked.includes("id-2"));
+});
+
+test("an approved write grant needs approval again once it expires", async () => {
+  const s = await setup();
+  await s.env();
+  const up = await (await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).json();
+  await s.call("POST", `/admin/api/grants/${up.grants[0].id}/approve`, undefined, {}, "vu@example.com");
+  s.tick(40);
+  await s.grants.sweep();
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-3");
+  assert.deepEqual(s.fake.minted.at(-1)!.scopes, ["workers:read"]); // back to the start scopes
+});
+
+test("revoking a grant deletes the child and stops handing it out", async () => {
+  const s = await setup();
+  await s.env();
+  const [g] = await adminGrants(s);
+  assert.equal((await s.call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, "vu@example.com")).status, 200);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2"); // a fresh read grant
+});
+
+test("an unanswered request lapses to denied", async () => {
+  const s = await setup();
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: { ...CONFIG, start: ["workers:write"] } });
+  await s.env();
+  s.tick(25 * 60);
+  await s.grants.sweep();
+  const [g] = await adminGrants(s);
+  assert.equal(g.state, "denied"); assert.equal(g.decided_by, "timeout");
+});
+
+test("grants are per caller: one token's approval is not another's", async () => {
+  const s = await setup();
+  await s.env();
+  const up = await (await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).json();
+  await s.call("POST", `/admin/api/grants/${up.grants[0].id}/approve`, undefined, {}, "vu@example.com");
+  await s.env(s.other);
+  assert.deepEqual(s.fake.minted.at(-1)!.scopes, ["workers:read"]);
+});
+
+test("rotating a mint key keeps its kind; it can't be turned static, and listing doesn't mint", async () => {
+  const s = await setup();
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", "new-parent");
+  assert.equal((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.kind, "mint:cloudflare");
+  await assert.rejects(s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", "x", { kind: "static" }), /delete the key/);
+  const r = await (await s.call("GET", "/v1/keys", s.dev)).json();
+  assert.deepEqual(r.keys, ["AWS_REGION", "CLOUDFLARE_API_TOKEN"]);
+  assert.equal(s.fake.minted.length, 0);
+  // Admin config is validated: a start scope must exist.
+  const bad = await s.call("PUT", "/admin/api/keys/dev/CF_X", undefined, { value: "p", kind: "mint:cloudflare", config: { ...CONFIG, start: ["nope"] } }, "vu@example.com");
+  assert.equal(bad.status, 400);
+});
+
+test("without the grants module a mint key is refused, never handed out raw", async () => {
+  const s = await setup();
+  const r = await handle(new Request("https://t.example/v1/env?keys=CLOUDFLARE_API_TOKEN", { headers: { authorization: `Bearer ${s.dev}` } }),
+    { catalog: s.catalog, admin: async () => null });
+  assert.equal(r.status, 501);
+  assert.ok(!(await r.text()).includes(PARENT));
+});
+
+test("cloudflare provider: mints an account token with the scopes' groups, expiry and IP lock, and revokes it", async () => {
+  const calls: { method: string; url: string; auth: string; body: any }[] = [];
+  const fetcher = (async (url: string, init: RequestInit) => {
+    calls.push({ method: init.method!, url, auth: (init.headers as any).authorization, body: init.body ? JSON.parse(String(init.body)) : null });
+    if (init.method === "DELETE") return new Response(JSON.stringify({ success: false, errors: [{ code: 1003 }] }), { status: 404 });
+    return new Response(JSON.stringify({ success: true, result: { id: "tok1", value: "cf-child" } }));
+  }) as unknown as typeof fetch;
+  const cf = cloudflare(fetcher), config = { ...CONFIG, ip: ["203.0.113.0/24"] };
+  cf.validate(config);
+  const m = await cf.mint(PARENT, config, ["workers:write"], new Date("2026-10-20T12:30:00.123Z"), "tumbler g_1 dev");
+  assert.deepEqual(m, { id: "tok1", value: "cf-child" });
+  const c = calls[0];
+  assert.equal(c.url, `https://api.cloudflare.com/client/v4/accounts/${ACCT}/tokens`);
+  assert.equal(c.auth, `Bearer ${PARENT}`);
+  assert.equal(c.body.expires_on, "2026-10-20T12:30:00Z");
+  assert.deepEqual(c.body.policies[0].permission_groups, [{ id: READ }, { id: WRITE }]);
+  assert.deepEqual(c.body.policies[0].resources, { [`com.cloudflare.api.account.${ACCT}`]: "*" });
+  assert.deepEqual(c.body.condition, { "request.ip": { in: ["203.0.113.0/24"] } });
+  await cf.revoke(PARENT, config, "tok1"); // a 404 means already gone
+  assert.equal(calls[1].url, `https://api.cloudflare.com/client/v4/accounts/${ACCT}/tokens/tok1`);
+  assert.throws(() => cf.validate({ ...CONFIG, account_id: "nope" }), /account_id/);
+});
+
+test("cloudflare provider: an API error surfaces as a status and codes only", async () => {
+  const cf = cloudflare((async () => new Response(JSON.stringify({ success: false, errors: [{ code: 9109, message: "detail" }] }), { status: 403 })) as any);
+  await assert.rejects(cf.mint(PARENT, CONFIG, ["workers:read"], new Date(), "x"), (e: any) => e.status === 502 && /403 \(9109\)/.test(e.message) && !e.message.includes(PARENT));
+});
+
+// --- the CLI end to end ---
+
+const exec = promisify(execFile);
+const CLI = new URL("../../cli/tumbler", import.meta.url).pathname;
+const s = await setup();
+const server = createServer(async (req, res) => {
+  let body = ""; for await (const c of req) body += c;
+  const r = await handle(new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers: req.headers as any, body: body || undefined }),
+    { catalog: s.catalog, grants: s.grants, admin: async () => "vu@example.com" });
+  res.writeHead(r.status, Object.fromEntries(r.headers)); res.end(await r.text());
+});
+await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+after(() => server.close());
+const home = mkdtempSync(join(tmpdir(), "tumbler-grants-"));
+writeFileSync(join(home, ".tumbler"), "CLOUDFLARE_API_TOKEN\n");
+const { CLOUDFLARE_API_TOKEN: _c, TUMBLER_URL: _u, TUMBLER_TOKEN: _t, TUMBLER_PROJECT: _j, ...baseEnv } = process.env;
+const cli = (args: string[]) => exec(CLI, args, { cwd: home, env: { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run"),
+  TUMBLER_URL: `http://127.0.0.1:${(server.address() as any).port}`, TUMBLER_TOKEN: s.dev, TUMBLER_TTL: "0", TUMBLER_AUTO: "off" } });
+const printToken = ["node", "-e", "process.stdout.write(String(process.env.CLOUDFLARE_API_TOKEN))"];
+
+test("cli: run gets a read child; --scope for a write stops until approved, then runs with the wider child", async () => {
+  assert.equal((await cli(["run", "--", ...printToken])).stdout, "child-1");
+  const err = await cli(["run", "--scope", "workers:write", "--", ...printToken]).then(() => null, (e) => e);
+  assert.ok(err, "the command must not start while approval is pending");
+  assert.match(err.stderr, /needs approval for workers:read, workers:write in \/admin/);
+  assert.equal(err.stdout, "");
+  const [g] = await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json().then((b) => b.grants);
+  await s.call("POST", `/admin/api/grants/${g.id}/approve`, undefined, {}, "vu@example.com");
+  assert.equal((await cli(["run", "--scope", "workers:write", "--", ...printToken])).stdout, "child-2");
+  assert.equal((await cli(["keys"])).stdout, "CLOUDFLARE_API_TOKEN\n".replace(/^/, "AWS_REGION\n"));
+});

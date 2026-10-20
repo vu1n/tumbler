@@ -1,0 +1,235 @@
+// grants.ts — minted keys. A key of kind `mint:<provider>` holds a parent credential; callers never
+// see it. Each caller gets a grant on the key: a set of approved scopes and a short-lived child
+// credential minted for exactly those scopes. The grant's state decides what the caller's env holds:
+//
+//   pending ──approve──▶ active ──expire/revoke──▶ expired | revoked
+//      └──deny──▶ denied      └─step-up─▶ active + requested ──approve──▶ active (wider child)
+//
+// Only `active` ever yields a credential. Every other state, and every failure, yields none.
+import { type Caller, type Catalog, Refused } from "./catalog.ts";
+import { open, seal } from "./crypto.ts";
+
+export interface Minted { id: string; value: string }
+export interface MintConfig { ttl_minutes?: number; start?: string[]; scopes?: Record<string, unknown>; [k: string]: unknown }
+export interface Provider {
+  validate(config: MintConfig): void;
+  mint(parent: string, config: MintConfig, scopes: string[], expiresAt: Date, label: string): Promise<Minted>;
+  revoke(parent: string, config: MintConfig, childId: string): Promise<void>;
+}
+
+// Why: approval is the line between "reads" and "changes". A scope named `<thing>:read` is granted
+// on request; every other scope waits for an admin.
+export const autoApproved = (scope: string) => scope.endsWith(":read");
+
+export const DEFAULT_TTL_MIN = 30, MIN_TTL_MIN = 15, MAX_TTL_MIN = 24 * 60;
+// A child is handed out again only while it has this long left, so a CLI cache (5 minutes by
+// default) can never hold one past its expiry.
+export const REUSE_MARGIN_MS = 10 * 60 * 1000;
+export const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // an unanswered request lapses to denied
+
+export interface KeyRow { scope: string; name: string; kind: string; config: string; iv: ArrayBuffer | Uint8Array; ciphertext: ArrayBuffer | Uint8Array }
+export interface GrantRow {
+  id: string; caller: string; project: string | null; key_scope: string; name: string; state: string;
+  scopes: string[]; requested: string[] | null; child_id: string | null; expires_at: string | null;
+  decided_by: string | null; created_at: string; updated_at: string;
+}
+
+const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as ArrayBuffer);
+const union = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort();
+const grantScope = (id: string) => `grant:${id}`; // AAD for the sealed child, apart from every key row
+const LIVE = "state IN ('pending', 'active')";
+
+export class Grants {
+  catalog: Catalog; providers: Record<string, Provider>; now: () => Date;
+  constructor(catalog: Catalog, providers: Record<string, Provider>, now = () => new Date()) {
+    this.catalog = catalog; this.providers = providers; this.now = now;
+  }
+  get db() { return this.catalog.db; }
+
+  provider(kind: string): Provider {
+    const p = kind.startsWith("mint:") ? this.providers[kind.slice(5)] : undefined;
+    if (!p) throw new Refused(400, `unknown key kind: ${kind}`);
+    return p;
+  }
+
+  // Checks a mint key's config before it is saved: known scopes, a sane TTL, start scopes that exist.
+  validate(kind: string, config: MintConfig) {
+    const p = this.provider(kind);
+    const scopes = Object.keys(config.scopes ?? {});
+    if (!scopes.length) throw new Refused(400, "config.scopes names no scopes");
+    for (const s of config.start ?? []) if (!scopes.includes(s)) throw new Refused(400, `start scope ${s} is not in config.scopes`);
+    const ttl = config.ttl_minutes ?? DEFAULT_TTL_MIN;
+    if (!(ttl >= MIN_TTL_MIN && ttl <= MAX_TTL_MIN)) throw new Refused(400, `ttl_minutes must be ${MIN_TTL_MIN}..${MAX_TTL_MIN}`);
+    p.validate(config);
+  }
+
+  // The child credential for `caller` on a mint key, as /v1/env returns it. Throws unless the grant
+  // is active: a new grant needing approval, or one waiting on it, is a 409 and yields nothing.
+  async issue(caller: Caller, project: string | null, row: KeyRow): Promise<string> {
+    let g = await this.live(caller, project, row.name);
+    if (g?.state === "active" && !this.fresh(g)) { await this.close(g, "expired", "system"); g = null; }
+    if (!g) g = await this.open(caller, project, row, this.config(row).start ?? []);
+    if (g.state !== "active") throw this.waiting(g);
+    return this.child(g);
+  }
+
+  // Ask for more scopes on a mint key. Read scopes are added at once (a wider child is minted);
+  // anything else is recorded as `requested` and waits for an admin while the old child keeps working.
+  async stepUp(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
+    const config = this.config(row), known = Object.keys(config.scopes ?? {});
+    for (const s of scopes) if (!known.includes(s)) throw new Refused(400, `${row.name} has no scope ${s}`);
+    let g = await this.live(caller, project, row.name);
+    if (g?.state === "active" && !this.fresh(g)) { await this.close(g, "expired", "system"); g = null; }
+    if (!g) return this.open(caller, project, row, union(config.start ?? [], scopes));
+    const want = union(g.state === "pending" ? g.requested ?? [] : union(g.scopes, g.requested ?? []), scopes);
+    if (g.state === "pending") { await this.set(g.id, { requested: want }); return { ...g, requested: want }; }
+    if (want.every((s) => g!.scopes.includes(s))) return g;
+    if (want.every((s) => g!.scopes.includes(s) || autoApproved(s))) return this.mintFor(g, row, want, "policy");
+    await this.set(g.id, { requested: want });
+    await this.catalog.audit(caller.name, "grant-step-up", project, [`${row.name}:${want.join("+")}`]);
+    return { ...g, requested: want };
+  }
+
+  async decide(id: string, approve: boolean, who: string): Promise<GrantRow> {
+    const g = await this.get(id);
+    if (!g || !["pending", "active"].includes(g.state) || !g.requested) throw new Refused(404, `no grant ${id} waiting for a decision`);
+    if (approve) {
+      const row = await this.catalog.keyRow(g.key_scope, g.name);
+      if (!row) { await this.close(g, "revoked", who); throw new Refused(404, `key ${g.name} is gone`); }
+      return this.mintFor(g, row, g.requested, who);
+    }
+    if (g.state === "pending") await this.set(id, { state: "denied", requested: null, decided_by: who });
+    else await this.set(id, { requested: null, decided_by: who }); // the old, narrower child stays
+    await this.catalog.audit(who, "grant-deny", g.project, [`${g.name}:${g.requested.join("+")}`]);
+    return (await this.get(id))!;
+  }
+
+  async revoke(id: string, who: string) {
+    const g = await this.get(id);
+    if (!g || !["pending", "active"].includes(g.state)) throw new Refused(404, `no live grant ${id}`);
+    await this.close(g, "revoked", who);
+  }
+
+  // Expire every active grant past its child's expiry and delete the child at the provider.
+  async sweep() {
+    const { results } = await this.db.prepare("SELECT * FROM grants WHERE state = 'active' AND expires_at <= ?")
+      .bind(this.now().toISOString()).all<any>();
+    for (const r of results) await this.close(parse(r), "expired", "system");
+    // Nobody answered: a pending grant lapses to denied, and a waiting step-up is dropped.
+    const stale = new Date(this.now().getTime() - PENDING_TTL_MS).toISOString(), t = this.now().toISOString();
+    await this.db.prepare("UPDATE grants SET state = 'denied', requested = NULL, decided_by = 'timeout', updated_at = ? WHERE state = 'pending' AND updated_at <= ?").bind(t, stale).run();
+    await this.db.prepare("UPDATE grants SET requested = NULL, updated_at = ? WHERE state = 'active' AND requested IS NOT NULL AND updated_at <= ?").bind(t, stale).run();
+    return results.length;
+  }
+
+  async list(): Promise<GrantRow[]> {
+    const { results } = await this.db.prepare(
+      `SELECT * FROM grants ORDER BY CASE WHEN ${LIVE} THEN 0 ELSE 1 END, updated_at DESC LIMIT 200`).all<any>();
+    return results.map(parse);
+  }
+
+  // --- internals ---
+
+  config(row: KeyRow): MintConfig { return JSON.parse(row.config || "{}"); }
+  fresh(g: GrantRow) { return !!g.expires_at && Date.parse(g.expires_at) - this.now().getTime() > REUSE_MARGIN_MS; }
+  waiting(g: GrantRow) {
+    return new Refused(409, `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in /admin (grant ${g.id}); run again once approved`);
+  }
+
+  async get(id: string) {
+    const r = await this.db.prepare("SELECT * FROM grants WHERE id = ?").bind(id).first<any>();
+    return r ? parse(r) : null;
+  }
+  async live(caller: Caller, project: string | null, name: string) {
+    const r = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND project IS ? AND name = ? AND ${LIVE} ORDER BY created_at DESC LIMIT 1`)
+      .bind(caller.name, project, name).first<any>();
+    return r ? parse(r) : null;
+  }
+
+  // A new grant: active at once when every scope is a read, otherwise pending with nothing minted.
+  async open(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
+    if (!scopes.length) throw new Refused(400, `${row.name} has no start scopes; ask for one with --scope`);
+    const t = this.now().toISOString(), id = "g_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const g: GrantRow = { id, caller: caller.name, project, key_scope: row.scope, name: row.name, state: "pending",
+      scopes: [], requested: scopes, child_id: null, expires_at: null, decided_by: null, created_at: t, updated_at: t };
+    if (scopes.every(autoApproved)) {
+      // Why: mint before inserting, so a provider failure leaves no grant behind, never a live one.
+      const minted = await this.mint(row, g, scopes);
+      await this.insert({ ...g, state: "active" });
+      await this.store(id, row.name, minted, scopes, "policy");
+      await this.catalog.audit(caller.name, "grant-mint", project, [`${row.name}:${scopes.join("+")}`]);
+      return (await this.get(id))!;
+    }
+    await this.insert(g);
+    await this.catalog.audit(caller.name, "grant-pending", project, [`${row.name}:${scopes.join("+")}`]);
+    return g;
+  }
+
+  async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string): Promise<GrantRow> {
+    const minted = await this.mint(row, g, scopes), old = g.child_id;
+    await this.store(g.id, row.name, minted, scopes, who);
+    if (old) await this.revokeChild(row, old);
+    await this.catalog.audit(who, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`]);
+    return (await this.get(g.id))!;
+  }
+
+  async mint(row: KeyRow, g: GrantRow, scopes: string[]) {
+    const config = this.config(row), ttl = config.ttl_minutes ?? DEFAULT_TTL_MIN;
+    const expires = new Date(this.now().getTime() + ttl * 60_000);
+    const parent = await this.parent(row);
+    const minted = await this.provider(row.kind).mint(parent, config, scopes, expires, `tumbler ${g.id} ${g.caller}`);
+    return { ...minted, expires_at: expires.toISOString() };
+  }
+
+  async store(id: string, name: string, m: Minted & { expires_at: string }, scopes: string[], who: string) {
+    const { iv, ciphertext } = await seal(this.catalog.key, grantScope(id), name, m.value);
+    await this.db.prepare(
+      `UPDATE grants SET state = 'active', scopes = ?, requested = NULL, child_id = ?, iv = ?, ciphertext = ?,
+         expires_at = ?, decided_by = ?, updated_at = ? WHERE id = ?`,
+    ).bind(JSON.stringify(scopes), m.id, iv, ciphertext, m.expires_at, who, this.now().toISOString(), id).run();
+  }
+
+  async child(g: GrantRow): Promise<string> {
+    const r = await this.db.prepare("SELECT iv, ciphertext FROM grants WHERE id = ?").bind(g.id).first<any>();
+    if (!r?.iv) throw new Refused(409, `${g.name} has no live credential; run again`);
+    return open(this.catalog.key, grantScope(g.id), g.name, bytes(r.iv), bytes(r.ciphertext));
+  }
+
+  // End a grant: forget its child here first, then delete it at the provider (best effort: it
+  // expires there on its own if the provider can't be reached).
+  async close(g: GrantRow, state: "expired" | "revoked", who: string) {
+    await this.db.prepare("UPDATE grants SET state = ?, requested = NULL, iv = NULL, ciphertext = NULL, decided_by = ?, updated_at = ? WHERE id = ?")
+      .bind(state, who, this.now().toISOString(), g.id).run();
+    const row = g.child_id ? await this.catalog.keyRow(g.key_scope, g.name) : null;
+    if (row && g.child_id) await this.revokeChild(row, g.child_id);
+    await this.catalog.audit(who, state === "expired" ? "grant-expire" : "grant-revoke", g.project, [g.name]);
+  }
+
+  async revokeChild(row: KeyRow, childId: string) {
+    try { await this.provider(row.kind).revoke(await this.parent(row), this.config(row), childId); }
+    catch (e) { console.error("tumbler: revoke failed", row.name, (e as Error).message); }
+  }
+
+  parent(row: KeyRow) { return open(this.catalog.key, row.scope, row.name, bytes(row.iv), bytes(row.ciphertext)); }
+
+  async insert(g: GrantRow) {
+    await this.db.prepare(
+      `INSERT INTO grants (id, caller, project, key_scope, name, state, scopes, requested, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(g.id, g.caller, g.project, g.key_scope, g.name, g.state, JSON.stringify(g.scopes),
+      g.requested ? JSON.stringify(g.requested) : null, g.created_at, g.updated_at).run();
+  }
+
+  async set(id: string, f: { state?: string; requested?: string[] | null; decided_by?: string }) {
+    const cols = Object.keys(f), vals = cols.map((c) => c === "requested" ? (f.requested ? JSON.stringify(f.requested) : null) : (f as any)[c]);
+    await this.db.prepare(`UPDATE grants SET ${cols.map((c) => `${c} = ?`).join(", ")}, updated_at = ? WHERE id = ?`)
+      .bind(...vals, this.now().toISOString(), id).run();
+  }
+}
+
+// Never the sealed child: iv and ciphertext stay in D1.
+function parse(r: any): GrantRow {
+  return { id: r.id, caller: r.caller, project: r.project, key_scope: r.key_scope, name: r.name, state: r.state,
+    scopes: JSON.parse(r.scopes || "[]"), requested: r.requested ? JSON.parse(r.requested) : null, child_id: r.child_id,
+    expires_at: r.expires_at, decided_by: r.decided_by, created_at: r.created_at, updated_at: r.updated_at };
+}

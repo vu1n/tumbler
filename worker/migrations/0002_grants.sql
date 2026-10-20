@@ -1,0 +1,25 @@
+-- Minted keys. A key whose kind is 'mint:<provider>' holds a parent credential (sealed, like any
+-- value) and a non-secret config: which scopes exist and what each maps to at the provider.
+ALTER TABLE keys ADD COLUMN config TEXT NOT NULL DEFAULT '{}';
+
+-- One grant per (caller, project, key): the scopes a caller holds on a minted key and the child
+-- credential minted for them. state: pending | active | denied | expired | revoked. A non-null
+-- `requested` on an active grant is a step-up waiting for approval; the old child keeps working.
+CREATE TABLE grants (
+  id          TEXT PRIMARY KEY,
+  caller      TEXT NOT NULL,
+  project     TEXT,
+  key_scope   TEXT NOT NULL,
+  name        TEXT NOT NULL,
+  state       TEXT NOT NULL,
+  scopes      TEXT NOT NULL DEFAULT '[]',
+  requested   TEXT,
+  child_id    TEXT,
+  iv          BLOB,
+  ciphertext  BLOB,
+  expires_at  TEXT,
+  decided_by  TEXT,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX grants_live ON grants (caller, name, state);

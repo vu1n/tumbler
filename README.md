@@ -52,7 +52,7 @@ Elsewhere (your laptop, CI), set `TUMBLER_URL` and `TUMBLER_TOKEN` instead of th
 ## CLI
 
 ```
-tumbler run [-p project] [-k A,B] -- <cmd> [args...]
+tumbler run [-p project] [-k A,B] [--scope a,b] -- <cmd> [args...]
 tumbler keys [-p project]     names you can read, never values
 tumbler whoami                the token's name and pin
 tumbler auto [--dry-run]      work out which keys this repo needs; write .tumbler
@@ -86,6 +86,50 @@ never wider access. Without the `AI` binding, auto uses the rules only.
 private unix socket (`$XDG_RUNTIME_DIR/tumbler` or `~/.cache/tumbler`, mode 0700) that exits after
 30 minutes unused. It is keyed by broker and token, so one token never gets another's values.
 
+## Minted keys (`mint:cloudflare`)
+
+A key of kind `mint:cloudflare` doesn't hand out its value. The value is a **parent** Cloudflare
+token, and every caller gets its own short-lived **child** token with only the scopes it was granted.
+The parent never leaves the broker.
+
+Set one up in `/admin`:
+1. Create an account-owned Cloudflare token with **Account > Account API Tokens > Edit** (it can
+   create other tokens and nothing else). Save it as the key's value with kind `mint:cloudflare`.
+2. Give it a config. Scope names are yours; each maps to Cloudflare permission group ids
+   (`GET /accounts/{id}/tokens/permission_groups`; use ids, since names are cosmetic):
+
+   ```json
+   { "account_id": "<32-hex id>", "ttl_minutes": 30, "start": ["workers:read"],
+     "scopes": { "workers:read": ["<group id>"], "workers:write": ["<group id>", "<group id>"] },
+     "ip": ["203.0.113.0/24"] }
+   ```
+
+Each caller holds one **grant** per minted key, and its state decides what the env var holds:
+
+| State | `CLOUDFLARE_API_TOKEN` in the command |
+|---|---|
+| pending (waiting for you in `/admin`) | not set: the command doesn't start |
+| active | a child with exactly the grant's scopes |
+| active, with a step-up waiting | the old, narrower child |
+| denied, expired, revoked | not set: the next run starts a new grant |
+
+- A scope named `<thing>:read` is granted on request. Any other scope waits for approval in `/admin`
+  (Grants), and an unanswered request lapses to denied after a day.
+- `tumbler run --scope workers:write -- wrangler deploy` asks for more. Until you approve, the
+  command doesn't start. After you approve, the same command runs with a wider child, and the narrower
+  child is deleted at Cloudflare.
+- Children expire after `ttl_minutes` (15 to 1440, default 30). A cron every five minutes expires
+  grants and deletes their children at Cloudflare. Approval lasts as long as the child, so a write
+  scope needs approving again after expiry.
+- Failures never widen anything. A Cloudflare error, a pending or denied grant, or a broker that
+  can't be reached all mean the command gets no token. No failure falls back to the parent or to a
+  broader child.
+- Rotating the parent keeps the key's kind. A minted key can't be turned static, because that would
+  hand its parent out; delete it and add it again instead.
+
+Other providers plug in as a `Provider` (`mint`, `revoke`, `validate` in `worker/src/grants.ts`).
+The state machine is the same for each.
+
 ## API
 
 | Route | Auth | |
@@ -93,15 +137,17 @@ private unix socket (`$XDG_RUNTIME_DIR/tumbler` or `~/.cache/tumbler`, mode 0700
 | `GET /v1/env?project=&keys=A,B` | caller token | `{"env": {...}}`, project over global; unknown names are a 404 |
 | `GET /v1/whoami` | caller token | `{"name", "projects"}` |
 | `POST /v1/auto?project=` | caller token | body `{"signals": ["file:…", "dep:…"]}`; returns `{"project", "keys": [{"name", "why"}]}` |
+| `GET /v1/keys?project=` | caller token | `{"project", "keys": [names]}`; never values, never mints |
+| `POST /v1/step-up?project=` | caller token | body `{"keys": [...], "scopes": [...]}`; returns each minted key's grant state |
 | `GET /cli` | none | the CLI script (no secrets in it) |
-| `/admin`, `/admin/api/{keys,tokens,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1` |
+| `/admin`, `/admin/api/{keys,tokens,grants,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1`; `POST grants/:id/approve` or `/deny`, `DELETE grants/:id` revokes |
 
 Every read and change is audited by key name, never by value.
 
 ## Not in this slice
 
-Minting short-lived keys (AWS STS, Cloudflare API tokens, OpenRouter, Tailscale) and OAuth provider
-connections. The catalog's `kind` column is where they plug in.
+Providers beyond Cloudflare (AWS STS, GitHub App tokens, OpenRouter, Tailscale), and moving static
+keys and a repo's `.tumbler` set onto grants, so a new key in the set waits for approval too.
 
 ## Develop
 

@@ -4,6 +4,8 @@ import { handle } from "./app.ts";
 import { Catalog } from "./catalog.ts";
 import { masterKey } from "./crypto.ts";
 import { s1Client } from "./auto.ts";
+import { cloudflare } from "./cloudflare.ts";
+import { Grants } from "./grants.ts";
 // Bundled as text by the "rules" entry in wrangler.jsonc.
 import CLI from "../../cli/tumbler";
 
@@ -25,15 +27,24 @@ async function loadKey(env: Env) {
   return key.key;
 }
 
+const providers = { cloudflare: cloudflare() };
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const catalog = new Catalog(env.DB, await loadKey(env));
+    const grants = new Grants(catalog, providers);
     const admins = (env.TUMBLER_ADMINS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
     return handle(request, {
       catalog,
+      grants,
       cli: CLI,
       s1: s1Client(env.AI, env.TUMBLER_AUTO_MODEL || "clef"),
       admin: (r) => accessAdmin(r, { teamDomain: env.ACCESS_TEAM_DOMAIN, aud: env.ACCESS_AUD, admins }),
     });
+  },
+  // Expire grants whose children are past expiry (and delete those children at the provider),
+  // and lapse requests nobody answered. The cron is in wrangler.jsonc.
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(new Grants(new Catalog(env.DB, await loadKey(env)), providers).sweep());
   },
 };
