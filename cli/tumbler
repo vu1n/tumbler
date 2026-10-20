@@ -2,10 +2,17 @@
 // tumbler — run a command with env vars from the tumbler broker. Values live only in the process
 // you run and in a short-lived in-memory cache; nothing is written to disk.
 //
-//   tumbler run [-p project] [-k A,B] [--scope a,b] -- <cmd> [args...]
+//   tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] -- <cmd> [args...]
 //                                    --scope asks for more scopes on the set's minted keys
 //                                    (e.g. workers:write); reads are granted at once, the rest
 //                                    wait for approval in /admin and the command doesn't start
+//                                    When the command fails, run refetches its keys and reports
+//                                    which changed and which fail their check (names, never values)
+//                                    --retry reruns it once with the new values, only if a key changed
+//                                    --watch keeps a long-running command on current keys: when a
+//                                    key whose new value passed its check on save changes, it
+//                                    restarts the command with that value, and goes back to the old
+//                                    one if the restart dies within TUMBLER_WATCH_GRACE seconds (10)
 //   tumbler keys [-p project]        names this caller can read (never values)
 //   tumbler whoami                   which token the broker sees, and its pin
 //   tumbler auto [-p project] [--dry-run] [--force]
@@ -15,7 +22,8 @@
 //
 // Config (environment): TUMBLER_URL (required), TUMBLER_TOKEN (optional: leave unset when the
 // environment's network secret adds the Authorization header), TUMBLER_TTL seconds (default 300,
-// 0 disables the cache), TUMBLER_PROJECT (default project). A `.tumbler` file in the working
+// 0 disables the cache), TUMBLER_PROJECT (default project), TUMBLER_WATCH seconds between --watch
+// polls (default 30), TUMBLER_DIAGNOSE=off to skip the failure report. A `.tumbler` file in the working
 // directory or any parent lists the key names a project wants, one per line, plus an optional
 // `project = <name>` line. With no `.tumbler`, `run` writes one with `tumbler auto` first and passes
 // only those keys; if auto fails the command doesn't start. TUMBLER_AUTO=off skips auto and fetches
@@ -98,7 +106,7 @@ function daemon() {
         const path = envPath(req.project, req.keys), slot = createHash("sha256").update(`${req.url}\0${req.token}\0${path}`).digest("hex");
         const hit = cache.get(slot);
         // Why: the caller's TTL, not the one the helper started with, so lowering it takes effect.
-        if (hit && Date.now() - hit.at < req.ttl) return reply({ env: hit.env });
+        if (hit && !req.fresh && Date.now() - hit.at < req.ttl) return reply({ env: hit.env });
         const { env } = await brokerGet(path, { url: req.url, token: req.token });
         cache.set(slot, { at: Date.now(), env });
         reply({ env });
@@ -131,9 +139,10 @@ async function cached(req) {
   return null; // helper didn't come up; caller fetches directly
 }
 
-async function fetchEnv(project, keys) {
+// `fresh` skips a cached copy (and refreshes it), as a failed run's report needs.
+async function fetchEnv(project, keys, fresh = false) {
   if (TTL > 0) {
-    const r = await cached({ op: "get", project, keys, ttl: TTL, ...callerCfg() });
+    const r = await cached({ op: "get", project, keys, ttl: TTL, fresh, ...callerCfg() });
     if (r?.error) throw new Error(r.error);
     if (r?.env) return r.env;
   }
@@ -235,16 +244,18 @@ function manifest() {
 
 function parseFlags(args) {
   const m = manifest();
-  let project = process.env.TUMBLER_PROJECT || m.project, keys = m.keys, rest = [], picked = m.found, scopes = [];
+  let project = process.env.TUMBLER_PROJECT || m.project, keys = m.keys, rest = [], picked = m.found, scopes = [], retry = false, watch = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--") { rest = args.slice(i + 1); break; }
     if (a === "-p" || a === "--project") project = args[++i];
     else if (a === "-k" || a === "--keys") { keys = String(args[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean); picked = true; }
     else if (a === "--scope") scopes.push(...String(args[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+    else if (a === "--retry") retry = true;
+    else if (a === "--watch") watch = true;
     else { rest = args.slice(i); break; }
   }
-  return { project, keys, rest, picked, scopes };
+  return { project, keys, rest, picked, scopes, retry, watch };
 }
 
 // --- commands --------------------------------------------------------------------------------
@@ -275,8 +286,8 @@ async function stepUp(project, keys, scopes) {
 }
 
 async function run(args) {
-  let { project, keys, rest, picked, scopes } = parseFlags(args);
-  if (!rest.length) die("usage: tumbler run [-p project] [-k A,B] [--scope a,b] -- <cmd> [args...]", 2);
+  let { project, keys, rest, picked, scopes, retry, watch } = parseFlags(args);
+  if (!rest.length) die("usage: tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] -- <cmd> [args...]", 2);
   // No .tumbler and no -k: work the set out once and write it down, so later runs and reviewers see it.
   if (!picked && !["0", "off", "false", "no"].includes((process.env.TUMBLER_AUTO ?? "").toLowerCase())) {
     // Why: neither failure may widen the set to every key the token can read. If auto can't pick,
@@ -296,22 +307,106 @@ async function run(args) {
     }
   }
   if (scopes.length) await stepUp(project, picked ? keys : null, scopes);
-  let env;
   // Why: an empty picked set means "none", not "everything" (which is what /v1/env does with no keys).
-  try { env = picked && !keys.length ? {} : await fetchEnv(project, keys); } catch (e) { die(e.message); }
+  const load = (fresh) => picked && !keys.length ? Promise.resolve({}) : fetchEnv(project, keys, fresh);
+  let env;
+  try { env = await load(false); } catch (e) { die(e.message); }
   // Why: under a shim, `rest[0]` is the shim's own name; resolve past the shim dir so it can't loop.
   const cmd = process.env.TUMBLER_SHIMMED ? realBinary(rest[0]) ?? die(`no ${rest[0]} on PATH outside the shims`, 127) : rest[0];
-  const child = spawn(cmd, rest.slice(1), { stdio: "inherit", env: { ...process.env, ...env, TUMBLER_SHIMMED: "" } });
-  const forward = ["SIGINT", "SIGTERM", "SIGHUP"].map((sig) => [sig, () => child.kill(sig)]);
+  const state = { env, child: start(cmd, rest.slice(1), env) };
+  const forward = ["SIGINT", "SIGTERM", "SIGHUP"].map((sig) => [sig, () => state.child.kill(sig)]);
   for (const [sig, fn] of forward) process.on(sig, fn);
-  child.on("error", (e) => die(`${rest[0]}: ${e.message}`, 127));
-  child.on("exit", (code, sig) => {
-    if (!sig) process.exit(code ?? 1);
-    // Why: drop our forwarders first, or they'd swallow the re-raised signal and we'd exit 0.
-    for (const [s, fn] of forward) process.off(s, fn);
-    process.kill(process.pid, sig);
-    process.exit(128 + (constants.signals[sig] ?? 1)); // in case the signal is ignored here
-  });
+  const q = project ? `?project=${encodeURIComponent(project)}` : "";
+  let r = watch ? await watching(state, q, keys, picked, load, cmd, rest.slice(1)) : await state.child.done;
+  if (r.code && !["0", "off", "false", "no"].includes((process.env.TUMBLER_DIAGNOSE ?? "").toLowerCase()) && Object.keys(state.env).length) {
+    const changed = await diagnose(r.code, state.env, q, load, retry);
+    if (retry && changed) r = await (state.child = start(cmd, rest.slice(1), changed)).done;
+  }
+  if (r.error) die(`${rest[0]}: ${r.error.message}`, 127);
+  if (!r.sig) process.exit(r.code ?? 1);
+  // Why: drop our forwarders first, or they'd swallow the re-raised signal and we'd exit 0.
+  for (const [s, fn] of forward) process.off(s, fn);
+  process.kill(process.pid, r.sig);
+  process.exit(128 + (constants.signals[r.sig] ?? 1)); // in case the signal is ignored here
+}
+
+const say = (msg) => process.stderr.write(`tumbler: ${msg}\n`);
+const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms).unref());
+
+// The command, with `done` settling once it exits: {code, sig} or {error} when it couldn't start.
+function start(cmd, argv, env) {
+  const child = spawn(cmd, argv, { stdio: "inherit", env: { ...process.env, ...env, TUMBLER_SHIMMED: "" } });
+  child.done = new Promise((ok) => { child.on("exit", (code, sig) => ok({ code, sig })); child.on("error", (error) => ok({ error })); });
+  return child;
+}
+
+async function stop(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  if (!await Promise.race([child.done, sleep(10_000).then(() => null)])) child.kill("SIGKILL");
+  await child.done;
+}
+
+// A failed command: refetch its keys, name the ones that changed and run each key's check, so the
+// report says whether a key is the likely cause. Names and statuses only, never a value.
+// Returns the new env when a key changed (for --retry), otherwise null.
+async function diagnose(code, used, q, load, retry) {
+  say(`the command exited ${code}; checking its keys`);
+  let fresh = null, checks = {};
+  try { fresh = await load(true); } catch (e) { say(`  could not refetch them (${e.message})`); }
+  const names = Object.keys(used).sort();
+  try { checks = (await brokerCall("POST", `/v1/check${q}`, { keys: names })).checks; } catch (e) { say(`  could not run their checks (${e.message})`); }
+  const changed = fresh ? names.filter((n) => fresh[n] !== used[n]) : [];
+  const failing = names.filter((n) => checks[n]?.status === "invalid"), checked = names.filter((n) => checks[n] && checks[n].status !== "none");
+  for (const n of names) {
+    const c = checks[n], parts = [];
+    if (changed.includes(n)) parts.push("changed since the command started");
+    if (c?.status === "ok") parts.push("passes its check");
+    else if (c?.status === "invalid") parts.push(`fails its check: ${c.detail}`);
+    else if (c?.status === "error") parts.push(c.detail);
+    else if (c?.status === "none") parts.push("has no check");
+    if (parts.length) say(`  ${n} ${parts.join("; ")}`);
+  }
+  if (changed.length) say(retry ? "a key changed; running once more with the new values" : "a key changed; run again, or pass --retry to rerun automatically");
+  else if (failing.length) say(`${failing.join(", ")} ${failing.length === 1 ? "fails its check; rotate it" : "fail their checks; rotate them"} in /admin`);
+  else if (checked.length && checked.every((n) => checks[n].status === "ok")) {
+    say(`no key changed and every checked key passes, so the failure is probably not a key problem${checked.length < names.length ? " (keys without a check can't be ruled out)" : ""}`);
+  }
+  return changed.length ? fresh : null;
+}
+
+// --watch: poll the keys' revisions, and restart the command when a key changes whose new value
+// passed its check on save. A key saved unchecked is reported, never pushed. Returns the exit of
+// the command once it ends on its own.
+async function watching(state, q, keys, picked, load, cmd, argv) {
+  const poll = Number(process.env.TUMBLER_WATCH ?? 30) * 1000, grace = Number(process.env.TUMBLER_WATCH_GRACE ?? 10) * 1000;
+  const path = `/v1/revs${q}${picked && keys.length ? `${q ? "&" : "?"}keys=${encodeURIComponent(keys.join(","))}` : ""}`;
+  let known;
+  try { known = (await brokerGet(path)).keys; } catch (e) { say(`--watch is off: ${e.message}`); return state.child.done; }
+  for (;;) {
+    const ended = await Promise.race([state.child.done, sleep(poll).then(() => null)]);
+    if (ended) return ended;
+    let now;
+    try { now = (await brokerGet(path)).keys; } catch { continue; } // the broker is down: keep what runs
+    const changed = Object.keys(now).filter((n) => n in state.env && known[n] && now[n].rev !== known[n].rev);
+    for (const n of changed) known[n] = now[n];
+    const push = changed.filter((n) => now[n].checked);
+    for (const n of changed.filter((n) => !now[n].checked)) say(`${n} changed but its new value wasn't checked when it was saved; keeping the old one (restart to pick it up)`);
+    if (!push.length) continue;
+    let fresh;
+    try { fresh = await load(true); } catch (e) { say(`${push.join(", ")} changed but could not be fetched (${e.message}); keeping the old values`); continue; }
+    const prev = state.env, next = { ...prev };
+    for (const n of push) if (n in fresh) next[n] = fresh[n];
+    say(`${push.join(", ")} changed; restarting the command with the new value${push.length > 1 ? "s" : ""}`);
+    await stop(state.child);
+    state.env = next; state.child = start(cmd, argv, next);
+    const early = await Promise.race([state.child.done, sleep(grace).then(() => null)]);
+    if (early && (early.error || early.sig || early.code)) {
+      // Why the old values: a value that passed its check can still break this command; keep it running.
+      say(`the restarted command exited within ${grace / 1000}s; going back to the previous value${push.length > 1 ? "s" : ""} of ${push.join(", ")}`);
+      state.env = prev; state.child = start(cmd, argv, prev);
+    } else if (early) return early;
+  }
 }
 
 function shim(tools) {

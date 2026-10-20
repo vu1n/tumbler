@@ -52,7 +52,7 @@ Elsewhere (your laptop, CI), set `TUMBLER_URL` and `TUMBLER_TOKEN` instead of th
 ## CLI
 
 ```
-tumbler run [-p project] [-k A,B] [--scope a,b] -- <cmd> [args...]
+tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] -- <cmd> [args...]
 tumbler keys [-p project]     names you can read, never values
 tumbler whoami                the token's name and pin
 tumbler auto [--dry-run]      work out which keys this repo needs; write .tumbler
@@ -66,6 +66,30 @@ only the keys the repo needs. Commit the file so the set is reviewed like code. 
 the set: if auto can't reach the broker the command doesn't start, and if `.tumbler` can't be written
 (a read-only checkout) the command runs with just the picked keys. `TUMBLER_AUTO=off` skips auto and
 fetches every key the token can read.
+
+### When keys change
+
+Keys are pulled: `run` fetches them as the command starts (through the 5-minute cache), and nothing
+changes inside a running command unless you ask for it.
+
+- **Checks on save.** A key can carry a check, and then a new value is tested against its service
+  before it replaces the old one. If the test fails, or can't reach the service, nothing is saved and
+  the old value keeps working. Minted keys are checked by their provider (Cloudflare's
+  `tokens/verify`). A static key names one in its config: a preset (`{"check": "openai"}`, also
+  `anthropic`, `github`, `stripe`, `cloudflare`), or `{"check": {"url": "https://…", "header":
+  "authorization", "prefix": "Bearer "}}`. Only https URLs are allowed, because the value is sent there.
+- **When a command fails**, `run` refetches its keys, skipping the cache, and runs each key's check on
+  the current value. It then reports which keys changed since the command started, and which pass or
+  fail their check. When every checked key passes and none changed, it says the failure is probably
+  not a key problem. Names and statuses only, never values. `TUMBLER_DIAGNOSE=off` turns this off.
+- **`--retry`** reruns the command once with the new values, and only when a key changed. If nothing
+  changed, rerunning would fail the same way.
+- **`--watch`** is for long-running commands. It polls the keys' revisions every `TUMBLER_WATCH`
+  seconds (30), and when a key changes whose new value passed its check on save, it restarts the
+  command with that value. A key saved without a check is reported and never pushed. If the restarted
+  command exits non-zero within `TUMBLER_WATCH_GRACE` seconds (10), it goes back to the previous
+  values. `--watch` follows saved values. It does not follow a minted child's expiry, so a command
+  that outlives the child still needs restarting.
 
 ### How `auto` picks keys
 
@@ -135,8 +159,10 @@ Each caller holds one **grant** per minted key, and its state decides what the e
 - Rotating the parent keeps the key's kind. A minted key can't be turned static, because that would
   hand its parent out; delete it and add it again instead.
 
-Other providers plug in as a `Provider` (`mint`, `revoke`, `validate` in `worker/src/grants.ts`).
-The state machine is the same for each.
+Other providers plug in as a `Provider` (`mint`, `revoke`, `validate` and optionally `verify` in
+`worker/src/grants.ts`). The state machine is the same for each. It lives in `worker/src/machine.ts`
+as one pure function, `transition(grant, event)`. Every change is written along with its event in
+`grant_events`, an append-only log (`GET /admin/api/grants/:id/events` shows a grant's history).
 
 ## API
 
@@ -147,8 +173,10 @@ The state machine is the same for each.
 | `POST /v1/auto?project=` | caller token | body `{"signals": ["file:…", "dep:…"]}`; returns `{"project", "keys": [{"name", "why"}]}` |
 | `GET /v1/keys?project=` | caller token | `{"project", "keys": [names]}`; never values, never mints |
 | `POST /v1/step-up?project=` | caller token | body `{"keys": [...], "scopes": [...]}`; returns each minted key's grant state |
+| `POST /v1/check?project=` | caller token | body `{"keys": [...]}`; runs each key's check on its current value: `{"checks": {"A": {"status": "ok"\|"invalid"\|"error"\|"none"}}}` |
+| `GET /v1/revs?project=&keys=A,B` | caller token | `{"keys": {"A": {"rev", "checked"}}}`; a new rev on every save; never values, never mints |
 | `GET /cli` | none | the CLI script (no secrets in it) |
-| `/admin`, `/admin/api/{keys,tokens,grants,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1`; `POST grants/:id/approve` or `/deny`, `DELETE grants/:id` revokes |
+| `/admin`, `/admin/api/{keys,tokens,grants,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1`; `POST grants/:id/approve` or `/deny`, `DELETE grants/:id` revokes, `GET grants/:id/events` |
 
 Every read and change is audited by key name, never by value.
 
