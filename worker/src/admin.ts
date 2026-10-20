@@ -1,4 +1,5 @@
 // admin.ts — the admin page. Values are write-only here: the page can set or rotate one, never read it.
+// Grants show state and scopes only, never a minted child.
 export const ADMIN_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tumbler</title>
@@ -10,6 +11,8 @@ main{max-width:960px;margin:0 auto;padding:16px}
 h1{font-size:20px}h2{font-size:16px;margin-top:32px}
 table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:500}.muted{color:var(--muted)}.warn{color:var(--warn)}
+textarea{font:12px/1.4 ui-monospace,monospace;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;width:100%;min-height:72px;display:none}
+select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit}
 form{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}input{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;min-width:0}
 button{font:inherit;padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);cursor:pointer}
 code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:auto}
@@ -19,15 +22,24 @@ code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:au
 <p class="muted">One store for env vars and keys. Values are never shown after they're saved.</p>
 
 <h2>Keys</h2>
-<div class="wrap"><table><thead><tr><th>Name</th><th>Scope</th><th>Description</th><th>Rotated</th><th>Expires</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Description</th><th>Rotated</th><th>Expires</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
 <form id="putKey">
   <input name="name" placeholder="NAME" required pattern="[A-Z_][A-Z0-9_]*">
   <input name="scope" placeholder="global or project" value="global" required>
-  <input name="value" type="password" placeholder="value" required autocomplete="off">
+  <select name="kind" title="static: the value is handed out. mint: the value is a parent token that mints short-lived children.">
+    <option value="static">static</option><option value="mint:cloudflare">mint:cloudflare</option>
+  </select>
+  <input name="value" type="password" placeholder="value (parent token for mint)" required autocomplete="off">
   <input name="description" placeholder="what it's for">
   <input name="expires_at" type="date" title="expires">
   <button>Save</button>
+  <textarea name="config" placeholder='{"account_id": "…", "ttl_minutes": 30, "start": ["workers:read"], "scopes": {"workers:read": ["<permission group id>"], "workers:write": ["<id>"]}}'></textarea>
 </form>
+
+<h2>Grants</h2>
+<p class="muted">Minted keys. Read scopes are granted on request; anything else waits here for you.</p>
+<p id="revokePending" class="warn"></p>
+<div class="wrap"><table><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Wants</th><th>Expires</th><th></th></tr></thead><tbody id="grants"></tbody></table></div>
 
 <h2>Tokens</h2>
 <div id="once"></div>
@@ -48,10 +60,20 @@ const btn = (label, fn) => { const c = document.createElement('td'), b = documen
 const day = s => s ? s.slice(0, 10) : '';
 const stale = s => s && Date.parse(s) < Date.now() + 7 * 864e5;
 async function load() {
-  const [{ keys }, { tokens }, { audit }] = await Promise.all([api('keys'), api('tokens'), api('audit')]);
+  const [{ keys }, { tokens }, { audit }, { grants, revoke_pending }] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(() => ({ grants: [] }))]);
+  document.getElementById('revokePending').textContent = revoke_pending
+    ? revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
   document.getElementById('keys').replaceChildren(...keys.map(k => { const tr = document.createElement('tr');
-    tr.append(td(k.name), td(k.scope), td(k.description, 'muted'), td(day(k.rotated_at)), td(day(k.expires_at), stale(k.expires_at) ? 'warn' : ''),
+    tr.append(td(k.name), td(k.scope), td(k.kind), td(k.description, 'muted'), td(day(k.rotated_at)), td(day(k.expires_at), stale(k.expires_at) ? 'warn' : ''),
       btn('Delete', async () => { if (confirm('Delete ' + k.scope + '/' + k.name + '?')) { await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }); load(); } }));
+    return tr; }));
+  const act = (label, path, method, body) => async () => { try { await api('grants/' + path, { method, body: body && JSON.stringify(body) }); } catch (err) { alert(err.message); } load(); };
+  document.getElementById('grants').replaceChildren(...grants.map(g => { const tr = document.createElement('tr'), live = g.state === 'active' || g.state === 'pending', c = document.createElement('td');
+    tr.append(td(g.name), td(g.caller), td(g.project ?? 'global'), td(g.state, g.requested ? 'warn' : ''), td(g.scopes.join(', ')),
+      td((g.requested ?? []).join(', '), 'warn'), td((g.expires_at ?? '').replace('T', ' ').slice(0, 16)), c);
+    const b = (label, fn) => { const e = document.createElement('button'); e.textContent = label; e.onclick = fn; c.append(e, ' '); };
+    if (g.requested) { b('Approve', act('approve', g.id + '/approve', 'POST', { requested: g.requested })); b('Deny', act('deny', g.id + '/deny', 'POST')); }
+    if (live) b('Revoke', async () => { if (confirm('Revoke ' + g.name + ' for ' + g.caller + '? Its token stops working now, and its next request waits for your approval for a day.')) act('', g.id, 'DELETE')(); });
     return tr; }));
   document.getElementById('tokens').replaceChildren(...tokens.map(t => { const tr = document.createElement('tr');
     tr.append(td(t.name), td(t.projects ? t.projects.join(', ') : 'global only'), td(day(t.created_at)),
@@ -60,9 +82,12 @@ async function load() {
   document.getElementById('audit').replaceChildren(...audit.map(a => { const tr = document.createElement('tr');
     tr.append(td(a.at.replace('T', ' ').slice(0, 19)), td(a.actor), td(a.action), td(a.project), td(a.names, 'muted')); return tr; }));
 }
-document.getElementById('putKey').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
-  try { await api('keys/' + encodeURIComponent(f.get('scope')) + '/' + encodeURIComponent(f.get('name')), { method: 'PUT',
-    body: JSON.stringify({ value: f.get('value'), description: f.get('description'), expires_at: f.get('expires_at') || null }) });
+const putKey = document.getElementById('putKey');
+putKey.kind.onchange = () => { putKey.config.style.display = putKey.kind.value === 'static' ? 'none' : 'block'; };
+putKey.onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target), kind = f.get('kind');
+  try { const config = kind === 'static' || !String(f.get('config')).trim() ? undefined : JSON.parse(f.get('config'));
+    await api('keys/' + encodeURIComponent(f.get('scope')) + '/' + encodeURIComponent(f.get('name')), { method: 'PUT',
+    body: JSON.stringify({ value: f.get('value'), kind, config, description: f.get('description'), expires_at: f.get('expires_at') || null }) });
     e.target.reset(); load(); } catch (err) { alert(err.message); } };
 document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
   const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);

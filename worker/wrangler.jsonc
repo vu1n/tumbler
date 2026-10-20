@@ -19,6 +19,8 @@
   // Clef (System One on Workers AI) picks keys for `tumbler auto` when the rules don't settle them.
   // TUMBLER_AUTO_MODEL var: "clef" (default) or "clef-flash".
   "ai": { "binding": "AI" },
+  // Expires minted grants and deletes their children at the provider (see src/grants.ts sweep).
+  "triggers": { "crons": ["*/5 * * * *"] },
   // Serves cli/tumbler at /cli, so setup scripts install the CLI straight from the broker.
   "rules": [{ "type": "Text", "globs": ["**/cli/tumbler"], "fallthrough": false }]
 }

@@ -2,8 +2,14 @@
 import { Catalog, GLOBAL, Refused } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
+import type { GrantRow, Grants } from "./grants.ts";
 
-export interface Deps { catalog: Catalog; admin: (request: Request) => Promise<string | null>; cli?: string; s1?: S1Client | null }
+export interface Deps {
+  catalog: Catalog; admin: (request: Request) => Promise<string | null>; cli?: string; s1?: S1Client | null; grants?: Grants;
+}
+
+// What a caller learns about its grant: never the child credential or its provider id.
+const grantView = (g: GrantRow) => ({ id: g.id, name: g.name, state: g.state, scopes: g.scopes, requested: g.requested, expires_at: g.expires_at });
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status, headers: { "content-type": "application/json", "cache-control": "no-store" },
@@ -26,7 +32,7 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
   }
 }
 
-async function agentRoute(request: Request, url: URL, { catalog, s1 }: Deps) {
+async function agentRoute(request: Request, url: URL, { catalog, s1, grants }: Deps) {
   const token = bearer(request), caller = token ? await catalog.caller(token) : null;
   if (!caller) return json({ error: "unauthorized" }, 401);
   // Which of the caller's keys this repo needs, from its file and dependency names. Names out, never values.
@@ -38,16 +44,38 @@ async function agentRoute(request: Request, url: URL, { catalog, s1 }: Deps) {
     await catalog.audit(caller.name, "auto", project, picks.map((p) => p.name));
     return json({ project, keys: picks });
   }
+  // Ask for more scopes on the minted keys in a set: {"keys": [...], "scopes": ["workers:write"]}.
+  // Reads are granted at once; anything else comes back with `requested` set, waiting in /admin.
+  if (url.pathname === "/v1/step-up" && request.method === "POST") {
+    if (!grants) return json({ error: "minting is off" }, 501);
+    const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+    const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : [], names = Array.isArray(body.keys) ? body.keys.map(String) : [];
+    if (!scopes.length) return json({ error: "no scopes asked for" }, 400);
+    const out = [];
+    for (const name of names) {
+      const { project, row } = await catalog.rowFor(caller, url.searchParams.get("project"), name);
+      if (row.kind === "static") continue;
+      const known = Object.keys(grants.config(row).scopes ?? {}), mine = scopes.filter((s) => known.includes(s));
+      if (mine.length) out.push(grantView(await grants.stepUp(caller, project, row, mine)));
+    }
+    if (!out.length) return json({ error: `no minted key in this set has scope ${scopes.join(", ")}` }, 400);
+    return json({ grants: out });
+  }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
   if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects });
+  // Names only: listing must not mint a child for every minted key.
+  if (url.pathname === "/v1/keys") {
+    const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
+    return json({ project, keys: keys.map((k) => k.name) });
+  }
   if (url.pathname === "/v1/env") {
     const names = (url.searchParams.get("keys") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-    return json({ env: await catalog.resolve(caller, url.searchParams.get("project"), names) });
+    return json({ env: await catalog.resolve(caller, url.searchParams.get("project"), names, grants && ((c, p, r) => grants.issue(c, p, r))) });
   }
   return json({ error: "not found" }, 404);
 }
 
-async function adminRoute(request: Request, url: URL, { catalog, admin }: Deps) {
+async function adminRoute(request: Request, url: URL, { catalog, admin, grants }: Deps) {
   const who = await admin(request);
   if (!who) return new Response("forbidden", { status: 403 });
   const path = url.pathname, m = request.method;
@@ -68,12 +96,24 @@ async function adminRoute(request: Request, url: URL, { catalog, admin }: Deps) 
       const [, scope, name] = parts;
       if (m === "PUT") {
         const b = await body();
-        await catalog.put(scope, name, String(b.value ?? ""), { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null });
+        const kind = b.kind ? String(b.kind) : undefined, config = b.config && typeof b.config === "object" ? b.config : undefined;
+        const prev = await catalog.keyRow(scope, name), effective = kind ?? prev?.kind ?? "static";
+        if (effective !== "static") {
+          if (!grants) return json({ error: "minting is off" }, 501);
+          grants.validate(effective, config ?? JSON.parse(prev?.config || "{}"));
+        }
+        await catalog.put(scope, name, String(b.value ?? ""), { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null, kind, config });
+        // End the old revision's grants now, so their children stop working at once. If this is
+        // missed (a crash, a concurrent save), current() ends each one on its next request, revoking
+        // with the retired revision. "system": a rotation must not block the next grant like a revoke.
+        if (prev && prev.kind !== "static" && grants) await grants.closeStale(scope, name);
         await catalog.audit(who, "put", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });
       }
       if (m === "DELETE") {
+        const prev = await catalog.keyRow(scope, name);
         await catalog.remove(scope, name);
+        if (prev && prev.kind !== "static" && grants) await grants.closeStale(scope, name);
         await catalog.audit(who, "delete", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });
       }
@@ -90,9 +130,18 @@ async function adminRoute(request: Request, url: URL, { catalog, admin }: Deps) 
     }
     if (m === "DELETE" && parts.length === 2) {
       await catalog.revokeToken(parts[1]);
+      await grants?.closeCaller(parts[1], who); // its children stop working now, not at expiry
       await catalog.audit(who, "token-revoke", null, [parts[1]]);
       return json({ ok: true });
     }
+  }
+  if (parts[0] === "grants" && grants) {
+    if (m === "GET" && parts.length === 1) return json({ revoke_pending: await grants.pendingRevokes(), grants: (await grants.list()).map((g) => ({ ...grantView(g), caller: g.caller, project: g.project, decided_by: g.decided_by, updated_at: g.updated_at })) });
+    if (m === "POST" && parts.length === 3 && (parts[2] === "approve" || parts[2] === "deny")) {
+      const b = await body(), seen = Array.isArray(b.requested) ? b.requested.map(String) : undefined;
+      return json({ grant: grantView(await grants.decide(parts[1], parts[2] === "approve", who, seen)) });
+    }
+    if (m === "DELETE" && parts.length === 2) { await grants.revoke(parts[1], who); return json({ ok: true }); }
   }
   if (parts[0] === "audit" && m === "GET") return json({ audit: await catalog.recentAudit() });
   return json({ error: "not found" }, 404);
