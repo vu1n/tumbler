@@ -34,3 +34,14 @@ test("signals are filtered to names of bounded size", () => {
   assert.deepEqual(cleanSignals(["file:A.json", "dep:x", "secret=1", 5, "dep:" + "y".repeat(200)]), ["file:a.json", "dep:x"]);
   assert.deepEqual(cleanSignals("nope"), []);
 });
+
+test("every key past the first batch is still asked about", async () => {
+  const many = Array.from({ length: 95 }, (_, i) => ({ name: `KEY_${String(i).padStart(3, "0")}`, description: "" }));
+  let calls = 0;
+  const picks = await byClef({ systemOne: async ({ questions }) => {
+    calls++;
+    return { answers: Object.fromEntries(Object.entries(questions).map(([id, q]: [string, any]) => [id, { type: "noul", noul: /KEY_09[0-4]/.test(q.instructions) ? 0.9 : 0.1 }])) };
+  } }, ["dep:x"], many);
+  assert.equal(calls, 3);
+  assert.deepEqual(picks.map((p) => p.name), ["KEY_090", "KEY_091", "KEY_092", "KEY_093", "KEY_094"]);
+});

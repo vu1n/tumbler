@@ -14,7 +14,7 @@ export function s1Client(ai: Ai | undefined, model = "clef"): S1Client | null {
 }
 
 export const MAX_SIGNALS = 400, MAX_SIGNAL_LEN = 120;
-export const MAX_ASKED = 40;       // candidate keys put to Clef in one call
+export const BATCH = 40;           // candidate keys put to Clef in one call; more keys, more calls
 export const NEED_ABOVE = 0.7;     // Clef must be fairly sure before a key is added
 export const DEADLINE_MS = 5000;
 
@@ -57,11 +57,18 @@ export function byRules(signals: string[], keys: { name: string }[]): Pick[] {
 
 const prob = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : null);
 
-// One yes/no question per remaining key. Any error or timeout adds nothing (fail closed on access).
+// One yes/no question per remaining key, BATCH keys per call, calls in parallel. A batch that errors
+// or times out adds nothing (fail closed on access).
 export async function byClef(client: S1Client | null, signals: string[], keys: { name: string; description: string }[],
   deadlineMs = DEADLINE_MS): Promise<Pick[]> {
   if (!client || !keys.length || !signals.length) return [];
-  const asked = keys.slice(0, MAX_ASKED), questions: Record<string, unknown> = {};
+  const batches: { name: string; description: string }[][] = [];
+  for (let i = 0; i < keys.length; i += BATCH) batches.push(keys.slice(i, i + BATCH));
+  return (await Promise.all(batches.map((b) => askBatch(client, signals, b, deadlineMs)))).flat();
+}
+
+async function askBatch(client: S1Client, signals: string[], asked: { name: string; description: string }[], deadlineMs: number): Promise<Pick[]> {
+  const questions: Record<string, unknown> = {};
   asked.forEach((k, i) => {
     questions[`k${i}`] = {
       type: "noul",

@@ -148,3 +148,13 @@ test("an empty auto result runs the command with no keys, not all of them", asyn
   const { stdout } = await cli(["run", "--", ...printEnv], { TUMBLER_AUTO: "", TUMBLER_TTL: "0" }, dir);
   assert.equal(stdout, " ");
 });
+
+test("key files deep in a big repo still reach the broker", async () => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 400; i++) files[`aaa/f${String(i).padStart(3, "0")}.txt`] = "";
+  files["zzz/infra/wrangler.toml"] = "";
+  files["zzz/package.json"] = JSON.stringify({ dependencies: { "mixpanel-lite": "1" } });
+  const { stdout } = await cli(["auto", "--dry-run"], {}, repo(files));
+  assert.match(stdout, /CLOUDFLARE_API_TOKEN\trule/);
+  assert.match(stdout, /POSTHOG_API_KEY\tclef/);
+});
