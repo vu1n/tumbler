@@ -3,6 +3,7 @@ import { accessAdmin } from "./access.ts";
 import { handle } from "./app.ts";
 import { Catalog } from "./catalog.ts";
 import { masterKey } from "./crypto.ts";
+import { s1Client } from "./auto.ts";
 // Bundled as text by the "rules" entry in wrangler.jsonc.
 import CLI from "../../cli/tumbler";
 
@@ -13,6 +14,8 @@ export interface Env {
   ACCESS_TEAM_DOMAIN: string; // e.g. "vu1n.cloudflareaccess.com"
   ACCESS_AUD: string;         // the Access application's AUD tag
   TUMBLER_ADMINS: string;     // comma-separated emails allowed into /admin
+  AI?: Ai;                    // Workers AI, for Clef in /v1/auto; without it auto uses rules only
+  TUMBLER_AUTO_MODEL?: string; // "clef" (default) or "clef-flash"
 }
 
 let key: { raw: string; key: CryptoKey } | null = null;
@@ -29,6 +32,7 @@ export default {
     return handle(request, {
       catalog,
       cli: CLI,
+      s1: s1Client(env.AI, env.TUMBLER_AUTO_MODEL || "clef"),
       admin: (r) => accessAdmin(r, { teamDomain: env.ACCESS_TEAM_DOMAIN, aud: env.ACCESS_AUD, admins }),
     });
   },

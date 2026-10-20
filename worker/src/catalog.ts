@@ -127,6 +127,17 @@ export class Catalog {
     return out;
   }
 
+  // Names and descriptions the caller could read, project rows over global ones. No values.
+  async visible(caller: Caller, requested: string | null): Promise<{ project: string | null; keys: { name: string; description: string }[] }> {
+    const project = this.scopeFor(caller, requested), scopes = project ? [GLOBAL, project] : [GLOBAL];
+    const { results } = await this.db.prepare(
+      `SELECT scope, name, description FROM keys WHERE scope IN (${scopes.map(() => "?").join(",")}) ORDER BY name`,
+    ).bind(...scopes).all<{ scope: string; name: string; description: string }>();
+    const byName = new Map<string, string>();
+    for (const r of results) if (!byName.has(r.name) || r.scope === project) byName.set(r.name, r.description || byName.get(r.name) || "");
+    return { project, keys: [...byName].map(([name, description]) => ({ name, description })) };
+  }
+
   async recentAudit(limit = 100) {
     const { results } = await this.db.prepare("SELECT at, actor, action, project, names FROM audit ORDER BY id DESC LIMIT ?").bind(limit).all();
     return results;
