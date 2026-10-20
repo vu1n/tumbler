@@ -102,16 +102,17 @@ async function adminRoute(request: Request, url: URL, { catalog, admin, grants }
           if (!grants) return json({ error: "minting is off" }, 501);
           grants.validate(effective, config ?? JSON.parse(prev?.config || "{}"));
         }
-        // Why: a new parent or config can't revoke children the old one minted, so end them first.
-        if (prev && prev.kind !== "static" && grants) await grants.closeKey(prev, "system"); // "system": a rotation must not block the next grant like a revoke does
         await catalog.put(scope, name, String(b.value ?? ""), { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null, kind, config });
+        // Why: end the old row's grants with the old parent, after the write so none can open on it
+        // meanwhile. "system": a rotation must not block the next grant the way an admin revoke does.
+        if (prev && prev.kind !== "static" && grants) await grants.closeKey(prev, "system");
         await catalog.audit(who, "put", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });
       }
       if (m === "DELETE") {
         const prev = await catalog.keyRow(scope, name);
-        if (prev && prev.kind !== "static" && grants) await grants.closeKey(prev, "system"); // "system": a rotation must not block the next grant like a revoke does
         await catalog.remove(scope, name);
+        if (prev && prev.kind !== "static" && grants) await grants.closeKey(prev, "system");
         await catalog.audit(who, "delete", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });
       }

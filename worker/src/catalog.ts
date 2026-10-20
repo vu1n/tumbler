@@ -20,7 +20,7 @@ export interface KeyRow {
   scope: string; name: string; kind: string; config: string; description: string; owner: string;
   created_at: string; rotated_at: string; expires_at: string | null;
 }
-export interface MintRow { scope: string; name: string; kind: string; config: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }
+export interface MintRow { scope: string; name: string; kind: string; config: string; rotated_at: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }
 export interface TokenRow { name: string; projects: string[] | null; created_at: string; revoked_at: string | null }
 
 const now = () => new Date().toISOString();
@@ -94,8 +94,8 @@ export class Catalog {
 
   // The sealed row for one key, as the grants module needs it to mint. Never leaves the broker.
   async keyRow(scope: string, name: string) {
-    return this.db.prepare("SELECT scope, name, kind, config, iv, ciphertext FROM keys WHERE scope = ? AND name = ?")
-      .bind(scope, name).first<{ scope: string; name: string; kind: string; config: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }>();
+    return this.db.prepare("SELECT scope, name, kind, config, rotated_at, iv, ciphertext FROM keys WHERE scope = ? AND name = ?")
+      .bind(scope, name).first<MintRow>();
   }
 
   // The row `caller` reads for `name`: the project's over the global one.
@@ -142,7 +142,7 @@ export class Catalog {
     names.forEach(checkName);
     const scopes = project ? [GLOBAL, project] : [GLOBAL];
     const { results } = await this.db.prepare(
-      `SELECT scope, name, kind, config, iv, ciphertext FROM keys WHERE scope IN (${scopes.map(() => "?").join(",")})`,
+      `SELECT scope, name, kind, config, rotated_at, iv, ciphertext FROM keys WHERE scope IN (${scopes.map(() => "?").join(",")})`,
     ).bind(...scopes).all<MintRow>();
     const want = new Set(names), win = new Map<string, MintRow>();
     for (const r of results) {

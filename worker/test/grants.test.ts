@@ -232,6 +232,50 @@ test("revoking a caller token, deleting a key or rotating its parent ends live g
   assert.deepEqual(s.fake.revoked, ["id-1", "id-2", "id-3"]);
 });
 
+test("a revoke during a first mint sticks: the claim is not deleted, so the next read still waits", async () => {
+  const s = await setup();
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+    const [g] = await adminGrants(s);
+    await s.call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, "vu@example.com");
+    return mint(...a);
+  };
+  assert.equal((await s.env()).status, 409);
+  s.fake.provider.mint = mint;
+  assert.deepEqual(s.fake.revoked, ["id-1"]); // the child minted after the revoke is deleted
+  assert.equal((await s.env()).status, 409);  // and the revoke still blocks the next read
+  assert.equal(s.fake.minted.length, 1);
+});
+
+test("a rotation during a mint wins: the old row's child is deleted, never stored or reused", async () => {
+  const s = await setup();
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+    s.tick(0.001); // a later rotated_at
+    await s.call("PUT", "/admin/api/keys/dev/CLOUDFLARE_API_TOKEN", undefined,
+      { value: "parent-2", kind: "mint:cloudflare", config: { ...CONFIG, scopes: { "workers:read": [READ] } } }, "vu@example.com");
+    return mint(...a);
+  };
+  assert.equal((await s.env()).status, 409);
+  s.fake.provider.mint = mint;
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
+  assert.equal(s.fake.minted.at(-1)!.parent, "parent-2");
+});
+
+test("a revoke can't be sidestepped through another pinned project, and unsorted start scopes can be approved", async () => {
+  const s = await setup();
+  await s.catalog.put("global", "CF_G", PARENT, { kind: "mint:cloudflare", config: { ...CONFIG, start: ["workers:write", "workers:read"] } });
+  const both = await s.catalog.createToken("both", ["dev", "prod"]);
+  await s.call("GET", "/v1/env?project=dev&keys=CF_G", both);
+  const [g] = await adminGrants(s);
+  assert.deepEqual(g.requested, ["workers:read", "workers:write"]);
+  assert.equal((await s.call("POST", `/admin/api/grants/${g.id}/approve`, undefined, { requested: g.requested }, "vu@example.com")).status, 200);
+  await s.call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, "vu@example.com");
+  await s.catalog.put("global", "CF_G", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  assert.equal((await s.call("GET", "/v1/env?project=prod&keys=CF_G", both)).status, 409);
+});
+
 test("a project key overriding a global one starts a new grant instead of reusing the old key's child", async () => {
   const s = await setup();
   await s.catalog.put("global", "CF_G", PARENT, { kind: "mint:cloudflare", config: CONFIG });

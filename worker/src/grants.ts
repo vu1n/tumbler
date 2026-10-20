@@ -28,9 +28,9 @@ export const DEFAULT_TTL_MIN = 30, MIN_TTL_MIN = 15, MAX_TTL_MIN = 24 * 60;
 export const REUSE_MARGIN_MS = 6 * 60 * 1000;
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // an unanswered request lapses to denied
 
-export interface KeyRow { scope: string; name: string; kind: string; config: string; iv: ArrayBuffer | Uint8Array; ciphertext: ArrayBuffer | Uint8Array }
+export interface KeyRow { scope: string; name: string; kind: string; config: string; rotated_at: string; iv: ArrayBuffer | Uint8Array; ciphertext: ArrayBuffer | Uint8Array }
 export interface GrantRow {
-  id: string; caller: string; project: string | null; key_scope: string; name: string; state: string;
+  id: string; caller: string; project: string | null; key_scope: string; key_rev: string; name: string; state: string;
   scopes: string[]; requested: string[] | null; requested_at: string | null; child_id: string | null; expires_at: string | null;
   decided_by: string | null; created_at: string; updated_at: string;
 }
@@ -69,7 +69,11 @@ export class Grants {
   async issue(caller: Caller, project: string | null, row: KeyRow): Promise<string> {
     let g = await this.current(caller, project, row);
     if (!g) g = await this.open(caller, project, row, this.config(row).start ?? []);
-    if (g.state !== "active") throw this.waiting(g);
+    if (g.state !== "active") {
+      // Another request's read grant, claimed but still minting: not a wait for approval.
+      if ((g.requested ?? []).every(autoApproved) && !await this.blocked(caller, row)) throw new Refused(409, `${row.name} is being minted by another request; run again`);
+      throw this.waiting(g);
+    }
     return this.child(g);
   }
 
@@ -123,8 +127,11 @@ export class Grants {
 
   // A mint key about to be deleted or rotated: end its grants with the parent and config that minted
   // their children, while that row still exists.
+  // Runs after the new row is written (or the old one deleted), so no new grant can open on the old
+  // row meanwhile; a mint already in flight on it fails its compare-and-set in store().
   async closeKey(row: KeyRow, who: string) {
-    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE key_scope = ? AND name = ? AND ${LIVE}`).bind(row.scope, row.name).all<any>();
+    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE key_scope = ? AND name = ? AND key_rev = ? AND ${LIVE}`)
+      .bind(row.scope, row.name, row.rotated_at).all<any>();
     for (const r of results) await this.close(parse(r), "revoked", who, row);
   }
 
@@ -162,18 +169,26 @@ export class Grants {
   // now overriding a global one) or one too close to expiry is ended, so the caller starts fresh.
   async current(caller: Caller, project: string | null, row: KeyRow) {
     const g = await this.live(caller, project, row.name);
-    if (g && g.key_scope !== row.scope) { await this.close(g, "revoked", "system"); return null; }
-    if (g?.state === "active" && !this.fresh(g)) { await this.close(g, "expired", "system"); return null; }
+    if (!g) return null;
+    if (g.state === "active" && !this.fresh(g)) { await this.close(g, "expired", "system"); return null; }
+    if (g.key_scope === row.scope && g.key_rev !== row.rotated_at) {
+      // The key was just rotated or recreated. closeKey ends this grant with the parent that minted
+      // it; closing it here would try the new parent and leave the child alive.
+      if (g.child_id) throw new Refused(409, `${row.name} was just rotated; run again`);
+      await this.close(g, "revoked", "system"); return null;
+    }
+    if (g.key_scope !== row.scope) { await this.close(g, "revoked", "system"); return null; }
     return g;
   }
 
   // Revoked by an admin within the last day: the next grant waits for approval, even for reads, so
   // Revoke actually cuts the caller off instead of handing it a fresh read child.
-  async blocked(caller: Caller, project: string | null, name: string) {
+  // Any project: a token pinned to several can't sidestep a revoke by switching ?project=.
+  async blocked(caller: Caller, row: KeyRow) {
     const since = new Date(this.now().getTime() - PENDING_TTL_MS).toISOString();
     return !!await this.db.prepare(
-      "SELECT 1 FROM grants WHERE caller = ? AND project IS ? AND name = ? AND state = 'revoked' AND decided_by NOT IN ('system', 'policy', 'timeout') AND updated_at > ? LIMIT 1",
-    ).bind(caller.name, project, name, since).first();
+      "SELECT 1 FROM grants WHERE caller = ? AND key_scope = ? AND name = ? AND state = 'revoked' AND decided_by NOT IN ('system', 'policy', 'timeout') AND updated_at > ? LIMIT 1",
+    ).bind(caller.name, row.scope, row.name, since).first();
   }
 
   async live(caller: Caller, project: string | null, name: string) {
@@ -185,8 +200,9 @@ export class Grants {
   // A new grant: active at once when every scope is a read, otherwise pending with nothing minted.
   async open(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
     if (!scopes.length) throw new Refused(400, `${row.name} has no start scopes; ask for one with --scope`);
+    scopes = union([], scopes); // sorted, as decide() compares them
     const t = this.now().toISOString(), id = "g_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-    const g: GrantRow = { id, caller: caller.name, project, key_scope: row.scope, name: row.name, state: "pending",
+    const g: GrantRow = { id, caller: caller.name, project, key_scope: row.scope, key_rev: row.rotated_at, name: row.name, state: "pending",
       scopes: [], requested: scopes, requested_at: t, child_id: null, expires_at: null, decided_by: null, created_at: t, updated_at: t };
     // Why: the pending row claims the one live slot before anything is minted, so a concurrent
     // request finds it instead of minting a second child.
@@ -195,9 +211,17 @@ export class Grants {
       if (other) return other;
       throw new Refused(409, `${row.name}: a grant changed meanwhile; run again`);
     }
-    if (scopes.every(autoApproved) && !await this.blocked(caller, project, row.name)) {
-      try { return await this.mintFor(g, row, scopes, "policy"); }
-      catch (e) { await this.db.prepare("DELETE FROM grants WHERE id = ? AND child_id IS NULL").bind(id).run(); throw e; } // no grant left behind
+    if (scopes.every(autoApproved) && !await this.blocked(caller, row)) {
+      let minted;
+      try { minted = await this.mint(row, g, scopes); } catch (e) {
+        // A provider failure leaves no grant behind. Only the untouched claim goes: a revoke that
+        // landed meanwhile stays, so blocked() still sees it.
+        await this.db.prepare("DELETE FROM grants WHERE id = ? AND state = 'pending' AND child_id IS NULL").bind(id).run();
+        throw e;
+      }
+      await this.store(id, row, minted, scopes, "policy", null);
+      await this.catalog.audit(caller.name, "grant-mint", project, [`${row.name}:${scopes.join("+")}`]);
+      return (await this.get(id))!;
     }
     await this.catalog.audit(caller.name, "grant-pending", project, [`${row.name}:${scopes.join("+")}`]);
     return g;
@@ -226,8 +250,10 @@ export class Grants {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(id), row.name, m.value);
     const r = await this.db.prepare(
       `UPDATE grants SET state = 'active', scopes = ?, requested = NULL, requested_at = NULL, child_id = ?, iv = ?, ciphertext = ?,
-         expires_at = ?, decided_by = ?, updated_at = ? WHERE id = ? AND ${LIVE} AND child_id IS ?`,
-    ).bind(JSON.stringify(scopes), m.id, iv, ciphertext, m.expires_at, who, this.now().toISOString(), id, prev).run();
+         expires_at = ?, decided_by = ?, updated_at = ? WHERE id = ? AND ${LIVE} AND child_id IS ? AND key_rev = ?
+         AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rotated_at = ?)`,
+    ).bind(JSON.stringify(scopes), m.id, iv, ciphertext, m.expires_at, who, this.now().toISOString(), id, prev,
+      row.rotated_at, row.scope, row.name, row.rotated_at).run();
     if (!r.meta.changes) {
       await this.revokeChild(row, m.id);
       throw new Refused(409, `grant ${id} changed while minting; run again`);
@@ -252,9 +278,10 @@ export class Grants {
     ).bind(state, who, this.now().toISOString(), g.id).first<{ child_id: string | null }>();
     if (!ended) return; // already ended by someone else
     if (ended.child_id) {
+      // Only the row that minted the child can delete it; a rotated row holds another parent.
       const from = row ?? await this.catalog.keyRow(g.key_scope, g.name);
-      if (from) await this.revokeChild(from, ended.child_id);
-      else console.error("tumbler: no key row to revoke a child of", g.name);
+      if (from && from.rotated_at === g.key_rev) await this.revokeChild(from, ended.child_id);
+      else console.error("tumbler: key rotated or gone; child of", g.name, "expires on its own");
     }
     await this.catalog.audit(who, state === "expired" ? "grant-expire" : "grant-revoke", g.project, [g.name]);
   }
@@ -270,9 +297,9 @@ export class Grants {
   async insert(g: GrantRow): Promise<boolean> {
     try {
       await this.db.prepare(
-        `INSERT INTO grants (id, caller, project, key_scope, name, state, scopes, requested, requested_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(g.id, g.caller, g.project, g.key_scope, g.name, g.state, JSON.stringify(g.scopes),
+        `INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, requested, requested_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(g.id, g.caller, g.project, g.key_scope, g.key_rev, g.name, g.state, JSON.stringify(g.scopes),
         g.requested ? JSON.stringify(g.requested) : null, g.requested_at, g.created_at, g.updated_at).run();
       return true;
     } catch (e) {
@@ -290,7 +317,7 @@ export class Grants {
 
 // Never the sealed child: iv and ciphertext stay in D1.
 function parse(r: any): GrantRow {
-  return { id: r.id, caller: r.caller, project: r.project, key_scope: r.key_scope, name: r.name, state: r.state,
+  return { id: r.id, caller: r.caller, project: r.project, key_scope: r.key_scope, key_rev: r.key_rev, name: r.name, state: r.state,
     scopes: JSON.parse(r.scopes || "[]"), requested: r.requested ? JSON.parse(r.requested) : null, requested_at: r.requested_at, child_id: r.child_id,
     expires_at: r.expires_at, decided_by: r.decided_by, created_at: r.created_at, updated_at: r.updated_at };
 }

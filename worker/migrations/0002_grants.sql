@@ -10,6 +10,7 @@ CREATE TABLE grants (
   caller      TEXT NOT NULL,
   project     TEXT,
   key_scope   TEXT NOT NULL,
+  key_rev     TEXT NOT NULL, -- the key row's rotated_at when the grant opened; a rotation ends it
   name        TEXT NOT NULL,
   state       TEXT NOT NULL,
   scopes      TEXT NOT NULL DEFAULT '[]',
