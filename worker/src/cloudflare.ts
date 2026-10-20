@@ -7,6 +7,7 @@
 // Permission group ids come from GET /accounts/{id}/tokens/permission_groups; names are cosmetic.
 import { Refused } from "./catalog.ts";
 import type { MintConfig, Provider } from "./grants.ts";
+import { byStatus } from "./verify.ts";
 
 const API = "https://api.cloudflare.com/client/v4";
 const ACCOUNT = /^[0-9a-f]{32}$/, GROUP = /^[0-9a-f]{32}$/;
@@ -53,6 +54,17 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       });
       if (!result?.id || !result?.value) throw new Refused(502, "cloudflare minted no token");
       return { id: String(result.id), value: String(result.value) };
+    },
+    // Before a parent is saved: Cloudflare must accept it as an active token on this account.
+    async verify(parent, config) {
+      if (!/^[\x21-\x7e]+$/.test(parent)) return { status: "invalid", detail: "not a printable token" };
+      try {
+        const r = await fetcher(`${API}/accounts/${config.account_id}/tokens/verify`, { headers: { authorization: `Bearer ${parent}` } });
+        const j = await r.json().catch(() => ({})) as any;
+        const o = byStatus(r.status);
+        if (o.status !== "ok") return o;
+        return j.success !== false && j.result?.status === "active" ? o : { status: "invalid", detail: `token is ${j.result?.status ?? "not active"}` };
+      } catch { return { status: "error", detail: "could not check (request failed)" }; }
     },
     async revoke(parent, config, childId) {
       try { await call("DELETE", `/accounts/${config.account_id}/tokens/${encodeURIComponent(childId)}`, parent); }

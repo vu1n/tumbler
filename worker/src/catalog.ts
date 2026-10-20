@@ -1,5 +1,6 @@
 // catalog.ts — keys, tokens and audit in D1. Values go in sealed and come out only through resolve().
 import { open, randomToken, seal, sha256hex } from "./crypto.ts";
+import { staticCheck } from "./verify.ts";
 
 export const GLOBAL = "global";
 const NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
@@ -18,7 +19,7 @@ export function checkScope(scope: string) {
 export interface Caller { name: string; projects: string[] | null }
 export interface KeyRow {
   scope: string; name: string; kind: string; config: string; description: string; owner: string;
-  created_at: string; rotated_at: string; expires_at: string | null;
+  created_at: string; rotated_at: string; expires_at: string | null; checked: number;
 }
 export interface MintRow { scope: string; name: string; kind: string; config: string; rev: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }
 export interface TokenRow { name: string; projects: string[] | null; created_at: string; revoked_at: string | null }
@@ -71,7 +72,7 @@ export class Catalog {
   // kind is 'static' (the value is handed out as is) or 'mint:<provider>' (the value is a parent
   // credential that never leaves the broker; config says what children it may mint).
   async put(scope: string, name: string, value: string,
-    meta: { description?: string; owner?: string; expires_at?: string | null; kind?: string; config?: Record<string, unknown> } = {}) {
+    meta: { description?: string; owner?: string; expires_at?: string | null; kind?: string; config?: Record<string, unknown>; checked?: boolean } = {}) {
     checkScope(scope); checkName(name);
     if (!value) throw new Refused(400, "empty value");
     // Why: rotating a value without naming a kind keeps the old kind and config. Defaulting to
@@ -84,19 +85,20 @@ export class Catalog {
     }
     // Why: a parent goes into an Authorization header, and a runtime that rejects a bad header value
     // may quote it in the error, which then reaches a log line.
+    if (kind === "static") staticCheck(JSON.parse(config)); // a static key's config holds only its check
     if (kind !== "static" && !/^[\x21-\x7e]+$/.test(value)) throw new Refused(400, "a parent credential must be printable ASCII with no spaces");
     const { iv, ciphertext } = await seal(this.key, scope, name, value), t = now();
     // Why one batch: the old revision is retired in the same transaction that replaces it, so even
     // concurrent writes each keep the parent they displaced.
     await this.db.batch([this.retire(scope, name), this.db.prepare(
-      `INSERT INTO keys (scope, name, kind, config, rev, description, owner, iv, ciphertext, created_at, rotated_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO keys (scope, name, kind, config, rev, checked, description, owner, iv, ciphertext, created_at, rotated_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (scope, name) DO UPDATE SET iv = excluded.iv, ciphertext = excluded.ciphertext,
-         kind = excluded.kind, config = excluded.config, rev = excluded.rev,
+         kind = excluded.kind, config = excluded.config, rev = excluded.rev, checked = excluded.checked,
          rotated_at = excluded.rotated_at, expires_at = excluded.expires_at,
          description = CASE WHEN excluded.description = '' THEN keys.description ELSE excluded.description END,
          owner = CASE WHEN excluded.owner = '' THEN keys.owner ELSE excluded.owner END`,
-    ).bind(scope, name, kind, kind === "static" ? "{}" : config, crypto.randomUUID(), meta.description ?? "", meta.owner ?? "", iv, ciphertext, t, t, meta.expires_at ?? null)]);
+    ).bind(scope, name, kind, config, crypto.randomUUID(), meta.checked ? 1 : 0, meta.description ?? "", meta.owner ?? "", iv, ciphertext, t, t, meta.expires_at ?? null)]);
   }
 
   retire(scope: string, name: string) {
@@ -136,7 +138,7 @@ export class Catalog {
 
   async list(): Promise<KeyRow[]> {
     const { results } = await this.db.prepare(
-      "SELECT scope, name, kind, config, description, owner, created_at, rotated_at, expires_at FROM keys ORDER BY name, scope",
+      "SELECT scope, name, kind, config, description, owner, created_at, rotated_at, expires_at, checked FROM keys ORDER BY name, scope",
     ).all<KeyRow>();
     return results;
   }
@@ -182,6 +184,26 @@ export class Catalog {
     if (missing.length) throw new Refused(404, `unknown keys: ${missing.join(", ")}`);
     await this.audit(caller.name, "read", project, Object.keys(out).sort());
     return out;
+  }
+
+  // A key's stored value. Only for a check run here; it is never returned (a mint key's is its parent).
+  value(row: MintRow) { return open(this.key, row.scope, row.name, bytes(row.iv), bytes(row.ciphertext)); }
+
+  // Each key's revision and whether that revision passed its check, project rows over global ones.
+  // Never values and never a mint, so `tumbler run --watch` can poll it.
+  async revisions(caller: Caller, requested: string | null, names: string[]) {
+    const project = this.scopeFor(caller, requested), scopes = project ? [GLOBAL, project] : [GLOBAL];
+    names.forEach(checkName);
+    const { results } = await this.db.prepare(
+      `SELECT scope, name, rev, checked FROM keys WHERE scope IN (${scopes.map(() => "?").join(",")})`,
+    ).bind(...scopes).all<{ scope: string; name: string; rev: string; checked: number }>();
+    const out: Record<string, { rev: string; checked: boolean }> = {}, want = new Set(names), from = new Map<string, string>();
+    for (const r of results) {
+      if (want.size && !want.has(r.name)) continue;
+      if (from.get(r.name) === project) continue; // a project row already won
+      from.set(r.name, r.scope); out[r.name] = { rev: r.rev, checked: !!r.checked };
+    }
+    return { project, keys: out };
   }
 
   // Names and descriptions the caller could read, project rows over global ones. No values.

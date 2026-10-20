@@ -19,10 +19,10 @@ code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:au
 #once{padding:12px;border:1px solid var(--warn);border-radius:6px;display:none}
 </style></head><body><main>
 <h1>Tumbler</h1>
-<p class="muted">One store for env vars and keys. Values are never shown after they're saved.</p>
+<p class="muted">One store for env vars and keys. Values are never shown after they're saved. A key with a check is tested before a new value is saved; if the test fails, nothing is saved.</p>
 
 <h2>Keys</h2>
-<div class="wrap"><table><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Description</th><th>Rotated</th><th>Expires</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Checked</th><th>Description</th><th>Rotated</th><th>Expires</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
 <form id="putKey">
   <input name="name" placeholder="NAME" required pattern="[A-Z_][A-Z0-9_]*">
   <input name="scope" placeholder="global or project" value="global" required>
@@ -64,7 +64,7 @@ async function load() {
   document.getElementById('revokePending').textContent = revoke_pending
     ? revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
   document.getElementById('keys').replaceChildren(...keys.map(k => { const tr = document.createElement('tr');
-    tr.append(td(k.name), td(k.scope), td(k.kind), td(k.description, 'muted'), td(day(k.rotated_at)), td(day(k.expires_at), stale(k.expires_at) ? 'warn' : ''),
+    tr.append(td(k.name), td(k.scope), td(k.kind), td(k.checked ? 'yes' : 'no', k.checked ? '' : 'muted'), td(k.description, 'muted'), td(day(k.rotated_at)), td(day(k.expires_at), stale(k.expires_at) ? 'warn' : ''),
       btn('Delete', async () => { if (confirm('Delete ' + k.scope + '/' + k.name + '?')) { await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }); load(); } }));
     return tr; }));
   const act = (label, path, method, body) => async () => { try { await api('grants/' + path, { method, body: body && JSON.stringify(body) }); } catch (err) { alert(err.message); } load(); };
@@ -83,9 +83,11 @@ async function load() {
     tr.append(td(a.at.replace('T', ' ').slice(0, 19)), td(a.actor), td(a.action), td(a.project), td(a.names, 'muted')); return tr; }));
 }
 const putKey = document.getElementById('putKey');
-putKey.kind.onchange = () => { putKey.config.style.display = putKey.kind.value === 'static' ? 'none' : 'block'; };
+const STATIC_HINT = '{"check": "openai"}  (optional: anthropic, openai, github, stripe, cloudflare, or {"url": "https://…", "header": "authorization", "prefix": "Bearer "})';
+putKey.kind.onchange = () => { putKey.config.placeholder = putKey.kind.value === 'static' ? STATIC_HINT : MINT_HINT; };
+const MINT_HINT = putKey.config.placeholder; putKey.config.style.display = 'block'; putKey.kind.onchange();
 putKey.onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target), kind = f.get('kind');
-  try { const config = kind === 'static' || !String(f.get('config')).trim() ? undefined : JSON.parse(f.get('config'));
+  try { const config = !String(f.get('config')).trim() ? undefined : JSON.parse(f.get('config'));
     await api('keys/' + encodeURIComponent(f.get('scope')) + '/' + encodeURIComponent(f.get('name')), { method: 'PUT',
     body: JSON.stringify({ value: f.get('value'), kind, config, description: f.get('description'), expires_at: f.get('expires_at') || null }) });
     e.target.reset(); load(); } catch (err) { alert(err.message); } };

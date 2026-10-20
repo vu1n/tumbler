@@ -3,10 +3,15 @@ import { Catalog, GLOBAL, Refused } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import type { GrantRow, Grants } from "./grants.ts";
+import { checkKey, type Verifiers } from "./verify.ts";
 
 export interface Deps {
   catalog: Catalog; admin: (request: Request) => Promise<string | null>; cli?: string; s1?: S1Client | null; grants?: Grants;
+  fetcher?: typeof fetch; // what static key checks call; global fetch unless a test swaps it
 }
+
+const verifiers = ({ grants, fetcher }: Deps): Verifiers => ({ providers: grants?.providers ?? {}, fetcher });
+const MAX_CHECKS = 50;
 
 // What a caller learns about its grant: never the child credential or its provider id.
 const grantView = (g: GrantRow) => ({ id: g.id, name: g.name, state: g.state, scopes: g.scopes, requested: g.requested, expires_at: g.expires_at });
@@ -32,7 +37,8 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
   }
 }
 
-async function agentRoute(request: Request, url: URL, { catalog, s1, grants }: Deps) {
+async function agentRoute(request: Request, url: URL, deps: Deps) {
+  const { catalog, s1, grants } = deps;
   const token = bearer(request), caller = token ? await catalog.caller(token) : null;
   if (!caller) return json({ error: "unauthorized" }, 401);
   // Which of the caller's keys this repo needs, from its file and dependency names. Names out, never values.
@@ -61,12 +67,34 @@ async function agentRoute(request: Request, url: URL, { catalog, s1, grants }: D
     if (!out.length) return json({ error: `no minted key in this set has scope ${scopes.join(", ")}` }, 400);
     return json({ grants: out });
   }
+  // Run each key's check on its current value: {"keys": [...]} (empty: every key the caller reads).
+  // Statuses only, never a value; `tumbler run` calls this when a command fails.
+  if (url.pathname === "/v1/check" && request.method === "POST") {
+    const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+    let names = Array.isArray(body.keys) ? body.keys.map(String) : [];
+    if (!names.length) names = (await catalog.visible(caller, url.searchParams.get("project"))).keys.map((k) => k.name);
+    if (names.length > MAX_CHECKS) return json({ error: `at most ${MAX_CHECKS} keys per check` }, 400);
+    const checks: Record<string, unknown> = {};
+    let project: string | null = null;
+    for (const name of names) {
+      const found = await catalog.rowFor(caller, url.searchParams.get("project"), name);
+      project = found.project;
+      checks[name] = await checkKey(found.row.kind, JSON.parse(found.row.config || "{}"), await catalog.value(found.row), verifiers(deps));
+    }
+    await catalog.audit(caller.name, "check", project, names);
+    return json({ project, checks });
+  }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
   if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects });
   // Names only: listing must not mint a child for every minted key.
   if (url.pathname === "/v1/keys") {
     const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
     return json({ project, keys: keys.map((k) => k.name) });
+  }
+  // Revisions only (a new one on every save) and whether each passed its check: what --watch polls.
+  if (url.pathname === "/v1/revs") {
+    const names = (url.searchParams.get("keys") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    return json(await catalog.revisions(caller, url.searchParams.get("project"), names));
   }
   if (url.pathname === "/v1/env") {
     const names = (url.searchParams.get("keys") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -75,7 +103,8 @@ async function agentRoute(request: Request, url: URL, { catalog, s1, grants }: D
   return json({ error: "not found" }, 404);
 }
 
-async function adminRoute(request: Request, url: URL, { catalog, admin, grants }: Deps) {
+async function adminRoute(request: Request, url: URL, deps: Deps) {
+  const { catalog, admin, grants } = deps;
   const who = await admin(request);
   if (!who) return new Response("forbidden", { status: 403 });
   const path = url.pathname, m = request.method;
@@ -98,11 +127,17 @@ async function adminRoute(request: Request, url: URL, { catalog, admin, grants }
         const b = await body();
         const kind = b.kind ? String(b.kind) : undefined, config = b.config && typeof b.config === "object" ? b.config : undefined;
         const prev = await catalog.keyRow(scope, name), effective = kind ?? prev?.kind ?? "static";
+        const cfg = config ?? JSON.parse(prev?.config || "{}"), value = String(b.value ?? "");
         if (effective !== "static") {
           if (!grants) return json({ error: "minting is off" }, 501);
-          grants.validate(effective, config ?? JSON.parse(prev?.config || "{}"));
+          grants.validate(effective, cfg);
         }
-        await catalog.put(scope, name, String(b.value ?? ""), { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null, kind, config });
+        // Test the new value before it replaces the old one: a key that fails saves nothing.
+        const check = value ? await checkKey(effective, cfg, value, verifiers(deps)) : { status: "none" as const };
+        if (check.status === "invalid" || check.status === "error") {
+          return json({ error: `${name}: the new value failed its check, ${check.detail}; nothing was saved and the old value stays` }, check.status === "invalid" ? 400 : 502);
+        }
+        await catalog.put(scope, name, value, { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null, kind, config, checked: check.status === "ok" });
         // End the old revision's grants now, so their children stop working at once. If this is
         // missed (a crash, a concurrent save), current() ends each one on its next request, revoking
         // with the retired revision. "system": a rotation must not block the next grant like a revoke.

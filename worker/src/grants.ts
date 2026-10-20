@@ -7,6 +7,7 @@
 import { type Caller, type Catalog, Refused } from "./catalog.ts";
 import { open, seal } from "./crypto.ts";
 import { autoApproved, type GrantEvent, type GrantState, isLive, transition } from "./machine.ts";
+import type { Outcome } from "./verify.ts";
 
 export { autoApproved };
 
@@ -16,6 +17,8 @@ export interface Provider {
   validate(config: MintConfig): void;
   mint(parent: string, config: MintConfig, scopes: string[], expiresAt: Date, label: string): Promise<Minted>;
   revoke(parent: string, config: MintConfig, childId: string): Promise<void>;
+  // Whether a parent works, before it is saved (verify.ts). Optional: without it a key saves unchecked.
+  verify?(parent: string, config: MintConfig): Promise<Outcome>;
 }
 
 export const DEFAULT_TTL_MIN = 30, MIN_TTL_MIN = 15, MAX_TTL_MIN = 24 * 60;
