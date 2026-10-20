@@ -27,6 +27,7 @@ export const DEFAULT_TTL_MIN = 30, MIN_TTL_MIN = 15, MAX_TTL_MIN = 24 * 60;
 // Approval therefore lasts ttl_minutes minus this margin.
 export const REUSE_MARGIN_MS = 6 * 60 * 1000;
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // an unanswered request lapses to denied
+const ABANDONED_MS = 60 * 1000; // a read claim still unminted after this was left by a dead request
 
 export interface KeyRow { scope: string; name: string; kind: string; config: string; rev: string; iv: ArrayBuffer | Uint8Array; ciphertext: ArrayBuffer | Uint8Array }
 export interface GrantRow {
@@ -106,7 +107,11 @@ export class Grants {
         throw new Refused(409, `grant ${id} now asks for ${g.requested.join(", ")}; reload and decide again`);
       }
       const row = await this.catalog.keyRow(g.key_scope, g.name);
-      if (!row) { await this.close(g, "revoked", who); throw new Refused(404, `key ${g.name} is gone`); }
+      if (!row || row.rev !== g.key_rev) {
+        // Minting would only fail store()'s check and burn a child; end the grant instead.
+        await this.close(g, "revoked", "system");
+        throw new Refused(409, `key ${g.name} was rotated or deleted since this was asked; the caller asks again`);
+      }
       return this.mintFor(g, row, g.requested, who);
     }
     // Guarded on the state read above, so a deny racing a revoke can't overwrite it (and unstick it).
@@ -130,14 +135,16 @@ export class Grants {
     for (const r of results) await this.close(parse(r), "revoked", who);
   }
 
-  // A mint key about to be deleted or rotated: end its grants with the parent and config that minted
-  // their children, while that row still exists.
-  // Runs after the new row is written (or the old one deleted), so no new grant can open on the old
-  // row meanwhile; a mint already in flight on it fails its compare-and-set in store().
-  async closeKey(row: KeyRow, who: string) {
-    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE key_scope = ? AND name = ? AND key_rev = ? AND ${LIVE}`)
-      .bind(row.scope, row.name, row.rev).all<any>();
-    for (const r of results) await this.close(parse(r), "revoked", who, row);
+  // After a mint key is rotated or deleted: end every live grant on it from a revision that is no
+  // longer current (any older one, not just the one this write replaced, so concurrent saves or a
+  // retry after a failed close still catch them). close() revokes with the minting revision.
+  async closeStale(scope: string | null = null, name: string | null = null) {
+    const { results } = await this.db.prepare(
+      `SELECT * FROM grants g WHERE ${LIVE} AND (? IS NULL OR (g.key_scope = ? AND g.name = ?))
+         AND g.key_rev IS NOT (SELECT rev FROM keys k WHERE k.scope = g.key_scope AND k.name = g.name)`,
+    ).bind(scope, scope, name).all<any>();
+    for (const r of results) await this.close(parse(r), "revoked", "system");
+    return results.length;
   }
 
   // Expire every active grant past its child's expiry and delete the child at the provider.
@@ -145,6 +152,7 @@ export class Grants {
     const { results } = await this.db.prepare("SELECT * FROM grants WHERE state = 'active' AND expires_at <= ?")
       .bind(this.now().toISOString()).all<any>();
     for (const r of results) await this.close(parse(r), "expired", "system");
+    await this.closeStale(); // grants a missed post-rotation cleanup left behind
     // Nobody answered: a pending grant lapses to denied, and a waiting step-up is dropped.
     const stale = new Date(this.now().getTime() - PENDING_TTL_MS).toISOString(), t = this.now().toISOString();
     await this.db.prepare("UPDATE grants SET state = 'denied', requested = NULL, requested_at = NULL, decided_by = 'timeout', updated_at = ? WHERE state = 'pending' AND requested_at <= ?").bind(t, stale).run();
@@ -177,6 +185,12 @@ export class Grants {
     const g = await this.live(caller, project, row.name);
     if (!g) return null;
     if (g.state === "active" && !this.fresh(g)) { await this.close(g, "expired", "system"); return null; }
+    // A read claim whose minting request died (evicted, crashed) before storing: drop it and retry.
+    if (g.state === "pending" && !g.child_id && (g.requested ?? []).every(autoApproved)
+      && Date.parse(g.created_at) < this.now().getTime() - ABANDONED_MS && !await this.blocked(caller, row)) {
+      await this.db.prepare("DELETE FROM grants WHERE id = ? AND state = 'pending' AND child_id IS NULL").bind(g.id).run();
+      return null;
+    }
     // Another key row (a project key now overriding a global one) or an older revision of this one:
     // end it (close() finds the revision that minted it, retired or not) and start fresh.
     if (g.key_scope !== row.scope || g.key_rev !== row.rev) { await this.close(g, "revoked", "system"); return null; }
@@ -255,7 +269,7 @@ export class Grants {
          expires_at = ?, decided_by = ?, updated_at = ? WHERE id = ? AND ${LIVE} AND child_id IS ? AND key_rev = ?
          AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)`,
     ).bind(JSON.stringify(scopes), m.id, iv, ciphertext, m.expires_at, who, this.now().toISOString(), id, prev,
-      row.rev, row.scope, row.name, row.rev).run();
+      row.rev, row.scope, row.name, row.rev).run().catch(async (e: Error) => { await this.revokeChild(row, m.id); throw e; });
     if (!r.meta.changes) {
       await this.revokeChild(row, m.id);
       throw new Refused(409, `grant ${id} changed while minting; run again`);
@@ -270,7 +284,7 @@ export class Grants {
 
   // End a grant: forget its child here first, then delete it at the provider (best effort: it
   // expires there on its own if the provider can't be reached).
-  // `row` is the key row that minted the child, when the caller has it (closeKey, before a rotation).
+  // `row` is the key row that minted the child, when the caller has it.
   async close(g: GrantRow, state: "expired" | "revoked", who: string, row?: KeyRow | null) {
     // Why: RETURNING reads the child this update actually ended, not the one `g` saw earlier, so a
     // child minted concurrently is never left alive at the provider.

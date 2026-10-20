@@ -106,14 +106,14 @@ async function adminRoute(request: Request, url: URL, { catalog, admin, grants }
         // End the old revision's grants now, so their children stop working at once. If this is
         // missed (a crash, a concurrent save), current() ends each one on its next request, revoking
         // with the retired revision. "system": a rotation must not block the next grant like a revoke.
-        if (prev && prev.kind !== "static" && grants) await grants.closeKey(prev, "system");
+        if (prev && prev.kind !== "static" && grants) await grants.closeStale(scope, name);
         await catalog.audit(who, "put", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });
       }
       if (m === "DELETE") {
         const prev = await catalog.keyRow(scope, name);
         await catalog.remove(scope, name);
-        if (prev && prev.kind !== "static" && grants) await grants.closeKey(prev, "system");
+        if (prev && prev.kind !== "static" && grants) await grants.closeStale(scope, name);
         await catalog.audit(who, "delete", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });
       }

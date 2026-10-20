@@ -315,6 +315,45 @@ test("a deny racing a revoke can't overwrite it", async () => {
   assert.equal((await adminGrants(s))[0].state, "revoked");
 });
 
+test("after a rotation every older revision's grant is ended, not just the one the save replaced", async () => {
+  const s = await setup();
+  await s.env();                                                  // dev: a grant on revision 1
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", "parent-2"); // a save whose cleanup never ran
+  await s.env(s.other);                                           // other: a grant on revision 2
+  await s.call("PUT", "/admin/api/keys/dev/CLOUDFLARE_API_TOKEN", undefined, { value: "parent-3" }, "vu@example.com");
+  assert.equal((await adminGrants(s)).filter((g: any) => g.state === "active").length, 0);
+  assert.deepEqual(s.fake.revoked.sort(), ["id-1", "id-2"]);
+});
+
+test("a read claim left by a dead request is dropped after a minute instead of blocking for a day", async () => {
+  const s = await setup();
+  const t = new Date(Date.parse("2026-10-20T12:00:00Z")).toISOString();
+  s.db.raw.prepare(`INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, requested, requested_at, created_at, updated_at)
+    VALUES ('g_dead', 'dev', 'dev', 'dev', ?, 'CLOUDFLARE_API_TOKEN', 'pending', '[]', '["workers:read"]', ?, ?, ?)`)
+    .run((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev, t, t, t);
+  assert.match((await (await s.env()).json()).error, /being minted by another request/);
+  s.tick(2);
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+});
+
+test("approving after a rotation ends the grant instead of minting under the new parent", async () => {
+  const s = await setup();
+  await s.env();
+  const up = await (await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).json();
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", "parent-2");
+  const r = await s.call("POST", `/admin/api/grants/${up.grants[0].id}/approve`, undefined, { requested: up.grants[0].requested }, "vu@example.com");
+  assert.equal(r.status, 409);
+  assert.equal(s.fake.minted.length, 1);
+  assert.equal((await adminGrants(s))[0].state, "revoked");
+});
+
+test("a parent that can't be a header value is refused; fetch errors never quote it", async () => {
+  const s = await setup();
+  await assert.rejects(s.catalog.put("dev", "CF_BAD", "sec\nret", { kind: "mint:cloudflare", config: CONFIG }), /printable ASCII/);
+  const cf = cloudflare((async () => { throw new TypeError(`invalid header value Bearer ${PARENT}`); }) as any);
+  await assert.rejects(cf.mint(PARENT, CONFIG, ["workers:read"], new Date(), "x"), (e: any) => e.status === 502 && !e.message.includes(PARENT));
+});
+
 test("a project key overriding a global one starts a new grant instead of reusing the old key's child", async () => {
   const s = await setup();
   await s.catalog.put("global", "CF_G", PARENT, { kind: "mint:cloudflare", config: CONFIG });

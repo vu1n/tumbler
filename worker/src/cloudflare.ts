@@ -13,10 +13,11 @@ const ACCOUNT = /^[0-9a-f]{32}$/, GROUP = /^[0-9a-f]{32}$/;
 
 export function cloudflare(fetcher: typeof fetch = fetch): Provider {
   const call = async (method: string, path: string, parent: string, body?: unknown) => {
+    // Why the catch: a fetch error message can quote a header, and the parent is one.
     const r = await fetcher(API + path, {
       method, body: body === undefined ? undefined : JSON.stringify(body),
       headers: { authorization: `Bearer ${parent}`, "content-type": "application/json" },
-    });
+    }).catch(() => { throw new Refused(502, `cloudflare ${method} tokens: request failed`); });
     const j = await r.json().catch(() => ({})) as any;
     // Why: only the status and Cloudflare's error codes, never the body as a whole, reach a caller.
     if (!r.ok || j.success === false) {

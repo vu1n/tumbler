@@ -82,6 +82,9 @@ export class Catalog {
     if (prev && prev.kind !== "static" && kind === "static") {
       throw new Refused(409, `${scope}/${name} is ${prev.kind}; its value is a parent credential, so delete the key to make it static`);
     }
+    // Why: a parent goes into an Authorization header, and a runtime that rejects a bad header value
+    // may quote it in the error, which then reaches a log line.
+    if (kind !== "static" && !/^[\x21-\x7e]+$/.test(value)) throw new Refused(400, "a parent credential must be printable ASCII with no spaces");
     const { iv, ciphertext } = await seal(this.key, scope, name, value), t = now();
     // Why one batch: the old revision is retired in the same transaction that replaces it, so even
     // concurrent writes each keep the parent they displaced.
