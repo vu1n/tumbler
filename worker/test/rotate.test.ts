@@ -122,3 +122,11 @@ test("a stopped command is never rerun or reported on; a crashed one is reported
   const crashed = await cli(["run", "-k", "ROT_KEY", "--", "node", "-e", "process.kill(process.pid, 'SIGSEGV')"], { TUMBLER_TTL: "0" });
   assert.match(crashed.stderr, /the command was killed by SIGSEGV; checking its keys/);
 });
+
+test("a failed run with more keys than one /v1/check takes still reports every key", async () => {
+  const names = Array.from({ length: 25 }, (_, i) => `MANY_${i}`);
+  for (const n of names) await catalog.put("dev", n, `v-${n}`);
+  const r = await cli(["run", "-k", names.join(","), "--", "node", "-e", "process.exit(1)"], { TUMBLER_TTL: "0" });
+  assert.doesNotMatch(r.stderr, /could not run their checks/);
+  assert.equal(r.stderr.match(/has no check/g)!.length, 25);
+});

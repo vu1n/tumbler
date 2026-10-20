@@ -80,7 +80,8 @@ changes inside a running command unless you ask for it.
   "authorization", "prefix": "Bearer "}}`. Only https URLs are allowed, and redirects aren't
   followed, because the value is sent there. If the service can't be reached, `/admin` offers to
   save anyway (`skip_check: true`), so a leaked key can still be replaced during an outage. A value
-  saved that way is marked unchecked. A value the service rejects is never saved.
+  saved that way is marked unchecked. A value the service rejects (401) is never saved. A 403 counts
+  as inconclusive, since it can mean a scoped key without access to the check endpoint.
 - **When a command fails**, `run` refetches its keys, skipping the cache, and runs each key's check on
   the current value. It then reports which keys changed since the command started, and which pass or
   fail their check. When every checked key passes and none changed, it says the failure is probably

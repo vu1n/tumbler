@@ -54,7 +54,10 @@ export function staticCheck(config: Record<string, unknown>): StaticCheck | null
 // Classify an HTTP status the same way for every check.
 export const byStatus = (status: number): Outcome =>
   status >= 200 && status < 300 ? { status: "ok" }
-    : status === 401 || status === 403 ? { status: "invalid", detail: `rejected (${status})` }
+    : status === 401 ? { status: "invalid", detail: "rejected (401)" }
+    // Why not invalid: a 403 can mean the key is fine but scoped away from this endpoint (a Stripe
+    // restricted key without balance read). Inconclusive, so /admin can still save it unchecked.
+    : status === 403 ? { status: "error", detail: "could not check (403: no permission for the check endpoint)" }
     : status >= 300 && status < 400 ? { status: "error", detail: `could not check (redirected, ${status})` }
     : { status: "error", detail: `could not check (${status})` };
 

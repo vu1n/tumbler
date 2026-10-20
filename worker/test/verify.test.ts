@@ -141,4 +141,7 @@ test("when a check can't run, the admin may save unchecked; a rejected value nev
   assert.equal(bad.status, 400); assert.equal((await bad.json()).can_skip, undefined);
   assert.equal(await s.read("OPENAI_API_KEY"), "down-2");
   assert.deepEqual(await runCheck(PRESETS.openai, "redir-4", s.net.fetcher), { status: "error", detail: "could not check (redirected, 302)" });
+  // A 403 is a key scoped away from the check endpoint, not a bad key: inconclusive, so it can be saved.
+  const scoped = (async () => new Response("", { status: 403 })) as unknown as typeof fetch;
+  assert.equal((await runCheck(PRESETS.stripe, "rk-scoped", scoped)).status, "error");
 });

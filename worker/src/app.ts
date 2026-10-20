@@ -144,7 +144,8 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
             ...(check.status === "error" ? { can_skip: true } : {}) }, check.status === "invalid" ? 400 : 502);
         }
         if (skipped) await catalog.audit(who, "put-unchecked", scope === GLOBAL ? null : scope, [name]);
-        await catalog.put(scope, name, value, { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null, kind, config, checked: check.status === "ok" });
+        await catalog.put(scope, name, value, { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null,
+          kind: effective, config: cfg, checked: check.status === "ok" }); // exactly what was checked, not a re-read
         // End the old revision's grants now, so their children stop working at once. If this is
         // missed (a crash, a concurrent save), current() ends each one on its next request, revoking
         // with the retired revision. "system": a rotation must not block the next grant like a revoke.

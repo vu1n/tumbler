@@ -362,7 +362,9 @@ async function diagnose(how, used, q, load, retry) {
   let fresh = null, checks = {};
   try { fresh = await load(true); } catch (e) { say(`  could not refetch them (${e.message})`); }
   const names = Object.keys(used).sort();
-  try { checks = (await brokerCall("POST", `/v1/check${q}`, { keys: names })).checks; } catch (e) { say(`  could not run their checks (${e.message})`); }
+  // In batches of 20, the most /v1/check takes at once.
+  try { for (let i = 0; i < names.length; i += 20) Object.assign(checks, (await brokerCall("POST", `/v1/check${q}`, { keys: names.slice(i, i + 20) })).checks); }
+  catch (e) { say(`  could not run their checks (${e.message})`); }
   const changed = fresh ? names.filter((n) => fresh[n] !== used[n]) : [];
   const failing = names.filter((n) => checks[n]?.status === "invalid"), checked = names.filter((n) => checks[n] && checks[n].status !== "none");
   for (const n of names) {
@@ -397,12 +399,17 @@ async function watching(state, path, known, load, cmd, argv) {
     let now;
     try { now = (await brokerGet(path)).keys; } catch { continue; } // the broker is down: keep what runs
     const changed = Object.keys(now).filter((n) => n in state.env && known[n] && now[n].rev !== known[n].rev);
+    const seen = { ...known }; // to undo: a checked revision we fail to fetch stays pending for the next poll
     for (const n of changed) known[n] = now[n];
     let push = changed.filter((n) => now[n].checked);
     for (const n of changed.filter((n) => !now[n].checked)) say(`${n} changed but its new value wasn't checked when it was saved; keeping the old one (restart to pick it up)`);
     if (!push.length) continue;
     let fresh;
-    try { fresh = await load(true); } catch (e) { say(`${push.join(", ")} changed but could not be fetched (${e.message}); keeping the old values`); continue; }
+    try { fresh = await load(true); } catch (e) {
+      say(`${push.join(", ")} changed but could not be fetched (${e.message}); keeping the old values and trying again next poll`);
+      for (const n of push) known[n] = seen[n];
+      continue;
+    }
     // Why again: a save between the poll and the fetch may have put an unchecked value behind the
     // checked revision. Only a key still at that revision is pushed; the next poll sees the rest.
     try { const after = (await brokerGet(path)).keys; push = push.filter((n) => after[n]?.rev === now[n].rev); } catch { continue; }
