@@ -16,5 +16,11 @@ export function memoryD1(): D1Database & { raw: DatabaseSync } {
   for (const f of readdirSync(new URL("../migrations", import.meta.url)).sort()) {
     db.exec(readFileSync(new URL(`../migrations/${f}`, import.meta.url), "utf8"));
   }
-  return { raw: db, prepare: (sql: string) => new Stmt(db, sql) } as unknown as D1Database & { raw: DatabaseSync };
+  // Like D1's batch: every statement in one transaction, all or none.
+  const batch = async (stmts: Stmt[]) => {
+    db.exec("BEGIN");
+    try { const out = []; for (const s of stmts) out.push(await s.run()); db.exec("COMMIT"); return out; }
+    catch (e) { db.exec("ROLLBACK"); throw e; }
+  };
+  return { raw: db, prepare: (sql: string) => new Stmt(db, sql), batch } as unknown as D1Database & { raw: DatabaseSync };
 }

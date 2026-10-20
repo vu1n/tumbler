@@ -126,7 +126,8 @@ Each caller holds one **grant** per minted key, and its state decides what the e
   approval is refused until you reload.
 - Revoke deletes the child at once. For a day after that, that caller's next grant on the key waits
   for approval, even for reads. Revoking a caller token ends all of its grants. Deleting a minted key,
-  or saving a new parent or config, first ends its grants with the old parent.
+  or saving a new parent or config, ends its grants. Old parents are kept sealed for a day, so a
+  child they minted can always be revoked.
 - Failures never widen anything. A Cloudflare error, a pending or denied grant, or a broker that
   can't be reached all mean the command gets no token. No failure falls back to the parent or to a
   broader child.

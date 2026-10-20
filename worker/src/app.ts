@@ -103,8 +103,9 @@ async function adminRoute(request: Request, url: URL, { catalog, admin, grants }
           grants.validate(effective, config ?? JSON.parse(prev?.config || "{}"));
         }
         await catalog.put(scope, name, String(b.value ?? ""), { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null, kind, config });
-        // Why: end the old row's grants with the old parent, after the write so none can open on it
-        // meanwhile. "system": a rotation must not block the next grant the way an admin revoke does.
+        // End the old revision's grants now, so their children stop working at once. If this is
+        // missed (a crash, a concurrent save), current() ends each one on its next request, revoking
+        // with the retired revision. "system": a rotation must not block the next grant like a revoke.
         if (prev && prev.kind !== "static" && grants) await grants.closeKey(prev, "system");
         await catalog.audit(who, "put", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });

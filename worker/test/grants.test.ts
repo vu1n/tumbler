@@ -276,6 +276,45 @@ test("a revoke can't be sidestepped through another pinned project, and unsorted
   assert.equal((await s.call("GET", "/v1/env?project=prod&keys=CF_G", both)).status, 409);
 });
 
+test("a same-millisecond rotation during a mint still wins: revisions are random, not timestamps", async () => {
+  const s = await setup();
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+    await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", "parent-2", { kind: "mint:cloudflare", config: { ...CONFIG, scopes: { "workers:read": [READ] } } });
+    return mint(...a);
+  };
+  assert.equal((await s.env()).status, 409);
+  s.fake.provider.mint = mint;
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
+test("a rotation whose cleanup never ran: the next request ends the old grant with the retired parent", async () => {
+  const s = await setup();
+  const revokedWith: string[] = [];
+  const revoke = s.fake.provider.revoke;
+  s.fake.provider.revoke = async (parent: string, c: any, id: string) => { revokedWith.push(parent); return revoke(parent, c, id); };
+  await s.env();
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", "parent-2"); // straight to the catalog: no closeKey
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
+  assert.deepEqual(revokedWith, [PARENT]);
+  assert.equal(s.fake.minted.at(-1)!.parent, "parent-2");
+  await s.catalog.remove("dev", "CLOUDFLARE_API_TOKEN");
+  const [g] = (await adminGrants(s)).filter((x: any) => x.state === "active");
+  await s.call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, "vu@example.com");
+  assert.deepEqual(revokedWith, [PARENT, "parent-2"]); // still revocable after the key is gone
+});
+
+test("a deny racing a revoke can't overwrite it", async () => {
+  const s = await setup();
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: { ...CONFIG, start: ["workers:write"] } });
+  await s.env();
+  const [g] = await adminGrants(s);
+  const get = s.grants.get.bind(s.grants);
+  s.grants.get = async (id: string) => { s.grants.get = get; const r = await get(id); await s.grants.revoke(id, "vu@example.com"); return r; };
+  assert.equal((await s.call("POST", `/admin/api/grants/${g.id}/deny`, undefined, {}, "vu@example.com")).status, 409);
+  assert.equal((await adminGrants(s))[0].state, "revoked");
+});
+
 test("a project key overriding a global one starts a new grant instead of reusing the old key's child", async () => {
   const s = await setup();
   await s.catalog.put("global", "CF_G", PARENT, { kind: "mint:cloudflare", config: CONFIG });

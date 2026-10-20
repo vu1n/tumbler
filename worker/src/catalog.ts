@@ -20,10 +20,12 @@ export interface KeyRow {
   scope: string; name: string; kind: string; config: string; description: string; owner: string;
   created_at: string; rotated_at: string; expires_at: string | null;
 }
-export interface MintRow { scope: string; name: string; kind: string; config: string; rotated_at: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }
+export interface MintRow { scope: string; name: string; kind: string; config: string; rev: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }
 export interface TokenRow { name: string; projects: string[] | null; created_at: string; revoked_at: string | null }
 
 const now = () => new Date().toISOString();
+// Children live at most 24h (MAX_TTL_MIN in grants.ts); a retired parent is kept a little longer.
+export const RETIRE_MS = 25 * 60 * 60 * 1000;
 const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as ArrayBuffer);
 
 export class Catalog {
@@ -81,20 +83,37 @@ export class Catalog {
       throw new Refused(409, `${scope}/${name} is ${prev.kind}; its value is a parent credential, so delete the key to make it static`);
     }
     const { iv, ciphertext } = await seal(this.key, scope, name, value), t = now();
-    await this.db.prepare(
-      `INSERT INTO keys (scope, name, kind, config, description, owner, iv, ciphertext, created_at, rotated_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    // Why one batch: the old revision is retired in the same transaction that replaces it, so even
+    // concurrent writes each keep the parent they displaced.
+    await this.db.batch([this.retire(scope, name), this.db.prepare(
+      `INSERT INTO keys (scope, name, kind, config, rev, description, owner, iv, ciphertext, created_at, rotated_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (scope, name) DO UPDATE SET iv = excluded.iv, ciphertext = excluded.ciphertext,
-         kind = excluded.kind, config = excluded.config,
+         kind = excluded.kind, config = excluded.config, rev = excluded.rev,
          rotated_at = excluded.rotated_at, expires_at = excluded.expires_at,
          description = CASE WHEN excluded.description = '' THEN keys.description ELSE excluded.description END,
          owner = CASE WHEN excluded.owner = '' THEN keys.owner ELSE excluded.owner END`,
-    ).bind(scope, name, kind, kind === "static" ? "{}" : config, meta.description ?? "", meta.owner ?? "", iv, ciphertext, t, t, meta.expires_at ?? null).run();
+    ).bind(scope, name, kind, kind === "static" ? "{}" : config, crypto.randomUUID(), meta.description ?? "", meta.owner ?? "", iv, ciphertext, t, t, meta.expires_at ?? null)]);
+  }
+
+  retire(scope: string, name: string) {
+    return this.db.prepare(
+      `INSERT OR IGNORE INTO retired_keys (scope, name, rev, kind, config, iv, ciphertext, retire_until)
+       SELECT scope, name, rev, kind, config, iv, ciphertext, ? FROM keys WHERE scope = ? AND name = ? AND kind != 'static'`,
+    ).bind(new Date(Date.now() + RETIRE_MS).toISOString(), scope, name);
+  }
+
+  // A mint key at a given revision, current or retired: what minted a grant's child, so it can be revoked.
+  async revision(scope: string, name: string, rev: string) {
+    return await this.db.prepare("SELECT scope, name, kind, config, rev, iv, ciphertext FROM keys WHERE scope = ? AND name = ? AND rev = ?")
+      .bind(scope, name, rev).first<MintRow>()
+      ?? await this.db.prepare("SELECT scope, name, kind, config, rev, iv, ciphertext FROM retired_keys WHERE scope = ? AND name = ? AND rev = ?")
+        .bind(scope, name, rev).first<MintRow>();
   }
 
   // The sealed row for one key, as the grants module needs it to mint. Never leaves the broker.
   async keyRow(scope: string, name: string) {
-    return this.db.prepare("SELECT scope, name, kind, config, rotated_at, iv, ciphertext FROM keys WHERE scope = ? AND name = ?")
+    return this.db.prepare("SELECT scope, name, kind, config, rev, iv, ciphertext FROM keys WHERE scope = ? AND name = ?")
       .bind(scope, name).first<MintRow>();
   }
 
@@ -108,7 +127,7 @@ export class Catalog {
   }
 
   async remove(scope: string, name: string) {
-    const r = await this.db.prepare("DELETE FROM keys WHERE scope = ? AND name = ?").bind(scope, name).run();
+    const [, r] = await this.db.batch([this.retire(scope, name), this.db.prepare("DELETE FROM keys WHERE scope = ? AND name = ?").bind(scope, name)]);
     if (!r.meta.changes) throw new Refused(404, `no key ${scope}/${name}`);
   }
 
@@ -142,7 +161,7 @@ export class Catalog {
     names.forEach(checkName);
     const scopes = project ? [GLOBAL, project] : [GLOBAL];
     const { results } = await this.db.prepare(
-      `SELECT scope, name, kind, config, rotated_at, iv, ciphertext FROM keys WHERE scope IN (${scopes.map(() => "?").join(",")})`,
+      `SELECT scope, name, kind, config, rev, iv, ciphertext FROM keys WHERE scope IN (${scopes.map(() => "?").join(",")})`,
     ).bind(...scopes).all<MintRow>();
     const want = new Set(names), win = new Map<string, MintRow>();
     for (const r of results) {
