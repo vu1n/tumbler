@@ -139,7 +139,7 @@ test("a provider failure yields no token and leaves no live grant", async () => 
   const r = await s.env();
   assert.equal(r.status, 500);
   assert.equal((await s.env("x")).status, 401);
-  assert.deepEqual(await adminGrants(s), []);
+  assert.deepEqual((await adminGrants(s)).map((g: any) => [g.state, g.decided_by]), [["expired", "system"]]); // the claim was abandoned
   // A static key requested with it does not come back alone either: the whole response fails.
   assert.equal((await s.env(s.dev, "AWS_REGION,CLOUDFLARE_API_TOKEN")).status, 500);
 });

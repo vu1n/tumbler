@@ -142,6 +142,7 @@ async function adminRoute(request: Request, url: URL, { catalog, admin, grants }
       return json({ grant: grantView(await grants.decide(parts[1], parts[2] === "approve", who, seen)) });
     }
     if (m === "DELETE" && parts.length === 2) { await grants.revoke(parts[1], who); return json({ ok: true }); }
+    if (m === "GET" && parts.length === 3 && parts[2] === "events") return json({ events: await grants.events(parts[1]) });
   }
   if (parts[0] === "audit" && m === "GET") return json({ audit: await catalog.recentAudit() });
   return json({ error: "not found" }, 404);
