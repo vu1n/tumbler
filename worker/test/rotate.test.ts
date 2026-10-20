@@ -105,3 +105,20 @@ test("--watch restarts only for a checked new value, and goes back when the rest
   const [code, sig] = await new Promise<[number | null, string | null]>((ok) => p.on("exit", (c, s) => ok([c, s])));
   assert.ok(sig === "SIGTERM" || code === 143, `${code} ${sig}`);
 });
+
+test("a stopped command is never rerun or reported on; a crashed one is reported", async () => {
+  await save("ROT_KEY", "good-s1", { check: "openai" });
+  const script = "console.log('started'); process.on('SIGTERM', () => process.exit(1)); setInterval(() => {}, 1000);";
+  const p = spawn(CLI, ["run", "--retry", "-k", "ROT_KEY", "--", "node", "-e", script], { cwd: home, env: env({ TUMBLER_TTL: "0" }) });
+  let out = "", err = "";
+  p.stdout.on("data", (d) => { out += d; }); p.stderr.on("data", (d) => { err += d; });
+  for (let i = 0; i < 100 && !out.includes("started"); i++) await new Promise((r) => setTimeout(r, 50));
+  await save("ROT_KEY", "good-s2"); // a key changed, so only the stop keeps --retry from rerunning
+  p.kill("SIGTERM");
+  const code = await new Promise((ok) => p.on("exit", (c) => ok(c)));
+  assert.equal(code, 1);
+  assert.equal(out.match(/started/g)!.length, 1);
+  assert.doesNotMatch(err, /checking its keys/);
+  const crashed = await cli(["run", "-k", "ROT_KEY", "--", "node", "-e", "process.kill(process.pid, 'SIGSEGV')"], { TUMBLER_TTL: "0" });
+  assert.match(crashed.stderr, /the command was killed by SIGSEGV; checking its keys/);
+});

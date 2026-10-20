@@ -77,18 +77,24 @@ changes inside a running command unless you ask for it.
   the old value keeps working. Minted keys are checked by their provider (Cloudflare's
   `tokens/verify`). A static key names one in its config: a preset (`{"check": "openai"}`, also
   `anthropic`, `github`, `stripe`, `cloudflare`), or `{"check": {"url": "https://…", "header":
-  "authorization", "prefix": "Bearer "}}`. Only https URLs are allowed, because the value is sent there.
+  "authorization", "prefix": "Bearer "}}`. Only https URLs are allowed, and redirects aren't
+  followed, because the value is sent there. If the service can't be reached, `/admin` offers to
+  save anyway (`skip_check: true`), so a leaked key can still be replaced during an outage. A value
+  saved that way is marked unchecked. A value the service rejects is never saved.
 - **When a command fails**, `run` refetches its keys, skipping the cache, and runs each key's check on
   the current value. It then reports which keys changed since the command started, and which pass or
   fail their check. When every checked key passes and none changed, it says the failure is probably
-  not a key problem. Names and statuses only, never values. `TUMBLER_DIAGNOSE=off` turns this off.
+  not a key problem. A minted key is checked through its parent, and the report says so. Names and
+  statuses only, never values. `TUMBLER_DIAGNOSE=off` turns this off. A command you stopped (Ctrl-C,
+  or a SIGTERM to tumbler) gets no report and is never rerun or restarted.
 - **`--retry`** reruns the command once with the new values, and only when a key changed. If nothing
   changed, rerunning would fail the same way.
 - **`--watch`** is for long-running commands. It polls the keys' revisions every `TUMBLER_WATCH`
   seconds (30), and when a key changes whose new value passed its check on save, it restarts the
   command with that value. A key saved without a check is reported and never pushed. If the restarted
   command exits non-zero within `TUMBLER_WATCH_GRACE` seconds (10), it goes back to the previous
-  values. `--watch` follows saved values. It does not follow a minted child's expiry, so a command
+  values. A restart stops only the command itself, so a process it started (`sh -c`, `npm`) can
+  outlive it. `--watch` follows saved values. It does not follow a minted child's expiry, so a command
   that outlives the child still needs restarting.
 
 ### How `auto` picks keys

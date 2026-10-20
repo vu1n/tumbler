@@ -291,13 +291,9 @@ export class Grants {
   // expires there on its own if the provider can't be reached).
   // `row` is the key row that minted the child, when the caller has it.
   async close(g: GrantRow | null, state: "expired" | "revoked", who: string, row?: KeyRow | null) {
-    // Why the loop: the compare-and-set fails when a child was minted (or a request changed) since
-    // `g` was read; re-read and end what is there now, so a concurrent child is never left alive.
-    let ended: GrantRow | null = null;
-    for (let tries = 0; g && isLive(g.state) && !ended && tries < 5; tries++) {
-      ended = await this.apply(g, { type: state === "expired" ? "expire" : "revoke", who }, { store: { iv: null, ciphertext: null } });
-      if (!ended) g = await this.get(g.id);
-    }
+    // `live`: ends the grant in whatever live state it is in now, and returns the child that update
+    // actually ended, so a child minted concurrently is never left alive at the provider.
+    const ended = g && await this.apply(g, { type: state === "expired" ? "expire" : "revoke", who }, { store: { iv: null, ciphertext: null }, live: true });
     if (!ended || !g) return; // already ended by someone else
     if (ended.child_id) {
       // Only the revision that minted the child can delete it; a newer one may hold another parent.
@@ -349,7 +345,7 @@ export class Grants {
         `INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, requested, requested_at, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(g.id, g.caller, g.project, g.key_scope, g.key_rev, g.name, g.state, JSON.stringify(g.scopes),
-        asJson(g.requested), g.requested_at, g.created_at, g.updated_at), this.event(g.id, g.created_at, e, null, g.state)]);
+        asJson(g.requested), g.requested_at, g.created_at, g.updated_at), this.event(g.id, g.created_at, e, g.state)]);
       return true;
     } catch (err) {
       if (/UNIQUE/i.test((err as Error).message)) return false;
@@ -359,33 +355,49 @@ export class Grants {
 
   // The only writer of a grant's state. transition() decides what `e` makes of `g` (or refuses it);
   // the update is a compare-and-set on the state `g` was read in, and the event is appended in the
-  // same transaction only if the update landed. Null when refused or when the grant moved on.
+  // same transaction under the same condition, so the two land together or not at all. Null when
+  // refused or when the grant moved on.
   // `guard` adds conditions on the grants row; `store` sets columns that hold no state (the sealed child).
-  async apply(g: GrantRow, e: GrantEvent, extra: { guard?: string; binds?: unknown[]; store?: Record<string, unknown> } = {}): Promise<GrantRow | null> {
+  // `live`: match any live state instead of `g` exactly, for an event whose outcome doesn't depend on
+  // the rest (expire, revoke), so a stream of step-ups or re-mints can't keep a revoke from landing.
+  // Only the columns the event changes are written, and RETURNING reads the child actually ended.
+  async apply(g: GrantRow, e: GrantEvent, extra: { guard?: string; binds?: unknown[]; store?: Record<string, unknown>; live?: boolean } = {}): Promise<GrantRow | null> {
     const next = transition(g, e);
     if (!next) return null;
     const t = this.now().toISOString();
-    const set: Record<string, unknown> = { state: next.state, scopes: JSON.stringify(next.scopes), requested: asJson(next.requested),
-      requested_at: next.requested_at, child_id: next.child_id, expires_at: next.expires_at, decided_by: next.decided_by, ...extra.store, updated_at: t };
+    const all: Record<string, unknown> = { state: next.state, scopes: JSON.stringify(next.scopes), requested: asJson(next.requested),
+      requested_at: next.requested_at, child_id: next.child_id, expires_at: next.expires_at, decided_by: next.decided_by };
+    const was: Record<string, unknown> = { state: g.state, scopes: JSON.stringify(g.scopes), requested: asJson(g.requested),
+      requested_at: g.requested_at, child_id: g.child_id, expires_at: g.expires_at, decided_by: g.decided_by };
+    const set: Record<string, unknown> = { ...Object.fromEntries(Object.entries(all).filter(([k, v]) => v !== was[k] || k === "state" || (extra.live && ENDS.includes(k)))), ...extra.store, updated_at: t };
     const cols = Object.keys(set);
-    const [r] = await this.db.batch([
-      this.db.prepare(`UPDATE grants SET ${cols.map((c) => `${c} = ?`).join(", ")}
-        WHERE id = ? AND state = ? AND requested IS ? AND child_id IS ?${extra.guard ? ` AND ${extra.guard}` : ""}`)
-        .bind(...cols.map((c) => set[c]), g.id, g.state, asJson(g.requested), g.child_id, ...(extra.binds ?? [])),
-      this.event(g.id, t, e, g.state, next.state, true),
+    const [where, binds] = extra.live
+      ? [`id = ? AND ${LIVE}`, [g.id]]
+      : [`id = ? AND state = ? AND requested IS ? AND child_id IS ?${extra.guard ? ` AND ${extra.guard}` : ""}`,
+        [g.id, g.state, asJson(g.requested), g.child_id, ...(extra.binds ?? [])]];
+    const [, r] = await this.db.batch([
+      this.db.prepare(`INSERT INTO grant_events (grant_id, at, type, actor, from_state, to_state, scopes)
+        SELECT ?, ?, ?, ?, (SELECT state FROM grants WHERE id = ?), ?, ? WHERE EXISTS (SELECT 1 FROM grants WHERE ${where})`)
+        .bind(g.id, t, e.type, e.who, g.id, next.state, eventScopes(e), ...binds),
+      this.db.prepare(`UPDATE grants SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE ${where} RETURNING child_id, expires_at`)
+        .bind(...cols.map((c) => set[c]), ...binds),
     ]);
-    return r.meta.changes ? { ...g, ...next, updated_at: t } : null;
+    const row = (r.results as { child_id: string | null; expires_at: string | null }[] | undefined)?.[0];
+    return row ? { ...g, ...next, child_id: row.child_id, expires_at: row.expires_at, updated_at: t } : null;
   }
 
-  // Never the child or its provider id: the event's kind, who, the states and the scopes it carried.
-  event(id: string, at: string, e: GrantEvent, from: string | null, to: string, ifChanged = false) {
-    return this.db.prepare(`INSERT INTO grant_events (grant_id, at, type, actor, from_state, to_state, scopes)
-      SELECT ?, ?, ?, ?, ?, ?, ?${ifChanged ? " WHERE changes() > 0" : ""}`)
-      .bind(id, at, e.type, e.who, from, to, "scopes" in e ? JSON.stringify([...e.scopes].sort()) : null);
+  // The `open` event of a new grant. Never the child or its provider id: the event's kind, who, the
+  // states and the scopes it carried (apply() writes the rest the same way).
+  event(id: string, at: string, e: GrantEvent, to: string) {
+    return this.db.prepare(`INSERT INTO grant_events (grant_id, at, type, actor, from_state, to_state, scopes) VALUES (?, ?, ?, ?, NULL, ?, ?)`)
+      .bind(id, at, e.type, e.who, to, eventScopes(e));
   }
 }
 
+// What ending a grant always writes, whatever it held when it was read.
+const ENDS = ["requested", "requested_at", "decided_by"];
 const asJson = (v: string[] | null) => v ? JSON.stringify(v) : null;
+const eventScopes = (e: GrantEvent) => "scopes" in e ? JSON.stringify([...e.scopes].sort()) : null;
 
 // Never the sealed child: iv and ciphertext stay in D1.
 function parse(r: any): GrantRow {

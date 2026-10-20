@@ -11,7 +11,7 @@ export interface Deps {
 }
 
 const verifiers = ({ grants, fetcher }: Deps): Verifiers => ({ providers: grants?.providers ?? {}, fetcher });
-const MAX_CHECKS = 50;
+const MAX_CHECKS = 20;
 
 // What a caller learns about its grant: never the child credential or its provider id.
 const grantView = (g: GrantRow) => ({ id: g.id, name: g.name, state: g.state, scopes: g.scopes, requested: g.requested, expires_at: g.expires_at });
@@ -79,7 +79,9 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     for (const name of names) {
       const found = await catalog.rowFor(caller, url.searchParams.get("project"), name);
       project = found.project;
-      checks[name] = await checkKey(found.row.kind, JSON.parse(found.row.config || "{}"), await catalog.value(found.row), verifiers(deps));
+      const outcome = await checkKey(found.row.kind, JSON.parse(found.row.config || "{}"), await catalog.value(found.row), verifiers(deps));
+      // A minted key is checked through its parent, not the child the caller holds; say so.
+      checks[name] = found.row.kind === "static" || outcome.status === "none" ? outcome : { ...outcome, of: "parent" };
     }
     await catalog.audit(caller.name, "check", project, names);
     return json({ project, checks });
@@ -134,9 +136,14 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         }
         // Test the new value before it replaces the old one: a key that fails saves nothing.
         const check = value ? await checkKey(effective, cfg, value, verifiers(deps)) : { status: "none" as const };
-        if (check.status === "invalid" || check.status === "error") {
-          return json({ error: `${name}: the new value failed its check, ${check.detail}; nothing was saved and the old value stays` }, check.status === "invalid" ? 400 : 502);
+        // Why an override only for "error": when the service is down a leaked key must still be
+        // replaceable. It saves unchecked, so --watch never pushes it. A rejected value never saves.
+        const skipped = check.status === "error" && b.skip_check === true;
+        if (check.status === "invalid" || (check.status === "error" && !skipped)) {
+          return json({ error: `${name}: the new value failed its check, ${check.detail}; nothing was saved and the old value stays`,
+            ...(check.status === "error" ? { can_skip: true } : {}) }, check.status === "invalid" ? 400 : 502);
         }
+        if (skipped) await catalog.audit(who, "put-unchecked", scope === GLOBAL ? null : scope, [name]);
         await catalog.put(scope, name, value, { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null, kind, config, checked: check.status === "ok" });
         // End the old revision's grants now, so their children stop working at once. If this is
         // missed (a crash, a concurrent save), current() ends each one on its next request, revoking

@@ -7,7 +7,7 @@ import { Catalog } from "../src/catalog.ts";
 import { cloudflare } from "../src/cloudflare.ts";
 import { masterKey } from "../src/crypto.ts";
 import { Grants } from "../src/grants.ts";
-import { PRESETS, staticCheck } from "../src/verify.ts";
+import { PRESETS, runCheck, staticCheck } from "../src/verify.ts";
 import { memoryD1 } from "./d1.ts";
 
 const ACCT = "a".repeat(32), READ = "1".repeat(32);
@@ -21,6 +21,7 @@ function fakeNet() {
     seen.push({ url, headers });
     const value = Object.values(headers).join(" ");
     if (/down-/.test(value)) throw new TypeError(`connect failed with ${value}`);
+    if (/redir-/.test(value)) { assert.equal(init.redirect, "manual"); return new Response("", { status: 302, headers: { location: "http://evil.example/" } }); }
     const ok = /good-/.test(value);
     if (url.includes("/tokens/verify")) {
       return new Response(JSON.stringify(ok ? { success: true, result: { status: /disabled/.test(value) ? "disabled" : "active" } } : { success: false, errors: [{ code: 1000 }] }), { status: ok ? 200 : 401 });
@@ -119,9 +120,25 @@ test("/v1/check reports each key's check on its current value, never the value",
   const r = await s.call("POST", "/v1/check", { keys: ["GOOD", "PLAIN", "CF_TOKEN"] }, s.dev);
   const text = await r.text();
   assert.deepEqual(JSON.parse(text).checks, {
-    GOOD: { status: "invalid", detail: "rejected (401)" }, PLAIN: { status: "none" }, CF_TOKEN: { status: "ok" },
+    GOOD: { status: "invalid", detail: "rejected (401)" }, PLAIN: { status: "none" }, CF_TOKEN: { status: "ok", of: "parent" },
   });
   assert.ok(!/bad-revoked|good-parent/.test(text));
   assert.equal((await s.call("POST", "/v1/check", { keys: ["NOPE"] }, s.dev)).status, 404);
   assert.equal((await s.call("POST", "/v1/check", { keys: ["GOOD"] })).status, 401);
+});
+
+test("when a check can't run, the admin may save unchecked; a rejected value never saves, and redirects aren't followed", async () => {
+  const s = await setup();
+  await s.save("OPENAI_API_KEY", { value: "good-1", config: { check: "openai" } });
+  const down = await s.save("OPENAI_API_KEY", { value: "down-2" });
+  assert.equal((await down.json()).can_skip, true);
+  assert.equal((await s.save("OPENAI_API_KEY", { value: "down-2", skip_check: true })).status, 200);
+  assert.equal(await s.read("OPENAI_API_KEY"), "down-2");
+  const revs = await (await s.call("GET", "/v1/revs?keys=OPENAI_API_KEY", undefined, s.dev)).json();
+  assert.equal(revs.keys.OPENAI_API_KEY.checked, false); // so --watch never pushes it
+  assert.ok(JSON.stringify(s.db.raw.prepare("SELECT action FROM audit").all()).includes("put-unchecked"));
+  const bad = await s.save("OPENAI_API_KEY", { value: "bad-3", skip_check: true });
+  assert.equal(bad.status, 400); assert.equal((await bad.json()).can_skip, undefined);
+  assert.equal(await s.read("OPENAI_API_KEY"), "down-2");
+  assert.deepEqual(await runCheck(PRESETS.openai, "redir-4", s.net.fetcher), { status: "error", detail: "could not check (redirected, 302)" });
 });

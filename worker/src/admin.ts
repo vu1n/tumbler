@@ -54,7 +54,7 @@ code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:au
 <div class="wrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Project</th><th>Keys</th></tr></thead><tbody id="audit"></tbody></table></div>
 </main><script>
 const api = (p, o = {}) => fetch('/admin/api/' + p, { ...o, headers: { 'content-type': 'application/json', 'x-tumbler-admin': '1' } })
-  .then(async r => { const b = await r.json(); if (!r.ok) throw new Error(b.error || r.status); return b; });
+  .then(async r => { const b = await r.json(); if (!r.ok) throw Object.assign(new Error(b.error || r.status), { canSkip: !!b.can_skip }); return b; });
 const td = (t, cls) => { const e = document.createElement('td'); e.textContent = t ?? ''; if (cls) e.className = cls; return e; };
 const btn = (label, fn) => { const c = document.createElement('td'), b = document.createElement('button'); b.textContent = label; b.onclick = fn; c.append(b); return c; };
 const day = s => s ? s.slice(0, 10) : '';
@@ -87,10 +87,13 @@ const STATIC_HINT = '{"check": "openai"}  (optional: anthropic, openai, github, 
 putKey.kind.onchange = () => { putKey.config.placeholder = putKey.kind.value === 'static' ? STATIC_HINT : MINT_HINT; };
 const MINT_HINT = putKey.config.placeholder; putKey.config.style.display = 'block'; putKey.kind.onchange();
 putKey.onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target), kind = f.get('kind');
-  try { const config = !String(f.get('config')).trim() ? undefined : JSON.parse(f.get('config'));
-    await api('keys/' + encodeURIComponent(f.get('scope')) + '/' + encodeURIComponent(f.get('name')), { method: 'PUT',
-    body: JSON.stringify({ value: f.get('value'), kind, config, description: f.get('description'), expires_at: f.get('expires_at') || null }) });
-    e.target.reset(); load(); } catch (err) { alert(err.message); } };
+  const put = skip_check => { const config = !String(f.get('config')).trim() ? undefined : JSON.parse(f.get('config'));
+    return api('keys/' + encodeURIComponent(f.get('scope')) + '/' + encodeURIComponent(f.get('name')), { method: 'PUT',
+    body: JSON.stringify({ value: f.get('value'), kind, config, skip_check, description: f.get('description'), expires_at: f.get('expires_at') || null }) }); };
+  try { await put(false); e.target.reset(); load(); } catch (err) {
+    // The check couldn't run (the service is down): offer to save unchecked, e.g. to replace a leaked key.
+    if (!err.canSkip || !confirm(err.message + '\n\nSave it unchecked anyway? Running commands with --watch won\'t get it pushed.')) return alert(err.message);
+    try { await put(true); e.target.reset(); load(); } catch (err2) { alert(err2.message); } } };
 document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
   const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);
   try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects }) });

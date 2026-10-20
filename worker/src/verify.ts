@@ -26,7 +26,7 @@ export const PRESETS: Record<string, StaticCheck> = {
 };
 
 const HEADER = /^[A-Za-z0-9-]{1,64}$/, PRINTABLE = /^[\x20-\x7e]*$/, TOKEN = /^[\x21-\x7e]+$/;
-const TIMEOUT_MS = 10_000;
+export const TIMEOUT_MS = 10_000;
 
 // The check a static key's config names, validated; null when it names none.
 export function staticCheck(config: Record<string, unknown>): StaticCheck | null {
@@ -55,6 +55,7 @@ export function staticCheck(config: Record<string, unknown>): StaticCheck | null
 export const byStatus = (status: number): Outcome =>
   status >= 200 && status < 300 ? { status: "ok" }
     : status === 401 || status === 403 ? { status: "invalid", detail: `rejected (${status})` }
+    : status >= 300 && status < 400 ? { status: "error", detail: `could not check (redirected, ${status})` }
     : { status: "error", detail: `could not check (${status})` };
 
 export async function runCheck(check: StaticCheck, value: string, fetcher: typeof fetch = fetch): Promise<Outcome> {
@@ -63,6 +64,7 @@ export async function runCheck(check: StaticCheck, value: string, fetcher: typeo
   try {
     const r = await fetcher(check.url, {
       headers: { ...check.headers, [check.header]: (check.prefix ?? "") + value }, signal: AbortSignal.timeout(TIMEOUT_MS),
+      redirect: "manual", // a redirect would resend the value to wherever it points, https or not
     });
     await r.body?.cancel().catch(() => {});
     return byStatus(r.status);
