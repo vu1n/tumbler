@@ -1,7 +1,7 @@
 // End to end: the real CLI against the real routes, served over plain HTTP on localhost.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -157,4 +157,23 @@ test("key files deep in a big repo still reach the broker", async () => {
   const { stdout } = await cli(["auto", "--dry-run"], {}, repo(files));
   assert.match(stdout, /CLOUDFLARE_API_TOKEN\trule/);
   assert.match(stdout, /POSTHOG_API_KEY\tclef/);
+});
+
+test("a .tumbler that can't be written still runs with only the picked keys", async () => {
+  const dir = repo({ "wrangler.toml": "" });
+  // Why a dangling symlink, not chmod: tests may run as root, which ignores file modes.
+  symlinkSync(join(dir, "missing", "nowhere"), join(dir, ".tumbler"));
+  {
+    const printCf = ["node", "-e", "process.stdout.write([process.env.CLOUDFLARE_API_TOKEN, process.env.PYTH_API_KEY, process.env.AWS_REGION].join(' '))"];
+    const { stdout, stderr } = await cli(["run", "--", ...printCf], { TUMBLER_AUTO: "", TUMBLER_TTL: "0" }, dir);
+    assert.equal(stdout, "cf  ");
+    assert.match(stderr, /could not write .*picked key\(s\) only/);
+  }
+});
+
+test("if auto can't pick, the command doesn't start", async () => {
+  const dir = repo({ "wrangler.toml": "" }), marker = join(dir, "ran");
+  await assert.rejects(cli(["run", "--", "touch", marker], { TUMBLER_AUTO: "", TUMBLER_TTL: "0", TUMBLER_TOKEN: "tmb_bad" }, dir),
+    /auto could not pick keys/);
+  assert.ok(!existsSync(marker));
 });

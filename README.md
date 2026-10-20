@@ -62,8 +62,10 @@ tumbler shim <tool>...        wrappers so <tool> always runs under tumbler
 
 A `.tumbler` file in a repo lists the key names it needs (one per line) and optionally
 `project = <name>`. Without one, `run` calls `tumbler auto` first and writes it, so the command gets
-only the keys the repo needs. Commit the file so the set is reviewed like code. `TUMBLER_AUTO=off`
-skips this and fetches every key the token can read.
+only the keys the repo needs. Commit the file so the set is reviewed like code. A failure never widens
+the set: if auto can't reach the broker the command doesn't start, and if `.tumbler` can't be written
+(a read-only checkout) the command runs with just the picked keys. `TUMBLER_AUTO=off` skips auto and
+fetches every key the token can read.
 
 ### How `auto` picks keys
 

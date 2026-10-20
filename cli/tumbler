@@ -14,8 +14,9 @@
 // environment's network secret adds the Authorization header), TUMBLER_TTL seconds (default 300,
 // 0 disables the cache), TUMBLER_PROJECT (default project). A `.tumbler` file in the working
 // directory or any parent lists the key names a project wants, one per line, plus an optional
-// `project = <name>` line. With no `.tumbler`, `run` writes one with `tumbler auto` first
-// (TUMBLER_AUTO=off skips that and fetches every key the token can read).
+// `project = <name>` line. With no `.tumbler`, `run` writes one with `tumbler auto` first and passes
+// only those keys; if auto fails the command doesn't start. TUMBLER_AUTO=off skips auto and fetches
+// every key the token can read.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -259,13 +260,20 @@ async function run(args) {
   if (!rest.length) die("usage: tumbler run [-p project] [-k A,B] -- <cmd> [args...]", 2);
   // No .tumbler and no -k: work the set out once and write it down, so later runs and reviewers see it.
   if (!picked && !["0", "off", "false", "no"].includes((process.env.TUMBLER_AUTO ?? "").toLowerCase())) {
+    // Why: neither failure may widen the set to every key the token can read. If auto can't pick,
+    // the command doesn't start; if the pick can't be saved (read-only checkout), it still runs with
+    // exactly the picked keys.
+    let r;
+    try { r = await autoPick(project); } catch (e) {
+      die(`auto could not pick keys (${e.message}); pass -k A,B, add a .tumbler, or set TUMBLER_AUTO=off for every key`);
+    }
+    keys = r.keys.map((k) => k.name); picked = true;
+    const path = join(repoRoot(), ".tumbler");
     try {
-      const r = await autoPick(project), path = join(repoRoot(), ".tumbler");
       writeManifest(path, r);
-      process.stderr.write(`tumbler: wrote ${path} with ${r.keys.length} key(s); edit it to change what runs get\n`);
-      keys = r.keys.map((k) => k.name); picked = true;
+      process.stderr.write(`tumbler: wrote ${path} with ${keys.length} key(s); edit it to change what runs get\n`);
     } catch (e) {
-      process.stderr.write(`tumbler: auto failed (${e.message}); fetching every key this token can read\n`);
+      process.stderr.write(`tumbler: could not write ${path} (${e.code ?? e.message}); running with the ${keys.length} picked key(s) only\n`);
     }
   }
   let env;
