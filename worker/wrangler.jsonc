@@ -1,0 +1,21 @@
+{
+  "name": "tumbler",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // No id: the first `wrangler deploy` creates the database and keeps it linked.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "tumbler", "migrations_dir": "migrations" }
+  ],
+  // The one secret tumbler needs: a 32-byte base64 master key (`openssl rand -base64 32`) in a
+  // Cloudflare Secrets Store. Every value in D1 is sealed under it. Fill in your store id.
+  "secrets_store_secrets": [
+    { "binding": "MASTER_KEY", "store_id": "<your-secrets-store-id>", "secret_name": "tumbler-master-key" }
+  ],
+  // Per-install, set on the Worker (dashboard or `wrangler deploy --var`); keep_vars keeps them.
+  // ACCESS_TEAM_DOMAIN: "<team>.cloudflareaccess.com". ACCESS_AUD: the Access application's AUD tag.
+  // TUMBLER_ADMINS: comma-separated emails allowed into /admin.
+  "keep_vars": true,
+  // Serves cli/tumbler at /cli, so setup scripts install the CLI straight from the broker.
+  "rules": [{ "type": "Text", "globs": ["**/cli/tumbler"], "fallthrough": false }]
+}
