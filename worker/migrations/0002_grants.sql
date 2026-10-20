@@ -41,6 +41,18 @@ CREATE TABLE grants (
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
 );
+-- Children whose delete at the provider failed (an outage, a 5xx). The grant is already dead here;
+-- sweep() retries the delete with the revision that minted it until it succeeds or the child expires.
+CREATE TABLE pending_revokes (
+  child_id   TEXT PRIMARY KEY,
+  key_scope  TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  key_rev    TEXT NOT NULL,
+  expires_at TEXT,
+  attempts   INTEGER NOT NULL DEFAULT 1,
+  last_at    TEXT NOT NULL
+);
+
 -- At most one live grant per caller, project and key, so concurrent first requests can't mint twice.
 -- COALESCE because NULL projects never conflict in a unique index.
 CREATE UNIQUE INDEX grants_one_live ON grants (caller, COALESCE(project, ''), name) WHERE state IN ('pending', 'active');

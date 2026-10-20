@@ -153,6 +153,7 @@ export class Grants {
       .bind(this.now().toISOString()).all<any>();
     for (const r of results) await this.close(parse(r), "expired", "system");
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
+    await this.retryRevokes();
     // Nobody answered: a pending grant lapses to denied, and a waiting step-up is dropped.
     const stale = new Date(this.now().getTime() - PENDING_TTL_MS).toISOString(), t = this.now().toISOString();
     await this.db.prepare("UPDATE grants SET state = 'denied', requested = NULL, requested_at = NULL, decided_by = 'timeout', updated_at = ? WHERE state = 'pending' AND requested_at <= ?").bind(t, stale).run();
@@ -246,7 +247,7 @@ export class Grants {
   async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string): Promise<GrantRow> {
     const minted = await this.mint(row, g, scopes), old = g.child_id;
     await this.store(g.id, row, minted, scopes, who, old, g.requested);
-    if (old) await this.revokeChild(row, old);
+    if (old) await this.revokeChild(row, old, g.expires_at);
     await this.catalog.audit(who, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`]);
     return (await this.get(g.id))!;
   }
@@ -273,9 +274,9 @@ export class Grants {
          AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
          AND requested IS ? AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL)`,
     ).bind(JSON.stringify(scopes), m.id, iv, ciphertext, m.expires_at, who, this.now().toISOString(), id, prev,
-      row.rev, row.scope, row.name, row.rev, request ? JSON.stringify(request) : null).run().catch(async (e: Error) => { await this.revokeChild(row, m.id); throw e; });
+      row.rev, row.scope, row.name, row.rev, request ? JSON.stringify(request) : null).run().catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
     if (!r.meta.changes) {
-      await this.revokeChild(row, m.id);
+      await this.revokeChild(row, m.id, m.expires_at);
       throw new Refused(409, `grant ${id} changed while minting; run again`);
     }
   }
@@ -294,21 +295,47 @@ export class Grants {
     // child minted concurrently is never left alive at the provider.
     const ended = await this.db.prepare(
       `UPDATE grants SET state = ?, requested = NULL, requested_at = NULL, iv = NULL, ciphertext = NULL, decided_by = ?, updated_at = ?
-       WHERE id = ? AND ${LIVE} RETURNING child_id`,
-    ).bind(state, who, this.now().toISOString(), g.id).first<{ child_id: string | null }>();
+       WHERE id = ? AND ${LIVE} RETURNING child_id, expires_at`,
+    ).bind(state, who, this.now().toISOString(), g.id).first<{ child_id: string | null; expires_at: string | null }>();
     if (!ended) return; // already ended by someone else
     if (ended.child_id) {
       // Only the revision that minted the child can delete it; a newer one may hold another parent.
       const from = row?.rev === g.key_rev ? row : await this.catalog.revision(g.key_scope, g.name, g.key_rev);
-      if (from) await this.revokeChild(from, ended.child_id);
+      if (from) await this.revokeChild(from, ended.child_id, ended.expires_at);
       else console.error("tumbler: no revision left to revoke a child of", g.name, "; it expires on its own");
     }
     await this.catalog.audit(who, state === "expired" ? "grant-expire" : "grant-revoke", g.project, [g.name]);
   }
 
-  async revokeChild(row: KeyRow, childId: string) {
-    try { await this.provider(row.kind).revoke(await this.parent(row), this.config(row), childId); }
-    catch (e) { console.error("tumbler: revoke failed", row.name, (e as Error).message); }
+  // A failed delete is queued, never swallowed: sweep() retries it, and /admin shows the backlog.
+  async revokeChild(row: KeyRow, childId: string, expiresAt: string | null = null) {
+    try {
+      await this.provider(row.kind).revoke(await this.parent(row), this.config(row), childId);
+      await this.db.prepare("DELETE FROM pending_revokes WHERE child_id = ?").bind(childId).run();
+      return true;
+    } catch (e) {
+      console.error("tumbler: revoke failed, queued for retry", row.name, (e as Error).message);
+      await this.db.prepare(
+        `INSERT INTO pending_revokes (child_id, key_scope, name, key_rev, expires_at, last_at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (child_id) DO UPDATE SET attempts = attempts + 1, last_at = excluded.last_at`,
+      ).bind(childId, row.scope, row.name, row.rev, expiresAt, this.now().toISOString()).run();
+      return false;
+    }
+  }
+
+  // Retry queued deletes. A child past its expiry is dead at the provider anyway, so it leaves the queue.
+  async retryRevokes() {
+    const t = this.now().toISOString();
+    await this.db.prepare("DELETE FROM pending_revokes WHERE expires_at IS NOT NULL AND expires_at <= ?").bind(t).run();
+    const { results } = await this.db.prepare("SELECT * FROM pending_revokes ORDER BY last_at LIMIT 50").all<any>();
+    for (const p of results) {
+      const row = await this.catalog.revision(p.key_scope, p.name, p.key_rev);
+      if (row) await this.revokeChild(row, p.child_id, p.expires_at);
+    }
+  }
+
+  async pendingRevokes(): Promise<number> {
+    return (await this.db.prepare("SELECT COUNT(*) AS n FROM pending_revokes").first<{ n: number }>())?.n ?? 0;
   }
 
   parent(row: KeyRow) { return open(this.catalog.key, row.scope, row.name, bytes(row.iv), bytes(row.ciphertext)); }

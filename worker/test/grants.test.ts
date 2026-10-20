@@ -386,6 +386,23 @@ test("a caller token revoked while its first request mints gets nothing", async 
   assert.equal((await adminGrants(s)).filter((g: any) => g.state === "active").length, 0);
 });
 
+test("a failed delete at the provider is queued, shown in /admin, and retried by the sweep", async () => {
+  const s = await setup();
+  await s.env();
+  const revoke = s.fake.provider.revoke;
+  s.fake.provider.revoke = async () => { throw new Error("provider down"); };
+  const [g] = await adminGrants(s);
+  await s.call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, "vu@example.com");
+  const view = await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json();
+  assert.equal(view.revoke_pending, 1);
+  await s.grants.sweep(); // still down: stays queued
+  assert.equal(await s.grants.pendingRevokes(), 1);
+  s.fake.provider.revoke = revoke;
+  await s.grants.sweep();
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal(await s.grants.pendingRevokes(), 0);
+});
+
 test("a project key overriding a global one starts a new grant instead of reusing the old key's child", async () => {
   const s = await setup();
   await s.catalog.put("global", "CF_G", PARENT, { kind: "mint:cloudflare", config: CONFIG });

@@ -136,7 +136,7 @@ async function adminRoute(request: Request, url: URL, { catalog, admin, grants }
     }
   }
   if (parts[0] === "grants" && grants) {
-    if (m === "GET" && parts.length === 1) return json({ grants: (await grants.list()).map((g) => ({ ...grantView(g), caller: g.caller, project: g.project, decided_by: g.decided_by, updated_at: g.updated_at })) });
+    if (m === "GET" && parts.length === 1) return json({ revoke_pending: await grants.pendingRevokes(), grants: (await grants.list()).map((g) => ({ ...grantView(g), caller: g.caller, project: g.project, decided_by: g.decided_by, updated_at: g.updated_at })) });
     if (m === "POST" && parts.length === 3 && (parts[2] === "approve" || parts[2] === "deny")) {
       const b = await body(), seen = Array.isArray(b.requested) ? b.requested.map(String) : undefined;
       return json({ grant: grantView(await grants.decide(parts[1], parts[2] === "approve", who, seen)) });

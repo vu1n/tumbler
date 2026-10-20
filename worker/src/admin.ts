@@ -38,6 +38,7 @@ code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:au
 
 <h2>Grants</h2>
 <p class="muted">Minted keys. Read scopes are granted on request; anything else waits here for you.</p>
+<p id="revokePending" class="warn"></p>
 <div class="wrap"><table><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Wants</th><th>Expires</th><th></th></tr></thead><tbody id="grants"></tbody></table></div>
 
 <h2>Tokens</h2>
@@ -59,7 +60,9 @@ const btn = (label, fn) => { const c = document.createElement('td'), b = documen
 const day = s => s ? s.slice(0, 10) : '';
 const stale = s => s && Date.parse(s) < Date.now() + 7 * 864e5;
 async function load() {
-  const [{ keys }, { tokens }, { audit }, { grants }] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(() => ({ grants: [] }))]);
+  const [{ keys }, { tokens }, { audit }, { grants, revoke_pending }] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(() => ({ grants: [] }))]);
+  document.getElementById('revokePending').textContent = revoke_pending
+    ? revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
   document.getElementById('keys').replaceChildren(...keys.map(k => { const tr = document.createElement('tr');
     tr.append(td(k.name), td(k.scope), td(k.kind), td(k.description, 'muted'), td(day(k.rotated_at)), td(day(k.expires_at), stale(k.expires_at) ? 'warn' : ''),
       btn('Delete', async () => { if (confirm('Delete ' + k.scope + '/' + k.name + '?')) { await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }); load(); } }));

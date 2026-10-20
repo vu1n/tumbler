@@ -124,7 +124,8 @@ Each caller holds one **grant** per minted key, and its state decides what the e
   again. A cron every five minutes expires grants and deletes their children at Cloudflare.
 - Approve mints exactly the request shown on the page. If the caller asked for more since then,
   approval is refused until you reload.
-- Revoke deletes the child at once. For a day after that, that caller's next grant on the key waits
+- Revoke deletes the child at once (a delete Cloudflare rejects is queued, retried every five minutes
+  until the child expires, and shown on the Grants tab). For a day after that, that caller's next grant on the key waits
   for approval, even for reads. Revoking a caller token ends all of its grants. Deleting a minted key,
   or saving a new parent or config, ends its grants. Old parents are kept sealed for a day, so a
   child they minted can always be revoked.
