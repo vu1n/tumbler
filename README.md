@@ -1,3 +1,92 @@
 # tumbler
 
-One store for env vars and API keys.
+One store for env vars and API keys, for agent sessions and anywhere else you run code.
+
+- **Broker:** a Cloudflare Worker. Values are AES-GCM sealed under one master key held in
+  Cloudflare Secrets Store, and stored in D1. A project row overrides the global row of the same name.
+- **Tokens:** each caller token is pinned to the projects it may read, or reads global keys only.
+  The project comes from the token, never from the request.
+- **CLI:** `tumbler run -- <cmd>` fetches what the command needs, injects it into that process only,
+  and keeps a short in-memory cache. Nothing is written to disk. Rotating a key in the broker
+  reaches every session within the cache TTL (5 minutes by default) or on `tumbler reload`.
+- **Admin page:** `/admin`, behind Cloudflare Access. Values are write-only there.
+
+The design and the reasons behind it: why not setup scripts, why not an encrypted `.env`, how network
+secrets fit. See [docs/design.md](docs/design.md).
+
+## Deploy
+
+```sh
+cd worker && npm install
+# 1. A Secrets Store and the master key (32 random bytes):
+npx wrangler secrets-store store create tumbler --remote          # note the store id
+openssl rand -base64 32    # paste this at the next command's prompt, and keep a copy offline
+npx wrangler secrets-store secret create <store-id> --name tumbler-master-key --scopes workers --remote
+#    then put the store id into wrangler.jsonc (secrets_store_secrets).
+# 2. Deploy (creates the D1 database on first run) and apply migrations:
+npx wrangler deploy && npm run db:migrate
+# 3. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
+#    path /admin*, allow your email), then set the Worker's vars:
+#    ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com  ACCESS_AUD=<the application's AUD tag>
+#    TUMBLER_ADMINS=<your email>
+```
+
+The admin API checks the Access JWT itself, so a gap in the Access policy (or a request straight to
+`*.workers.dev`) still can't reach it. Losing the master key loses every value: keep a copy offline.
+
+## Use it from a Claude cloud environment
+
+1. In `/admin`, create a token pinned to the project (or with no pin, for global keys only). It's
+   shown once.
+2. On the environment: add `TUMBLER_URL=https://tumbler.<you>.workers.dev` as an environment variable,
+   and the token as a **network secret** for that host (`Authorization`, prefix `Bearer`). The
+   session never sees the token: the agent proxy adds it on the way out.
+3. Paste [scripts/setup.sh](scripts/setup.sh) into the environment's setup script. It installs the
+   CLI from the broker, shims `aws`, `wrangler` and `tailscale`, and tells agents to use `tumbler run`.
+4. Remove the old secrets from the environment's variables.
+
+A different project gets its own environment with its own pinned token.
+
+Elsewhere (your laptop, CI), set `TUMBLER_URL` and `TUMBLER_TOKEN` instead of the network secret.
+
+## CLI
+
+```
+tumbler run [-p project] [-k A,B] -- <cmd> [args...]
+tumbler keys [-p project]     names you can read, never values
+tumbler whoami                the token's name and pin
+tumbler reload                drop the cache
+tumbler shim <tool>...        wrappers so <tool> always runs under tumbler
+```
+
+A `.tumbler` file in a repo lists the key names it needs (one per line) and optionally
+`project = <name>`. Without one, `run` fetches every key the token can read.
+
+`TUMBLER_TTL` (seconds, default 300, `0` disables the cache). The cache is a helper process on a
+private unix socket (`$XDG_RUNTIME_DIR/tumbler` or `~/.cache/tumbler`, mode 0700) that exits after
+30 minutes unused. It is keyed by broker and token, so one token never gets another's values.
+
+## API
+
+| Route | Auth | |
+|---|---|---|
+| `GET /v1/env?project=&keys=A,B` | caller token | `{"env": {...}}`, project over global; unknown names are a 404 |
+| `GET /v1/whoami` | caller token | `{"name", "projects"}` |
+| `GET /cli` | none | the CLI script (no secrets in it) |
+| `/admin`, `/admin/api/{keys,tokens,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1` |
+
+Every read and change is audited by key name, never by value.
+
+## Not in this slice
+
+Minting short-lived keys (AWS STS, Cloudflare API tokens, OpenRouter, Tailscale) and OAuth provider
+connections. The catalog's `kind` column is where they plug in.
+
+## Develop
+
+```sh
+cd worker && npm test && npm run typecheck
+```
+
+Tests run in plain node over a sqlite stand-in for D1, including the CLI end to end against the real
+routes.
