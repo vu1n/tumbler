@@ -354,6 +354,38 @@ test("a parent that can't be a header value is refused; fetch errors never quote
   await assert.rejects(cf.mint(PARENT, CONFIG, ["workers:read"], new Date(), "x"), (e: any) => e.status === 502 && !e.message.includes(PARENT));
 });
 
+test("a deny landing while an approval mints wins: the wider child is deleted, the narrow one stays", async () => {
+  const s = await setup();
+  await s.env();
+  const up = await (await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).json();
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+    s.fake.provider.mint = mint;
+    await s.call("POST", `/admin/api/grants/${up.grants[0].id}/deny`, undefined, {}, "vu@example.com");
+    return mint(...a);
+  };
+  const r = await s.call("POST", `/admin/api/grants/${up.grants[0].id}/approve`, undefined, { requested: up.grants[0].requested }, "vu@example.com");
+  assert.equal(r.status, 409);
+  assert.deepEqual(s.fake.revoked, ["id-2"]);
+  const [g] = await adminGrants(s);
+  assert.deepEqual(g.scopes, ["workers:read"]);
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+});
+
+test("a caller token revoked while its first request mints gets nothing", async () => {
+  const s = await setup();
+  const fresh = await s.catalog.createToken("fresh", ["dev"]);
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+    s.fake.provider.mint = mint;
+    await s.call("DELETE", "/admin/api/tokens/fresh", undefined, undefined, "vu@example.com");
+    return mint(...a);
+  };
+  assert.equal((await s.env(fresh)).status, 409);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await adminGrants(s)).filter((g: any) => g.state === "active").length, 0);
+});
+
 test("a project key overriding a global one starts a new grant instead of reusing the old key's child", async () => {
   const s = await setup();
   await s.catalog.put("global", "CF_G", PARENT, { kind: "mint:cloudflare", config: CONFIG });

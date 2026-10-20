@@ -235,7 +235,7 @@ export class Grants {
         await this.db.prepare("DELETE FROM grants WHERE id = ? AND state = 'pending' AND child_id IS NULL").bind(id).run();
         throw e;
       }
-      await this.store(id, row, minted, scopes, "policy", null);
+      await this.store(id, row, minted, scopes, "policy", null, scopes);
       await this.catalog.audit(caller.name, "grant-mint", project, [`${row.name}:${scopes.join("+")}`]);
       return (await this.get(id))!;
     }
@@ -245,7 +245,7 @@ export class Grants {
 
   async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string): Promise<GrantRow> {
     const minted = await this.mint(row, g, scopes), old = g.child_id;
-    await this.store(g.id, row, minted, scopes, who, old);
+    await this.store(g.id, row, minted, scopes, who, old, g.requested);
     if (old) await this.revokeChild(row, old);
     await this.catalog.audit(who, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`]);
     return (await this.get(g.id))!;
@@ -262,14 +262,18 @@ export class Grants {
   // Compare-and-set: the new child lands only if the grant is still live and still holds the child it
   // held when minting began. Otherwise (revoked, expired or re-minted meanwhile) the new child is
   // deleted at the provider and nothing is handed out.
-  async store(id: string, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string, prev: string | null) {
+  // Also: the request this mint answers is still the one pending (a deny or lapse clears it), and the
+  // caller's token is still unrevoked (a revoke can land between authenticating and storing).
+  async store(id: string, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string,
+    prev: string | null, request: string[] | null) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(id), row.name, m.value);
     const r = await this.db.prepare(
       `UPDATE grants SET state = 'active', scopes = ?, requested = NULL, requested_at = NULL, child_id = ?, iv = ?, ciphertext = ?,
          expires_at = ?, decided_by = ?, updated_at = ? WHERE id = ? AND ${LIVE} AND child_id IS ? AND key_rev = ?
-         AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)`,
+         AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
+         AND requested IS ? AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL)`,
     ).bind(JSON.stringify(scopes), m.id, iv, ciphertext, m.expires_at, who, this.now().toISOString(), id, prev,
-      row.rev, row.scope, row.name, row.rev).run().catch(async (e: Error) => { await this.revokeChild(row, m.id); throw e; });
+      row.rev, row.scope, row.name, row.rev, request ? JSON.stringify(request) : null).run().catch(async (e: Error) => { await this.revokeChild(row, m.id); throw e; });
     if (!r.meta.changes) {
       await this.revokeChild(row, m.id);
       throw new Refused(409, `grant ${id} changed while minting; run again`);
