@@ -1,8 +1,9 @@
 // app.ts — routes, apart from index.ts so tests can drive them without Worker bindings.
 import { Catalog, GLOBAL, Refused } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
+import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 
-export interface Deps { catalog: Catalog; admin: (request: Request) => Promise<string | null>; cli?: string }
+export interface Deps { catalog: Catalog; admin: (request: Request) => Promise<string | null>; cli?: string; s1?: S1Client | null }
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status, headers: { "content-type": "application/json", "cache-control": "no-store" },
@@ -25,9 +26,18 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
   }
 }
 
-async function agentRoute(request: Request, url: URL, { catalog }: Deps) {
+async function agentRoute(request: Request, url: URL, { catalog, s1 }: Deps) {
   const token = bearer(request), caller = token ? await catalog.caller(token) : null;
   if (!caller) return json({ error: "unauthorized" }, 401);
+  // Which of the caller's keys this repo needs, from its file and dependency names. Names out, never values.
+  if (url.pathname === "/v1/auto" && request.method === "POST") {
+    if (Number(request.headers.get("content-length") ?? 0) > 256 * 1024) return json({ error: "too many signals" }, 413);
+    const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+    const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
+    const picks = await autoKeys(s1 ?? null, cleanSignals(body.signals), keys);
+    await catalog.audit(caller.name, "auto", project, picks.map((p) => p.name));
+    return json({ project, keys: picks });
+  }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
   if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects });
   if (url.pathname === "/v1/env") {

@@ -16,6 +16,9 @@
   // ACCESS_TEAM_DOMAIN: "<team>.cloudflareaccess.com". ACCESS_AUD: the Access application's AUD tag.
   // TUMBLER_ADMINS: comma-separated emails allowed into /admin.
   "keep_vars": true,
+  // Clef (System One on Workers AI) picks keys for `tumbler auto` when the rules don't settle them.
+  // TUMBLER_AUTO_MODEL var: "clef" (default) or "clef-flash".
+  "ai": { "binding": "AI" },
   // Serves cli/tumbler at /cli, so setup scripts install the CLI straight from the broker.
   "rules": [{ "type": "Text", "globs": ["**/cli/tumbler"], "fallthrough": false }]
 }

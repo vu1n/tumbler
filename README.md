@@ -55,12 +55,30 @@ Elsewhere (your laptop, CI), set `TUMBLER_URL` and `TUMBLER_TOKEN` instead of th
 tumbler run [-p project] [-k A,B] -- <cmd> [args...]
 tumbler keys [-p project]     names you can read, never values
 tumbler whoami                the token's name and pin
+tumbler auto [--dry-run]      work out which keys this repo needs; write .tumbler
 tumbler reload                drop the cache
 tumbler shim <tool>...        wrappers so <tool> always runs under tumbler
 ```
 
 A `.tumbler` file in a repo lists the key names it needs (one per line) and optionally
-`project = <name>`. Without one, `run` fetches every key the token can read.
+`project = <name>`. Without one, `run` calls `tumbler auto` first and writes it, so the command gets
+only the keys the repo needs. Commit the file so the set is reviewed like code. `TUMBLER_AUTO=off`
+skips this and fetches every key the token can read.
+
+### How `auto` picks keys
+
+The CLI sends the broker the repo's file paths (three levels deep) and dependency names from
+`package.json`, `requirements*.txt`, `pyproject.toml`, `go.mod` and `Cargo.toml`. It never sends file
+contents or values. The broker then:
+
+1. **Rules:** known signals map to key prefixes. For example, `wrangler.jsonc` maps to `CLOUDFLARE_*`
+   and `@aws-sdk/*` or `boto3` maps to `AWS_*` (see `worker/src/auto.ts`).
+2. **Clef:** for the caller's keys the rules didn't pick, it asks Clef (System One on Workers AI)
+   one yes/no question per key, using the key's catalog description. It keeps a key at 0.7 or above.
+   Good descriptions are what Clef matches on. Errors and timeouts add nothing.
+
+Picks can only name keys the token can already read, so a wrong guess means a missing or extra key,
+never wider access. Without the `AI` binding, auto uses the rules only.
 
 `TUMBLER_TTL` (seconds, default 300, `0` disables the cache). The cache is a helper process on a
 private unix socket (`$XDG_RUNTIME_DIR/tumbler` or `~/.cache/tumbler`, mode 0700) that exits after
@@ -72,6 +90,7 @@ private unix socket (`$XDG_RUNTIME_DIR/tumbler` or `~/.cache/tumbler`, mode 0700
 |---|---|---|
 | `GET /v1/env?project=&keys=A,B` | caller token | `{"env": {...}}`, project over global; unknown names are a 404 |
 | `GET /v1/whoami` | caller token | `{"name", "projects"}` |
+| `POST /v1/auto?project=` | caller token | body `{"signals": ["file:…", "dep:…"]}`; returns `{"project", "keys": [{"name", "why"}]}` |
 | `GET /cli` | none | the CLI script (no secrets in it) |
 | `/admin`, `/admin/api/{keys,tokens,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1` |
 

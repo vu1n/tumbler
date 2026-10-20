@@ -25,5 +25,6 @@ cat >> "$HOME/.claude/CLAUDE.md" <<'MD'
 ## Keys and env vars (tumbler)
 API keys come from tumbler, not from env vars or .env files. aws, wrangler and tailscale already
 run through it. For anything else that needs a key, run it as `tumbler run -- <cmd>`. `tumbler keys`
-lists the names you can use; never print a value. If a key looks stale, run `tumbler reload`.
+lists the names you can use; never print a value. In a repo without a .tumbler file, the first
+run writes one (`tumbler auto`); review it and commit it with your change. If a key looks stale, run `tumbler reload`.
 MD
