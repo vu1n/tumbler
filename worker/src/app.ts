@@ -102,11 +102,15 @@ async function adminRoute(request: Request, url: URL, { catalog, admin, grants }
           if (!grants) return json({ error: "minting is off" }, 501);
           grants.validate(effective, config ?? JSON.parse(prev?.config || "{}"));
         }
+        // Why: a new parent or config can't revoke children the old one minted, so end them first.
+        if (prev && prev.kind !== "static" && grants) await grants.closeKey(prev, "system"); // "system": a rotation must not block the next grant like a revoke does
         await catalog.put(scope, name, String(b.value ?? ""), { description: b.description, owner: b.owner, expires_at: b.expires_at ?? null, kind, config });
         await catalog.audit(who, "put", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });
       }
       if (m === "DELETE") {
+        const prev = await catalog.keyRow(scope, name);
+        if (prev && prev.kind !== "static" && grants) await grants.closeKey(prev, "system"); // "system": a rotation must not block the next grant like a revoke does
         await catalog.remove(scope, name);
         await catalog.audit(who, "delete", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });
@@ -124,6 +128,7 @@ async function adminRoute(request: Request, url: URL, { catalog, admin, grants }
     }
     if (m === "DELETE" && parts.length === 2) {
       await catalog.revokeToken(parts[1]);
+      await grants?.closeCaller(parts[1], who); // its children stop working now, not at expiry
       await catalog.audit(who, "token-revoke", null, [parts[1]]);
       return json({ ok: true });
     }
@@ -131,7 +136,8 @@ async function adminRoute(request: Request, url: URL, { catalog, admin, grants }
   if (parts[0] === "grants" && grants) {
     if (m === "GET" && parts.length === 1) return json({ grants: (await grants.list()).map((g) => ({ ...grantView(g), caller: g.caller, project: g.project, decided_by: g.decided_by, updated_at: g.updated_at })) });
     if (m === "POST" && parts.length === 3 && (parts[2] === "approve" || parts[2] === "deny")) {
-      return json({ grant: grantView(await grants.decide(parts[1], parts[2] === "approve", who)) });
+      const b = await body(), seen = Array.isArray(b.requested) ? b.requested.map(String) : undefined;
+      return json({ grant: grantView(await grants.decide(parts[1], parts[2] === "approve", who, seen)) });
     }
     if (m === "DELETE" && parts.length === 2) { await grants.revoke(parts[1], who); return json({ ok: true }); }
   }

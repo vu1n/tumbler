@@ -64,13 +64,13 @@ async function load() {
     tr.append(td(k.name), td(k.scope), td(k.kind), td(k.description, 'muted'), td(day(k.rotated_at)), td(day(k.expires_at), stale(k.expires_at) ? 'warn' : ''),
       btn('Delete', async () => { if (confirm('Delete ' + k.scope + '/' + k.name + '?')) { await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }); load(); } }));
     return tr; }));
-  const act = (label, path, method) => async () => { await api('grants/' + path, { method }); load(); };
+  const act = (label, path, method, body) => async () => { try { await api('grants/' + path, { method, body: body && JSON.stringify(body) }); } catch (err) { alert(err.message); } load(); };
   document.getElementById('grants').replaceChildren(...grants.map(g => { const tr = document.createElement('tr'), live = g.state === 'active' || g.state === 'pending', c = document.createElement('td');
     tr.append(td(g.name), td(g.caller), td(g.project ?? 'global'), td(g.state, g.requested ? 'warn' : ''), td(g.scopes.join(', ')),
       td((g.requested ?? []).join(', '), 'warn'), td((g.expires_at ?? '').replace('T', ' ').slice(0, 16)), c);
     const b = (label, fn) => { const e = document.createElement('button'); e.textContent = label; e.onclick = fn; c.append(e, ' '); };
-    if (g.requested) { b('Approve', act('approve', g.id + '/approve', 'POST')); b('Deny', act('deny', g.id + '/deny', 'POST')); }
-    if (live) b('Revoke', async () => { if (confirm('Revoke ' + g.name + ' for ' + g.caller + '?')) act('', g.id, 'DELETE')(); });
+    if (g.requested) { b('Approve', act('approve', g.id + '/approve', 'POST', { requested: g.requested })); b('Deny', act('deny', g.id + '/deny', 'POST')); }
+    if (live) b('Revoke', async () => { if (confirm('Revoke ' + g.name + ' for ' + g.caller + '? Its token stops working now, and its next request waits for your approval for a day.')) act('', g.id, 'DELETE')(); });
     return tr; }));
   document.getElementById('tokens').replaceChildren(...tokens.map(t => { const tr = document.createElement('tr');
     tr.append(td(t.name), td(t.projects ? t.projects.join(', ') : 'global only'), td(day(t.created_at)),

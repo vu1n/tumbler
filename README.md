@@ -118,9 +118,15 @@ Each caller holds one **grant** per minted key, and its state decides what the e
 - `tumbler run --scope workers:write -- wrangler deploy` asks for more. Until you approve, the
   command doesn't start. After you approve, the same command runs with a wider child, and the narrower
   child is deleted at Cloudflare.
-- Children expire after `ttl_minutes` (15 to 1440, default 30). A cron every five minutes expires
-  grants and deletes their children at Cloudflare. Approval lasts as long as the child, so a write
-  scope needs approving again after expiry.
+- Children expire after `ttl_minutes` (15 to 1440, default 30). A child is handed out again only
+  while it has more than 6 minutes left, which keeps the CLI's 5-minute cache from holding an
+  expired one. So approval lasts `ttl_minutes` minus 6, and after that a write scope needs approving
+  again. A cron every five minutes expires grants and deletes their children at Cloudflare.
+- Approve mints exactly the request shown on the page. If the caller asked for more since then,
+  approval is refused until you reload.
+- Revoke deletes the child at once. For a day after that, that caller's next grant on the key waits
+  for approval, even for reads. Revoking a caller token ends all of its grants. Deleting a minted key,
+  or saving a new parent or config, first ends its grants with the old parent.
 - Failures never widen anything. A Cloudflare error, a pending or denied grant, or a broker that
   can't be reached all mean the command gets no token. No failure falls back to the parent or to a
   broader child.

@@ -14,6 +14,7 @@ CREATE TABLE grants (
   state       TEXT NOT NULL,
   scopes      TEXT NOT NULL DEFAULT '[]',
   requested   TEXT,
+  requested_at TEXT,
   child_id    TEXT,
   iv          BLOB,
   ciphertext  BLOB,
@@ -22,4 +23,6 @@ CREATE TABLE grants (
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL
 );
-CREATE INDEX grants_live ON grants (caller, name, state);
+-- At most one live grant per caller, project and key, so concurrent first requests can't mint twice.
+-- COALESCE because NULL projects never conflict in a unique index.
+CREATE UNIQUE INDEX grants_one_live ON grants (caller, COALESCE(project, ''), name) WHERE state IN ('pending', 'active');
