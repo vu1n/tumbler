@@ -18,11 +18,9 @@ secrets fit. See [docs/design.md](docs/design.md).
 
 ```sh
 cd worker && npm install
-# 1. The master key (32 random bytes) in the account's Secrets Store. An account has one store;
-#    `store list` shows its id (create it with `store create` if the list is empty):
-npx wrangler secrets-store store list --remote
-openssl rand -base64 32    # paste this at the next command's prompt, and keep a copy offline
-npx wrangler secrets-store secret create <store-id> --name tumbler-master-key --scopes workers --remote
+# 1. Once, on your own machine: create the master key in the account's Secrets Store. It saves a
+#    backup to ~/tumbler-master-key.txt; move that into your password manager and delete the file.
+npm run setup
 # 2. Deploy. Fills in the store id, creates the D1 database on the first run, applies migrations:
 npm run deploy
 # 3. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
