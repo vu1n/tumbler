@@ -111,6 +111,8 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
   if (!who) return new Response("forbidden", { status: 403 });
   const path = url.pathname, m = request.method;
   if (path === "/admin" || path === "/admin/") {
+    // A form posted here means the page's script never ran; the value it carried is not kept.
+    if (m !== "GET") return new Response("the admin page's script didn't run, so nothing was saved", { status: 405 });
     return new Response(ADMIN_HTML, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store",
       "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'" } });
   }
