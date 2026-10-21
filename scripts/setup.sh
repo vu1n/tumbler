@@ -4,10 +4,11 @@
 # runs before the agent proxy, and anything it fetched would be baked into the cached image.
 #
 # The environment also needs:
-#   - Environment variable TUMBLER_URL=https://tumbler.<you>.workers.dev  (not a secret)
+#   - Environment variable TUMBLER_URL=https://tumbler.example.com  (not a secret; a bare host means https)
 #   - Network secret on that host: Authorization: Bearer <the project's tumbler token>
 set -euo pipefail
 : "${TUMBLER_URL:?set TUMBLER_URL on the environment}"
+case "$TUMBLER_URL" in *://*) ;; *) TUMBLER_URL="https://$TUMBLER_URL" ;; esac
 
 curl -fsSL "$TUMBLER_URL/cli" -o /usr/local/bin/tumbler
 chmod +x /usr/local/bin/tumbler
