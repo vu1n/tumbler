@@ -18,18 +18,19 @@ secrets fit. See [docs/design.md](docs/design.md).
 
 ```sh
 cd worker && npm install
-# 1. A Secrets Store and the master key (32 random bytes):
-npx wrangler secrets-store store create tumbler --remote          # note the store id
-openssl rand -base64 32    # paste this at the next command's prompt, and keep a copy offline
-npx wrangler secrets-store secret create <store-id> --name tumbler-master-key --scopes workers --remote
-#    then put the store id into wrangler.jsonc (secrets_store_secrets).
-# 2. Deploy (creates the D1 database on first run) and apply migrations:
-npx wrangler deploy && npm run db:migrate
-# 3. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
+# 1. Set up and deploy, from your own machine. The first run creates the master key in the
+#    account's Secrets Store and saves a backup to ~/tumbler-master-key.txt: move that into your
+#    password manager and delete the file. It also creates the D1 database and applies migrations.
+#    Run the same command again for every later deploy.
+npm run deploy
+# 2. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
 #    path /admin*, allow your email), then set the Worker's vars:
 #    ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com  ACCESS_AUD=<the application's AUD tag>
 #    TUMBLER_ADMINS=<your email>
 ```
+
+Nothing account-specific lives in the repo: the store id is looked up at deploy time
+(`TUMBLER_STORE_ID` overrides it) and the vars above stay on the Worker across deploys.
 
 The admin API checks the Access JWT itself, so a gap in the Access policy (or a request straight to
 `*.workers.dev`) still can't reach it. Losing the master key loses every value: keep a copy offline.

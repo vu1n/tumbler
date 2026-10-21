@@ -8,7 +8,8 @@
     { "binding": "DB", "database_name": "tumbler", "migrations_dir": "migrations" }
   ],
   // The one secret tumbler needs: a 32-byte base64 master key (`openssl rand -base64 32`) in a
-  // Cloudflare Secrets Store. Every value in D1 is sealed under it. Fill in your store id.
+  // Cloudflare Secrets Store. Every value in D1 is sealed under it. `npm run deploy` fills in
+  // the account's store id; keep the placeholder.
   "secrets_store_secrets": [
     { "binding": "MASTER_KEY", "store_id": "<your-secrets-store-id>", "secret_name": "tumbler-master-key" }
   ],
