@@ -102,7 +102,10 @@ document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); 
   const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);
   try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects }) });
     const once = document.getElementById('once'); once.style.display = 'block';
-    once.replaceChildren('Copy this token now; it will not be shown again. Add it as a network secret on the environment: ', Object.assign(document.createElement('code'), { textContent: r.token }));
+    const copy = (label, text) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+      b.onclick = () => navigator.clipboard.writeText(text).then(() => { b.textContent = 'Copied'; setTimeout(() => b.textContent = label, 1500); }, () => alert('Copy failed; select the token and copy it by hand.')); return b; };
+    once.replaceChildren('Copy this token now; it will not be shown again. Add it as a network secret on the environment: ', Object.assign(document.createElement('code'), { textContent: r.token }),
+      ' ', copy('Copy', r.token), ' ', copy('Copy as "Bearer …"', 'Bearer ' + r.token));
     e.target.reset(); load(); } catch (err) { alert(err.message); } };
 load().catch(err => alert(err.message));
 </script></body></html>`;
