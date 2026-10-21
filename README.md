@@ -33,7 +33,10 @@ npm run deploy
 
 To deploy on every push instead, connect the repo in Workers Builds (Workers & Pages > Create >
 Import a repository) with root directory `worker`, build command `npm ci && npm test && npm run
-typecheck` and deploy command `npm run deploy`. A failing test stops the deploy. Nothing
+typecheck`, deploy command `npm run deploy`, and non-production branch deploy command
+`npm run deploy -- --dry-run`. A failing test stops the deploy, and pull requests get the tests and
+a bundle check but never upload: a preview version would run against the production database and
+master key. Nothing
 account-specific lives in the repo or GitHub: the store id is looked up at deploy time
 (`TUMBLER_STORE_ID` overrides it) and the vars above stay on the Worker across deploys.
 
