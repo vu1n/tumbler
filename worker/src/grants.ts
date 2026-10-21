@@ -30,6 +30,9 @@ export const DEFAULT_TTL_MIN = 30, MIN_TTL_MIN = 15, MAX_TTL_MIN = 24 * 60;
 // default) can never hold one past its expiry.
 // Approval therefore lasts ttl_minutes minus this margin.
 export const REUSE_MARGIN_MS = 6 * 60 * 1000;
+// How long a client may cache an env holding a minted child: a minute inside the reuse margin, so
+// even a long TUMBLER_TTL can't hand out a child past its expiry.
+export const MINTED_MAX_AGE_S = REUSE_MARGIN_MS / 1000 - 60;
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // an unanswered request lapses to denied
 const ABANDONED_MS = 60 * 1000; // a read claim still unminted after this was left by a dead request
 
@@ -138,6 +141,15 @@ export class Grants {
     for (const r of results) await this.close(parse(r), "revoked", who);
   }
 
+  // Live grants whose caller token is revoked: closeCaller after the revoke was interrupted.
+  async closeRevokedCallers() {
+    const { results } = await this.db.prepare(
+      `SELECT g.* FROM grants g JOIN tokens t ON t.name = g.caller WHERE g.${LIVE} AND t.revoked_at IS NOT NULL`,
+    ).all<any>();
+    for (const r of results) await this.close(parse(r), "revoked", "system");
+    return results.length;
+  }
+
   // After a mint key is rotated or deleted: end every live grant on it from a revision that is no
   // longer current (any older one, not just the one this write replaced, so concurrent saves or a
   // retry after a failed close still catch them). close() revokes with the minting revision.
@@ -156,6 +168,7 @@ export class Grants {
       .bind(this.now().toISOString()).all<any>();
     for (const r of results) await this.close(parse(r), "expired", "system");
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
+    await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
     await this.retryRevokes();
     // Nobody answered: a pending grant lapses to denied, and a waiting step-up is dropped.
     const stale = new Date(this.now().getTime() - PENDING_TTL_MS).toISOString();

@@ -19,8 +19,12 @@ const fetcher = (async (_url: string, init: RequestInit = {}) =>
 const catalog = new Catalog(memoryD1(), await masterKey(Buffer.alloc(32, 9).toString("base64")));
 const token = await catalog.createToken("dev", ["dev"]);
 const deps = { catalog, fetcher, admin: async () => "vu@example.com" };
+// Armed by a test: fail the first /v1/revs that follows a /v1/env, i.e. --watch's post-fetch check.
+let failCheck: "armed" | "fetched" | null = null;
 const server = createServer(async (req, res) => {
   let body = ""; for await (const c of req) body += c;
+  if (failCheck === "armed" && req.url!.startsWith("/v1/env")) failCheck = "fetched";
+  else if (failCheck === "fetched" && req.url!.startsWith("/v1/revs")) { failCheck = null; res.writeHead(503); res.end("{}"); return; }
   const r = await handle(new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers: req.headers as any, body: body || undefined }), deps);
   res.writeHead(r.status, Object.fromEntries(r.headers)); res.end(await r.text());
 });
@@ -104,6 +108,26 @@ test("--watch restarts only for a checked new value, and goes back when the rest
   } finally { p.kill("SIGTERM"); }
   const [code, sig] = await new Promise<[number | null, string | null]>((ok) => p.on("exit", (c, s) => ok([c, s])));
   assert.ok(sig === "SIGTERM" || code === 143, `${code} ${sig}`);
+});
+
+test("--watch retries a rotation whose post-fetch check failed instead of dropping it", async () => {
+  await save("ROT_W", "good-1", { check: "openai" });
+  const p = spawn(CLI, ["run", "--watch", "-k", "ROT_W", "--", "node", "-e", "console.log('start ' + process.env.ROT_W); setInterval(() => {}, 1000);"],
+    { cwd: home, env: env({ TUMBLER_TTL: "0", TUMBLER_WATCH: "0.2", TUMBLER_WATCH_GRACE: "1" }) });
+  let out = "";
+  p.stdout.on("data", (d) => { out += d; });
+  const until = async (re: RegExp) => {
+    for (let i = 0; i < 100 && !re.test(out); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.match(out, re);
+  };
+  try {
+    await until(/start good-1/);
+    failCheck = "armed";
+    await save("ROT_W", "good-2"); // fetched, but the check after the fetch fails once
+    await until(/start good-2/);   // a later poll picks it up without another rotation
+    assert.equal(failCheck, null);
+  } finally { p.kill("SIGTERM"); }
+  await new Promise((ok) => p.on("exit", ok));
 });
 
 test("a stopped command is never rerun or reported on; a crashed one is reported", async () => {

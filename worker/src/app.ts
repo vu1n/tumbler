@@ -3,7 +3,7 @@ import { Catalog, checkScope, GLOBAL, isKeyName, Refused } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
-import type { GrantRow, Grants } from "./grants.ts";
+import { MINTED_MAX_AGE_S, type GrantRow, type Grants } from "./grants.ts";
 import { checkKey, type Verifiers } from "./verify.ts";
 
 export interface Deps {
@@ -105,7 +105,9 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
   }
   if (url.pathname === "/v1/env") {
     const names = (url.searchParams.get("keys") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-    return json({ env: await catalog.resolve(caller, url.searchParams.get("project"), names, grants && ((c, p, r) => grants.issue(c, p, r))) });
+    let minted = false;
+    const env = await catalog.resolve(caller, url.searchParams.get("project"), names, grants && ((c, p, r) => { minted = true; return grants.issue(c, p, r); }));
+    return json(minted ? { env, max_age: MINTED_MAX_AGE_S } : { env });
   }
   return json({ error: "not found" }, 404);
 }
@@ -227,9 +229,9 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       return json({ name: b.name, token }); // shown once
     }
     if (m === "DELETE" && parts.length === 2) {
-      await catalog.revokeToken(parts[1]);
+      const fresh = await catalog.revokeToken(parts[1]);
       await grants?.closeCaller(parts[1], who); // its children stop working now, not at expiry
-      await catalog.audit(who, "token-revoke", null, [parts[1]]);
+      if (fresh) await catalog.audit(who, "token-revoke", null, [parts[1]]);
       return json({ ok: true });
     }
   }

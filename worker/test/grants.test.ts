@@ -401,6 +401,34 @@ test("a caller token revoked while its first request mints gets nothing", async 
   assert.equal((await adminGrants(s)).filter((g: any) => g.state === "active").length, 0);
 });
 
+test("an interrupted caller-token revoke is finished by a retry or by the sweep", async () => {
+  const s = await setup();
+  await s.catalog.put("dev", "CF2", "parent-b", { kind: "mint:cloudflare", config: CONFIG });
+  await s.env(s.dev, "CLOUDFLARE_API_TOKEN,CF2");
+  assert.equal((await adminGrants(s)).length, 2);
+  const close = s.grants.close.bind(s.grants);
+  let left = 1; // the worker dies after closing one grant
+  s.grants.close = async (...a: Parameters<typeof close>) => { if (left-- <= 0) throw new Error("worker died"); return close(...a); };
+  assert.equal((await s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com")).status, 500);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await s.env()).status, 401); // the token itself is already dead
+  s.grants.close = close;
+  assert.equal((await s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com")).status, 200);
+  assert.deepEqual(s.fake.revoked.sort(), ["id-1", "id-2"]);
+  assert.equal((await s.call("DELETE", "/admin/api/tokens/nope", undefined, undefined, "vu@example.com")).status, 404);
+});
+
+test("the sweep ends live grants of a revoked caller nobody retried", async () => {
+  const s = await setup();
+  await s.env();
+  s.grants.closeCaller = async () => { throw new Error("worker died"); };
+  await s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com");
+  assert.deepEqual(s.fake.revoked, []);
+  await s.grants.sweep();
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await adminGrants(s))[0].state, "revoked");
+});
+
 test("a failed delete at the provider is queued, shown in /admin, and retried by the sweep", async () => {
   const s = await setup();
   await s.env();
@@ -507,8 +535,12 @@ const server = createServer(async (req, res) => {
   let body = ""; for await (const c of req) body += c;
   const r = await handle(new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers: req.headers as any, body: body || undefined }),
     { catalog: s.catalog, grants: s.grants, admin: async () => "vu@example.com" });
-  res.writeHead(r.status, Object.fromEntries(r.headers)); res.end(await r.text());
+  let text = await r.text();
+  // Shrinks the broker's max_age so a test can outlive it in real time.
+  if (maxAge !== null && /"max_age"/.test(text)) text = JSON.stringify({ ...JSON.parse(text), max_age: maxAge });
+  res.writeHead(r.status, { "content-type": r.headers.get("content-type") ?? "application/json" }); res.end(text);
 });
+let maxAge: number | null = null;
 await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
 after(() => server.close());
 const home = mkdtempSync(join(tmpdir(), "tumbler-grants-"));
@@ -528,4 +560,23 @@ test("cli: run gets a read child; --scope for a write stops until approved, then
   await s.call("POST", `/admin/api/grants/${g.id}/approve`, undefined, { requested: g.requested }, "vu@example.com");
   assert.equal((await cli(["run", "--scope", "workers:write", "--", ...printToken])).stdout, "child-2");
   assert.equal((await cli(["keys"])).stdout, "CLOUDFLARE_API_TOKEN\n".replace(/^/, "AWS_REGION\n"));
+});
+
+test("cli: a long TUMBLER_TTL can't hand out a cached child past the broker's max_age", async () => {
+  const ttl = (args: string[]) => exec(CLI, args, { cwd: home, env: { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run-ttl"),
+    TUMBLER_URL: `http://127.0.0.1:${(server.address() as any).port}`, TUMBLER_TOKEN: s.dev, TUMBLER_TTL: "3600", TUMBLER_AUTO: "off", TUMBLER_IDLE: "5" } });
+  maxAge = 1;
+  try {
+    const first = (await ttl(["run", "--", ...printToken])).stdout;
+    assert.equal((await ttl(["run", "--", ...printToken])).stdout, first); // within max_age: cached
+    s.tick(60); // the child expires at the broker
+    await new Promise((r) => setTimeout(r, 1100));
+    assert.notEqual((await ttl(["run", "--", ...printToken])).stdout, first);
+  } finally { maxAge = null; }
+});
+
+test("/v1/env tells the client how long it may cache a minted child, and nothing for static keys", async () => {
+  const t = await setup();
+  assert.equal((await (await t.env()).json()).max_age, 300);
+  assert.equal("max_age" in (await (await t.env(t.dev, "AWS_REGION")).json()), false);
 });
