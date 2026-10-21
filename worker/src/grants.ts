@@ -296,14 +296,15 @@ export class Grants {
   // The new child lands only if the grant is still in the state `g` was read in: still live, holding
   // the child it held when minting began, with the request this mint answers still the one pending
   // (a deny or lapse clears it). Also the key is still at the revision that minted it, and the
-  // caller's token is still unrevoked (a revoke can land between authenticating and storing).
+  // caller's token is still unrevoked and unexpired (a revoke, or the expiry, can land between
+  // authenticating and storing).
   // Otherwise the new child is deleted at the provider and nothing is handed out.
   async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(g.id), row.name, m.value);
     const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who }, {
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
-        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL)`,
-      binds: [row.rev, row.scope, row.name, row.rev], store: { iv, ciphertext },
+        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?))`,
+      binds: [row.rev, row.scope, row.name, row.rev, this.now().toISOString()], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
     if (!done) {
       await this.revokeChild(row, m.id, m.expires_at);

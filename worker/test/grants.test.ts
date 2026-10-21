@@ -471,6 +471,19 @@ test("an expiring caller token works until its expiry, then stops at once; the s
   assert.equal((await adminGrants(s)).filter((g: any) => g.caller === "dev" && g.state === "active").length, 1);
 });
 
+test("a token that expires while its child is being minted gets nothing, and the child is deleted", async () => {
+  const s = await setup();
+  const r = await (await s.call("POST", "/admin/api/tokens", undefined, { name: "pilot", projects: ["dev"], expires_at: "2026-10-20T12:30:00Z" }, "vu@example.com")).json();
+  s.tick(29);
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => { s.tick(2); return mint(...a); }; // the mint outlives the expiry
+  const res = await s.env(r.token);
+  s.fake.provider.mint = mint;
+  assert.equal(res.status, 409);
+  assert.doesNotMatch(await res.text(), /child-1/);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
 test("an expiry must be a valid time in the future", async () => {
   const s = await setup(), admin = "vu@example.com";
   const create = (expires_at: unknown) => s.call("POST", "/admin/api/tokens", undefined, { name: "t" + String(expires_at).length, expires_at }, admin);
