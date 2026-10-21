@@ -1,4 +1,4 @@
-// account.mjs — what deploy.mjs and setup.mjs look up in the Cloudflare account through wrangler.
+// account.mjs — what deploy.mjs looks up in the Cloudflare account through wrangler.
 // Nothing account-specific is committed: the store id and the master key's presence are read here.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";

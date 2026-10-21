@@ -18,24 +18,18 @@ secrets fit. See [docs/design.md](docs/design.md).
 
 ```sh
 cd worker && npm install
-# 1. Once, on your own machine: create the master key in the account's Secrets Store. It saves a
-#    backup to ~/tumbler-master-key.txt; move that into your password manager and delete the file.
-npm run setup
-# 2. Deploy. Fills in the store id, creates the D1 database on the first run, applies migrations:
+# 1. Set up and deploy, from your own machine. The first run creates the master key in the
+#    account's Secrets Store and saves a backup to ~/tumbler-master-key.txt: move that into your
+#    password manager and delete the file. It also creates the D1 database and applies migrations.
+#    Run the same command again for every later deploy.
 npm run deploy
-# 3. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
+# 2. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
 #    path /admin*, allow your email), then set the Worker's vars:
 #    ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com  ACCESS_AUD=<the application's AUD tag>
 #    TUMBLER_ADMINS=<your email>
 ```
 
-To deploy on every push instead, connect the repo in Workers Builds (Workers & Pages > Create >
-Import a repository) with root directory `worker`, build command `npm ci && npm test && npm run
-typecheck`, deploy command `npm run deploy`, and non-production branch deploy command
-`npm run deploy -- --dry-run`. A failing test stops the deploy, and pull requests get the tests and
-a bundle check but never upload: a preview version would run against the production database and
-master key. Nothing
-account-specific lives in the repo or GitHub: the store id is looked up at deploy time
+Nothing account-specific lives in the repo: the store id is looked up at deploy time
 (`TUMBLER_STORE_ID` overrides it) and the vars above stay on the Worker across deploys.
 
 The admin API checks the Access JWT itself, so a gap in the Access policy (or a request straight to

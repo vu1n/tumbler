@@ -4,7 +4,6 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "setup": "node setup.mjs",
     "deploy": "node deploy.mjs",
     "db:migrate": "wrangler d1 migrations apply DB --remote",
     "typecheck": "tsc --noEmit",
