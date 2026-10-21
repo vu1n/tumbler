@@ -27,9 +27,10 @@ const RULES: Rule[] = [
   { when: /^(dep:@anthropic-ai\/.*|dep:anthropic)$/, keys: /^ANTHROPIC_/, label: "Anthropic SDK" },
   { when: /^dep:posthog.*$/, keys: /^POSTHOG_/, label: "PostHog SDK" },
   { when: /^dep:(@pythnetwork\/.*|pyth.*)$/, keys: /^PYTH_/, label: "Pyth SDK" },
-  { when: /^dep:@typesafe-ai\/.*$/, keys: /^TYPESAFE_/, label: "TypeSafe SDK" },
+  { when: /^(dep:@typesafe-ai\/.*|dep:typesafe-sdk)$/, keys: /^TYPESAFE_/, label: "TypeSafe SDK" },
   { when: /^(dep:stripe|dep:@stripe\/.*)$/, keys: /^STRIPE_/, label: "Stripe SDK" },
-  { when: /^(file:\.github\/workflows\/.*|dep:@octokit\/.*|dep:pygithub)$/, keys: /^(GITHUB_PAT|GH_)/, label: "GitHub API" },
+  // Why not .github/workflows: nearly every repo has one, and Actions brings its own GITHUB_TOKEN.
+  { when: /^(dep:@octokit\/.*|dep:pygithub)$/, keys: /^(GITHUB_PAT|GH_)/, label: "GitHub API" },
   { when: /^(dep:tailscale|file:(?:.*\/)?tailscale.*)$/, keys: /^TS_/, label: "Tailscale" },
 ];
 

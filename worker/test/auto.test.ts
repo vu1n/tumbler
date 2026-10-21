@@ -15,6 +15,13 @@ test("rules match files at any depth and dependency names", () => {
   assert.deepEqual(byRules(["file:notes/wrangler-ideas.md"], keys), []);
 });
 
+test("a Python TypeSafe dependency rules its keys in; a bare workflow file does not rule in a GitHub PAT", () => {
+  const more = [...keys, { name: "TYPESAFE_API_KEY", description: "" }, { name: "GITHUB_PAT", description: "" }];
+  assert.deepEqual(byRules(["dep:typesafe-sdk"], more).map((p) => p.name), ["TYPESAFE_API_KEY"]);
+  assert.deepEqual(byRules(["file:.github/workflows/ci.yml"], more), []);
+  assert.deepEqual(byRules(["dep:pygithub"], more).map((p) => p.name), ["GITHUB_PAT"]);
+});
+
 test("Clef only adds keys it is confident about, and only ones not already ruled in", async () => {
   const asked: string[] = [];
   const picks = await autoKeys(fake((q) => { asked.push(q.instructions); return { type: "noul", noul: /OPENROUTER/.test(q.instructions) ? 0.8 : 0.69 }; }),
