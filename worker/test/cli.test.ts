@@ -161,14 +161,16 @@ test("auto picks keys by rule and by Clef, sends names only, and writes .tumbler
 test("auto reads every dependency a pyproject.toml declares, extras included", async () => {
   const pyproject = [
     "[project]", 'name = "x"', 'description = "not-a-dep>=1"', "dependencies = [", '    "typer>=0.12",  # a comment', '    "pyyaml",', "]",
-    "[project.optional-dependencies]", "# an extra", 's1 = ["typesafe-sdk>=0.7"]', 'git = ["brief[s1] @ git+https://example.com/b", "rich"]',
+    "[project.optional-dependencies]", "# an extra", 's1 = ["typesafe-sdk>=0.7"]', 'git = ["brief[s1] @ git+https://example.com/b#egg=brief", "rich"]  # a ] in a comment',
+    // Codex's case: a `#` and a `]` inside a string must neither end the line nor close the array.
+    "llm = [", '    "brief[s1] @ git+https://example.com/b#egg=brief",', "    'openai>=1',", "]",
     "[dependency-groups]", 'dev = ["pytest>=8"]',
     "[tool.poetry.group.dev.dependencies]", 'python = "^3.12"', 'boto3 = "^1"',
     "[tool.hatch.build]", 'packages = ["src/x"]',
   ].join("\n");
   await cli(["auto", "--dry-run"], {}, repo({ "pyproject.toml": pyproject }));
   const deps = ((seen as any).signals as string[]).filter((s) => s.startsWith("dep:")).sort();
-  assert.deepEqual(deps, ["dep:boto3", "dep:brief", "dep:pytest", "dep:pyyaml", "dep:rich", "dep:typer", "dep:typesafe-sdk"]);
+  assert.deepEqual(deps, ["dep:boto3", "dep:brief", "dep:openai", "dep:pytest", "dep:pyyaml", "dep:rich", "dep:typer", "dep:typesafe-sdk"]);
 });
 
 test("run with no .tumbler runs auto first and gets only those keys", async () => {

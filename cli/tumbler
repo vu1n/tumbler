@@ -217,27 +217,44 @@ function gatherSignals(root) {
 function pyprojectDeps(text) {
   const out = [];
   let table = "", open = false;
-  for (const raw of text.split("\n")) {
-    const line = raw.replace(/#.*/, "");
-    let body = null;
-    if (open) body = line;
-    else {
-      const h = /^\s*\[([^\]]+)\]\s*$/.exec(line);
+  for (const line of text.split("\n")) {
+    let rest = line;
+    if (!open) {
+      const h = /^\s*\[([^\]]+)\]\s*(?:#.*)?$/.exec(line);
       if (h) { table = h[1].trim(); continue; }
-      const kv = /^\s*([A-Za-z0-9_."-]+)\s*=\s*(.*)$/.exec(line);
+      const kv = /^\s*(["']?)([A-Za-z0-9_.-]+)\1\s*=\s*(.*)$/.exec(line);
       if (!kv) continue;
-      const key = kv[1].replace(/"/g, "");
+      const key = kv[2];
       if (/^tool\.poetry\.(?:.+\.)?(?:dev-)?dependencies$/.test(table)) { if (key !== "python") out.push(key); continue; }
       const listed = (table === "project" && key === "dependencies") || table === "project.optional-dependencies"
         || table === "dependency-groups" || (table === "tool.uv" && key === "dev-dependencies");
-      if (!listed || !kv[2].trimStart().startsWith("[")) continue;
-      body = kv[2]; open = true;
+      if (!listed || !kv[3].trimStart().startsWith("[")) continue;
+      rest = kv[3]; open = true;
     }
-    for (const m of body.matchAll(/"([A-Za-z0-9_.-]+)\s*(?=[<>=~!;\[@ ,"])/g)) out.push(m[1]);
-    // Why strip strings first: an extra (`"brief[s1] @ ..."`) has brackets that don't close the array.
-    if (body.replace(/"[^"]*"/g, "").includes("]")) open = false;
+    const { code, strings } = tomlLine(rest);
+    for (const str of strings) { const m = /^\s*([A-Za-z0-9_.-]+)\s*(?:[<>=~!;\[@ ,(]|$)/.exec(str); if (m) out.push(m[1]); }
+    if (code.includes("]")) open = false;
   }
   return out;
+}
+
+// One line of TOML split into the text outside strings (comment dropped) and the strings' contents.
+// Why quote-aware: a `#` or `]` inside a string (`"pkg[s1] @ git+https://host/x#egg=pkg"`) is neither
+// a comment nor the end of an array, and misreading either drops the dependencies after it.
+function tomlLine(line) {
+  let code = "", cur = null, quote = null;
+  const strings = [];
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\" && quote === '"') { cur += line[++i] ?? ""; continue; }
+      if (c === quote) { strings.push(cur); quote = null; continue; }
+      cur += c;
+    } else if (c === '"' || c === "'") { quote = c; cur = ""; }
+    else if (c === "#") break;
+    else code += c;
+  }
+  return { code, strings };
 }
 
 async function autoPick(project) {
