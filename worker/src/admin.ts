@@ -36,7 +36,7 @@ code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:au
   <input name="description" placeholder="what it's for">
   <input name="expires_at" type="date" title="expires">
   <button>Save</button>
-  <textarea name="config" placeholder='{"account_id": "…", "ttl_minutes": 30, "start": ["workers:read"], "scopes": {"workers:read": ["<permission group id>"], "workers:write": ["<id>"]}}'></textarea>
+  <textarea name="config" placeholder='Optional. Left empty: workers:read (Workers, D1, KV, R2 read; granted on request) and workers:write (the same, write; waits for you here), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.'></textarea>
 </form>
 
 <h2>Grants</h2>
@@ -87,7 +87,8 @@ async function load() {
 }
 const putKey = document.getElementById('putKey');
 const STATIC_HINT = '{"check": "openai"}  (optional: anthropic, openai, github, stripe, cloudflare, or {"url": "https://…", "header": "authorization", "prefix": "Bearer "})';
-putKey.kind.onchange = () => { putKey.config.placeholder = putKey.kind.value === 'static' ? STATIC_HINT : MINT_HINT; };
+putKey.kind.onchange = () => { putKey.config.placeholder = putKey.kind.value === 'static' ? STATIC_HINT : MINT_HINT;
+  if (putKey.kind.value === 'mint:cloudflare' && !putKey.name.value) putKey.name.value = 'CLOUDFLARE_API_TOKEN'; };
 const MINT_HINT = putKey.config.placeholder; putKey.config.style.display = 'block'; putKey.kind.onchange();
 putKey.onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target), kind = f.get('kind');
   const put = skip_check => { const config = !String(f.get('config')).trim() ? undefined : JSON.parse(f.get('config'));

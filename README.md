@@ -125,16 +125,25 @@ token, and every caller gets its own short-lived **child** token with only the s
 The parent never leaves the broker.
 
 Set one up in `/admin`:
-1. Create an **account-owned** Cloudflare token (Manage Account > Account API Tokens, not My Profile) with **Account API Tokens: Edit** (it can
-   create other tokens and nothing else). Save it as the key's value with kind `mint:cloudflare`.
-2. Give it a config. Scope names are yours; each maps to Cloudflare permission group ids
-   (`GET /accounts/{id}/tokens/permission_groups`; use ids, since names are cosmetic):
+1. Save your account id as a static key, `CLOUDFLARE_ACCOUNT_ID`. Wrangler reads it too.
+2. Create an **account-owned** Cloudflare token (Manage Account > Account API Tokens, not My
+   Profile) with **Account API Tokens: Edit**: it can create other tokens and nothing else.
+3. Save it as `CLOUDFLARE_API_TOKEN` with kind `mint:cloudflare`. Just the token: with no config,
+   callers get `workers:read` (Workers Scripts, D1, KV and R2 read; granted on request) and
+   `workers:write` (the same four, write; waits for your approval), children last 30 minutes, and
+   the token is used to look up each permission's id on your account as it's saved.
 
-   ```json
-   { "account_id": "<32-hex id>", "ttl_minutes": 30, "start": ["workers:read"],
-     "scopes": { "workers:read": ["<group id>"], "workers:write": ["<group id>", "<group id>"] },
-     "ip": ["203.0.113.0/24"] }
-   ```
+To choose other scopes, give a config. Scope names are yours; each lists Cloudflare account
+permissions, by name (as the dashboard shows them) or by id:
+
+```json
+{ "ttl_minutes": 30, "start": ["workers:read"],
+  "scopes": { "workers:read": ["Workers Scripts Read"], "pages:write": ["Pages Write"] },
+  "ip": ["203.0.113.0/24"] }
+```
+
+`account_id` is optional when `CLOUDFLARE_ACCOUNT_ID` is saved. A name Cloudflare doesn't list for
+the account refuses the save, and names are stored as ids, which don't change.
 
 Each caller holds one **grant** per minted key, and its state decides what the env var holds:
 

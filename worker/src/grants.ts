@@ -19,6 +19,10 @@ export interface Provider {
   revoke(parent: string, config: MintConfig, childId: string): Promise<void>;
   // Whether a parent works, before it is saved (verify.ts). Optional: without it a key saves unchecked.
   verify?(parent: string, config: MintConfig): Promise<Outcome>;
+  // Completes a config before a new parent is saved, so pasting only the parent is enough: fills
+  // defaults (`setting` reads a static key the admin saved, such as the account id) and resolves
+  // anything named for people into the ids the provider needs.
+  prepare?(parent: string, config: MintConfig, setting: (name: string) => Promise<string | undefined>): Promise<MintConfig>;
 }
 
 export const DEFAULT_TTL_MIN = 30, MIN_TTL_MIN = 15, MAX_TTL_MIN = 24 * 60;
@@ -50,6 +54,11 @@ export class Grants {
     const p = kind.startsWith("mint:") ? this.providers[kind.slice(5)] : undefined;
     if (!p) throw new Refused(400, `unknown key kind: ${kind}`);
     return p;
+  }
+
+  async prepare(kind: string, parent: string, config: MintConfig, setting: (name: string) => Promise<string | undefined>) {
+    const p = this.provider(kind);
+    return p.prepare ? p.prepare(parent, config, setting) : config;
   }
 
   // Checks a mint key's config before it is saved: known scopes, a sane TTL, start scopes that exist.
