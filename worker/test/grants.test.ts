@@ -139,7 +139,7 @@ test("a provider failure yields no token and leaves no live grant", async () => 
   const r = await s.env();
   assert.equal(r.status, 500);
   assert.equal((await s.env("x")).status, 401);
-  assert.deepEqual(await adminGrants(s), []);
+  assert.deepEqual((await adminGrants(s)).map((g: any) => [g.state, g.decided_by]), [["expired", "system"]]); // the claim was abandoned
   // A static key requested with it does not come back alone either: the whole response fails.
   assert.equal((await s.env(s.dev, "AWS_REGION,CLOUDFLARE_API_TOKEN")).status, 500);
 });
@@ -313,6 +313,21 @@ test("a deny racing a revoke can't overwrite it", async () => {
   s.grants.get = async (id: string) => { s.grants.get = get; const r = await get(id); await s.grants.revoke(id, "vu@example.com"); return r; };
   assert.equal((await s.call("POST", `/admin/api/grants/${g.id}/deny`, undefined, {}, "vu@example.com")).status, 409);
   assert.equal((await adminGrants(s))[0].state, "revoked");
+});
+
+test("a revoke lands even when the grant changes between reading it and ending it", async () => {
+  const s = await setup();
+  await s.env();
+  const [g] = await adminGrants(s);
+  const get = s.grants.get.bind(s.grants);
+  s.grants.get = async (id: string) => { s.grants.get = get; const r = await get(id);
+    await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] }); return r; };
+  assert.equal((await s.call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, "vu@example.com")).status, 200);
+  const [after] = await adminGrants(s);
+  assert.deepEqual([after.state, after.requested], ["revoked", null]);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  const events = await s.grants.events(g.id);
+  assert.deepEqual(events.at(-1), { ...events.at(-1), type: "revoke", from_state: "active", to_state: "revoked" });
 });
 
 test("after a rotation every older revision's grant is ended, not just the one the save replaced", async () => {

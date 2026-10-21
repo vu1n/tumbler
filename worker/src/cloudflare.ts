@@ -7,6 +7,7 @@
 // Permission group ids come from GET /accounts/{id}/tokens/permission_groups; names are cosmetic.
 import { Refused } from "./catalog.ts";
 import type { MintConfig, Provider } from "./grants.ts";
+import { byStatus, TIMEOUT_MS } from "./verify.ts";
 
 const API = "https://api.cloudflare.com/client/v4";
 const ACCOUNT = /^[0-9a-f]{32}$/, GROUP = /^[0-9a-f]{32}$/;
@@ -25,6 +26,12 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       throw Object.assign(new Refused(502, `cloudflare ${method} tokens: ${r.status}${codes ? ` (${codes})` : ""}`), { status404: r.status === 404 });
     }
     return j.result;
+  };
+  // Whether `parent` is an active user-owned token, which account routes reject.
+  const userToken = async (parent: string) => {
+    const r = await fetcher(`${API}/user/tokens/verify`, { headers: { authorization: `Bearer ${parent}` }, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) })
+      .catch(() => null);
+    return !!r?.ok && (await r.json().catch(() => ({})) as any).result?.status === "active";
   };
   return {
     validate(config: MintConfig) {
@@ -53,6 +60,24 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       });
       if (!result?.id || !result?.value) throw new Refused(502, "cloudflare minted no token");
       return { id: String(result.id), value: String(result.value) };
+    },
+    // Before a parent is saved: Cloudflare must accept it as an active token on this account.
+    async verify(parent, config) {
+      if (!/^[\x21-\x7e]+$/.test(parent)) return { status: "invalid", detail: "not a printable token" };
+      try {
+        const r = await fetcher(`${API}/accounts/${config.account_id}/tokens/verify`,
+          { headers: { authorization: `Bearer ${parent}` }, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) });
+        const j = await r.json().catch(() => ({})) as any;
+        const o = byStatus(r.status);
+        // Why the second call: a user-owned token (My Profile > API Tokens) is rejected here even
+        // when it works, and "rejected (401)" alone sends the admin looking for the wrong problem.
+        if (r.status === 401 && await userToken(parent)) {
+          return { status: "invalid", detail: "this is a user token; create an account-owned one under Manage Account > Account API Tokens" };
+        }
+        if (o.status !== "ok") return o;
+        // Never Cloudflare's text in the detail: a fixed phrase only.
+        return j.success !== false && j.result?.status === "active" ? o : { status: "invalid", detail: "token is not active" };
+      } catch { return { status: "error", detail: "could not check (request failed)" }; }
     },
     async revoke(parent, config, childId) {
       try { await call("DELETE", `/accounts/${config.account_id}/tokens/${encodeURIComponent(childId)}`, parent); }
