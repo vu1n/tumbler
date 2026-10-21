@@ -397,13 +397,20 @@ export class Grants {
       ? [`id = ? AND ${LIVE}`, [g.id]]
       : [`id = ? AND state = ? AND requested IS ? AND child_id IS ?${extra.guard ? ` AND ${extra.guard}` : ""}`,
         [g.id, g.state, asJson(g.requested), g.child_id, ...(extra.binds ?? [])]];
-    const [, r] = await this.db.batch([
+    // Ending a live grant records its child's delete in the same write, so a crash before the
+    // provider call still leaves it for sweep() to retry; revokeChild() clears the row on success.
+    const intent = extra.live ? [this.db.prepare(
+      `INSERT INTO pending_revokes (child_id, key_scope, name, key_rev, expires_at, attempts, last_at)
+        SELECT child_id, key_scope, name, key_rev, expires_at, 0, ? FROM grants WHERE ${where} AND child_id IS NOT NULL
+        ON CONFLICT (child_id) DO NOTHING`).bind(t, ...binds)] : [];
+    const r = (await this.db.batch([
+      ...intent,
       this.db.prepare(`INSERT INTO grant_events (grant_id, at, type, actor, from_state, to_state, scopes)
         SELECT ?, ?, ?, ?, (SELECT state FROM grants WHERE id = ?), ?, ? WHERE EXISTS (SELECT 1 FROM grants WHERE ${where})`)
         .bind(g.id, t, e.type, e.who, g.id, next.state, eventScopes(e), ...binds),
       this.db.prepare(`UPDATE grants SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE ${where} RETURNING child_id, expires_at`)
         .bind(...cols.map((c) => set[c]), ...binds),
-    ]);
+    ])).at(-1)!;
     const row = (r.results as { child_id: string | null; expires_at: string | null }[] | undefined)?.[0];
     return row ? { ...g, ...next, child_id: row.child_id, expires_at: row.expires_at, updated_at: t } : null;
   }

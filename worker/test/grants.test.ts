@@ -418,6 +418,22 @@ test("an interrupted caller-token revoke is finished by a retry or by the sweep"
   assert.equal((await s.call("DELETE", "/admin/api/tokens/nope", undefined, undefined, "vu@example.com")).status, 404);
 });
 
+test("a crash between ending a grant and the provider delete is retried by the sweep", async () => {
+  const s = await setup();
+  await s.env();
+  const [g] = await adminGrants(s);
+  const revokeChild = s.grants.revokeChild.bind(s.grants);
+  s.grants.revokeChild = async () => { throw new Error("worker died"); };
+  assert.equal((await s.call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, "vu@example.com")).status, 500);
+  assert.equal((await adminGrants(s))[0].state, "revoked");
+  assert.deepEqual(s.fake.revoked, []);
+  assert.equal(await s.grants.pendingRevokes(), 1); // recorded with the end, before the provider call
+  s.grants.revokeChild = revokeChild;
+  await s.grants.sweep();
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal(await s.grants.pendingRevokes(), 0);
+});
+
 test("the sweep ends live grants of a revoked caller nobody retried", async () => {
   const s = await setup();
   await s.env();
