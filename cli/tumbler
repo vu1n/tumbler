@@ -2,7 +2,7 @@
 // tumbler — run a command with env vars from the tumbler broker. Values live only in the process
 // you run and in a short-lived in-memory cache; nothing is written to disk.
 //
-//   tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] -- <cmd> [args...]
+//   tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] [--clean [--pass A,B]] -- <cmd> [args...]
 //                                    --scope asks for more scopes on the set's minted keys
 //                                    (e.g. workers:write); reads are granted at once, the rest
 //                                    wait for approval in /admin and the command doesn't start
@@ -13,6 +13,9 @@
 //                                    key whose new value passed its check on save changes, it
 //                                    restarts the command with that value, and goes back to the old
 //                                    one if the restart dies within TUMBLER_WATCH_GRACE seconds (10)
+//                                    --clean starts the command from a runtime allowlist (PATH, HOME,
+//                                    locale, proxy and CA settings...) plus its keys, instead of this
+//                                    shell's whole environment; --pass A,B lets named variables through
 //   tumbler keys [-p project]        names this caller can read (never values)
 //   tumbler whoami                   which token the broker sees, and its pin
 //   tumbler auto [-p project] [--dry-run] [--force]
@@ -39,7 +42,11 @@ import { fileURLToPath } from "node:url";
 const SELF = fileURLToPath(import.meta.url);
 const TTL = Number(process.env.TUMBLER_TTL ?? 300) * 1000;
 const RUN_DIR = join(process.env.XDG_RUNTIME_DIR || join(homedir(), ".cache"), "tumbler");
-const SOCK = join(RUN_DIR, `cache-${process.getuid?.() ?? 0}.sock`);
+// Why this file's own hash in the name: a helper started by another version of the CLI (before an
+// upgrade through /setup) keeps that version's cache rules, so this one never asks it. It is left
+// alone and exits once idle.
+const VERSION = createHash("sha256").update(readFileSync(SELF)).digest("hex").slice(0, 12);
+const SOCK = join(RUN_DIR, `cache-${process.getuid?.() ?? 0}-${VERSION}.sock`);
 const SHIM_DIR = join(homedir(), ".local", "share", "tumbler", "bin");
 const IDLE_EXIT = Number(process.env.TUMBLER_IDLE ?? 1800) * 1000; // the helper exits after this long unused
 
@@ -190,7 +197,7 @@ function gatherSignals(root) {
     } else if (/^requirements.*\.txt$/.test(base)) {
       for (const line of read(f).split("\n")) { const m = /^\s*([A-Za-z0-9_.-]+)/.exec(line); if (m) deps.add(m[1]); }
     } else if (base === "pyproject.toml") {
-      for (const m of read(f).matchAll(/^\s*"([A-Za-z0-9_.-]+)\s*[<>=~!;\[" ]/gm)) deps.add(m[1]);
+      for (const d of pyprojectDeps(read(f))) deps.add(d);
     } else if (base === "go.mod") {
       for (const m of read(f).matchAll(/^\s*(?:require\s+)?([a-z0-9.-]+\.[a-z]+\/[^\s]+)\s+v/gm)) deps.add(m[1]);
     } else if (base === "Cargo.toml") {
@@ -203,14 +210,64 @@ function gatherSignals(root) {
   return [...keyFiles.map((f) => `file:${f}`), ...[...deps].map((d) => `dep:${d}`), ...others.map((f) => `file:${f}`)];
 }
 
+// Every dependency a pyproject.toml declares: PEP 621 `dependencies` and `optional-dependencies`,
+// PEP 735 `dependency-groups` and uv's `dev-dependencies` (arrays of PEP 508 strings, inline or one
+// per line), and Poetry's dependency tables (one name per key). Why the extras too: an optional
+// extra is often exactly where an API client lives (brief's and kypp's `s1 = ["typesafe-sdk"]`).
+function pyprojectDeps(text) {
+  const out = [];
+  let table = "", open = false;
+  for (const line of text.split("\n")) {
+    let rest = line;
+    if (!open) {
+      const h = /^\s*\[([^\]]+)\]\s*(?:#.*)?$/.exec(line);
+      if (h) { table = h[1].trim(); continue; }
+      const kv = /^\s*(["']?)([A-Za-z0-9_.-]+)\1\s*=\s*(.*)$/.exec(line);
+      if (!kv) continue;
+      const key = kv[2];
+      if (/^tool\.poetry\.(?:.+\.)?(?:dev-)?dependencies$/.test(table)) { if (key !== "python") out.push(key); continue; }
+      const listed = (table === "project" && key === "dependencies") || table === "project.optional-dependencies"
+        || table === "dependency-groups" || (table === "tool.uv" && key === "dev-dependencies");
+      if (!listed || !kv[3].trimStart().startsWith("[")) continue;
+      rest = kv[3]; open = true;
+    }
+    const { code, strings } = tomlLine(rest);
+    for (const str of strings) { const m = /^\s*([A-Za-z0-9_.-]+)\s*(?:[<>=~!;\[@ ,(]|$)/.exec(str); if (m) out.push(m[1]); }
+    if (code.includes("]")) open = false;
+  }
+  return out;
+}
+
+// One line of TOML split into the text outside strings (comment dropped) and the strings' contents.
+// Why quote-aware: a `#` or `]` inside a string (`"pkg[s1] @ git+https://host/x#egg=pkg"`) is neither
+// a comment nor the end of an array, and misreading either drops the dependencies after it.
+function tomlLine(line) {
+  let code = "", cur = null, quote = null;
+  const strings = [];
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (c === "\\" && quote === '"') { cur += line[++i] ?? ""; continue; }
+      if (c === quote) { strings.push(cur); quote = null; continue; }
+      cur += c;
+    } else if (c === '"' || c === "'") { quote = c; cur = ""; }
+    else if (c === "#") break;
+    else code += c;
+  }
+  return { code, strings };
+}
+
 async function autoPick(project) {
   const q = project ? `?project=${encodeURIComponent(project)}` : "";
   return brokerCall("POST", `/v1/auto${q}`, { signals: gatherSignals(repoRoot()) });
 }
 
-function writeManifest(path, r) {
+// Why `project` is the one asked for, never the broker's answer: that answer is the pin of whichever
+// token ran auto, and a committed `project =` line made from it 403s for every other token (a
+// global-only one, or one pinned elsewhere). A single-pin token gets its pin without the line.
+function writeManifest(path, r, project) {
   const lines = ["# Written by `tumbler auto` from this repo's file and dependency names. Edit it; commit it."];
-  if (r.project) lines.push(`project = ${r.project}`);
+  if (project) lines.push(`project = ${project}`);
   for (const k of r.keys) lines.push(`${k.name}  # ${k.why}`);
   writeFileSync(path, lines.join("\n") + "\n");
 }
@@ -223,7 +280,7 @@ async function auto(args) {
   let r; try { r = await autoPick(project); } catch (e) { die(e.message); }
   for (const k of r.keys) process.stdout.write(`${k.name}\t${k.why}\n`);
   if (!r.keys.length) process.stdout.write("no keys needed\n");
-  if (!dry) { writeManifest(path, r); process.stderr.write(`tumbler: wrote ${path}\n`); }
+  if (!dry) { writeManifest(path, r, project); process.stderr.write(`tumbler: wrote ${path}\n`); }
 }
 
 // --- project manifest ------------------------------------------------------------------------
@@ -247,7 +304,7 @@ function manifest() {
 
 function parseFlags(args) {
   const m = manifest();
-  let project = process.env.TUMBLER_PROJECT || m.project, keys = m.keys, rest = [], picked = m.found, scopes = [], retry = false, watch = false;
+  let project = process.env.TUMBLER_PROJECT || m.project, keys = m.keys, rest = [], picked = m.found, scopes = [], retry = false, watch = false, clean = false, pass = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--") { rest = args.slice(i + 1); break; }
@@ -256,9 +313,11 @@ function parseFlags(args) {
     else if (a === "--scope") scopes.push(...String(args[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
     else if (a === "--retry") retry = true;
     else if (a === "--watch") watch = true;
+    else if (a === "--clean") clean = true;
+    else if (a === "--pass") pass.push(...String(args[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean));
     else { rest = args.slice(i); break; }
   }
-  return { project, keys, rest, picked, scopes, retry, watch };
+  return { project, keys, rest, picked, scopes, retry, watch, clean, pass };
 }
 
 // --- commands --------------------------------------------------------------------------------
@@ -291,8 +350,10 @@ async function stepUp(project, keys, scopes) {
 }
 
 async function run(args) {
-  let { project, keys, rest, picked, scopes, retry, watch } = parseFlags(args);
-  if (!rest.length) die("usage: tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] -- <cmd> [args...]", 2);
+  let { project, keys, rest, picked, scopes, retry, watch, clean, pass } = parseFlags(args);
+  if (!rest.length) die("usage: tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] [--clean [--pass A,B]] -- <cmd> [args...]", 2);
+  if (pass.length && !clean) die("--pass only applies with --clean", 2);
+  if (clean) inherited = cleanEnv(pass);
   // No .tumbler and no -k: work the set out once and write it down, so later runs and reviewers see it.
   if (!picked && !["0", "off", "false", "no"].includes((process.env.TUMBLER_AUTO ?? "").toLowerCase())) {
     // Why: neither failure may widen the set to every key the token can read. If auto can't pick,
@@ -305,7 +366,7 @@ async function run(args) {
     keys = r.keys.map((k) => k.name); picked = true;
     const path = join(repoRoot(), ".tumbler");
     try {
-      writeManifest(path, r);
+      writeManifest(path, r, project);
       process.stderr.write(`tumbler: wrote ${path} with ${keys.length} key(s); edit it to change what runs get\n`);
     } catch (e) {
       process.stderr.write(`tumbler: could not write ${path} (${e.code ?? e.message}); running with the ${keys.length} picked key(s) only\n`);
@@ -343,9 +404,19 @@ async function run(args) {
 const say = (msg) => process.stderr.write(`tumbler: ${msg}\n`);
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms).unref());
 
+// What the command inherits besides its keys: this shell's environment, or under --clean only what a
+// program needs to run and reach the network. Why opt-in: by default the keys are added to the
+// environment, so a credential already exported in the shell still reaches the command.
+// Environment only: it doesn't stop the command reading a dotenv file or a credentials directory.
+let inherited = process.env;
+const RUNTIME_VARS = /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|COLORTERM|LANG|LANGUAGE|LC_[A-Z]+|TZ|TMPDIR|TEMP|TMP|PWD|XDG_[A-Z_]+|(?:HTTPS?|NO|ALL)_PROXY|(?:https?|no|all)_proxy|SSL_CERT_(?:FILE|DIR)|NODE_EXTRA_CA_CERTS|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|TUMBLER_URL|SYSTEMROOT|COMSPEC|PATHEXT)$/;
+function cleanEnv(pass) {
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => RUNTIME_VARS.test(k) || pass.includes(k)));
+}
+
 // The command, with `done` settling once it exits: {code, sig} or {error} when it couldn't start.
 function start(cmd, argv, env) {
-  const child = spawn(cmd, argv, { stdio: "inherit", env: { ...process.env, ...env, TUMBLER_SHIMMED: "" } });
+  const child = spawn(cmd, argv, { stdio: "inherit", env: { ...inherited, ...env, TUMBLER_SHIMMED: "" } });
   child.done = new Promise((ok) => { child.on("exit", (code, sig) => ok({ code, sig })); child.on("error", (error) => ok({ error })); });
   return child;
 }

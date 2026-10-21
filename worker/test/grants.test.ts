@@ -462,6 +462,36 @@ test("a failed delete at the provider is queued, shown in /admin, and retried by
   assert.equal(await s.grants.pendingRevokes(), 0);
 });
 
+test("an unexpected mint or revoke error never reaches the logs or the response by its message", async () => {
+  const s = await setup(), SENTINEL = "sk-sentinel-must-not-log", logged: unknown[] = [];
+  const error = console.error;
+  console.error = (...a: unknown[]) => { logged.push(...a); };
+  try {
+    const mint = s.fake.provider.mint;
+    s.fake.provider.mint = async () => { throw new Error(`mint refused for ${SENTINEL}`); };
+    let r = await s.env();
+    assert.equal(r.status, 500);
+    assert.doesNotMatch(await r.text(), new RegExp(SENTINEL));
+    // `name` is writable, so a thrower can put anything there too: only a known class name is logged.
+    s.fake.provider.mint = async () => { throw Object.assign(new Error("x"), { name: `ProviderError ${SENTINEL}` }); };
+    r = await s.env();
+    assert.equal(r.status, 500);
+    s.fake.provider.mint = mint;
+    await s.env();
+    const revoke = s.fake.provider.revoke;
+    s.fake.provider.revoke = async () => { throw new TypeError(`revoke refused for ${SENTINEL}`); };
+    const live = (await adminGrants(s)).find((g: any) => g.state === "active");
+    await s.call("DELETE", `/admin/api/grants/${live.id}`, undefined, undefined, "vu@example.com");
+    assert.equal(await s.grants.pendingRevokes(), 1); // still queued for retry
+    s.fake.provider.revoke = revoke;
+    await s.grants.sweep();
+    assert.equal(await s.grants.pendingRevokes(), 0);
+  } finally { console.error = error; }
+  assert.ok(logged.length >= 3);
+  assert.doesNotMatch(logged.map(String).join(" "), new RegExp(SENTINEL));
+  assert.ok(["Error", "other", "TypeError"].every((c) => logged.includes(c))); // a known class is kept for debugging
+});
+
 test("a project key overriding a global one starts a new grant instead of reusing the old key's child", async () => {
   const s = await setup();
   await s.catalog.put("global", "CF_G", PARENT, { kind: "mint:cloudflare", config: CONFIG });

@@ -56,7 +56,7 @@ Elsewhere (your laptop, CI), set `TUMBLER_URL` and `TUMBLER_TOKEN` instead of th
 ## CLI
 
 ```
-tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] -- <cmd> [args...]
+tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] [--clean [--pass A,B]] -- <cmd> [args...]
 tumbler keys [-p project]     names you can read, never values
 tumbler whoami                the token's name and pin
 tumbler auto [--dry-run]      work out which keys this repo needs; write .tumbler
@@ -66,10 +66,20 @@ tumbler shim <tool>...        wrappers so <tool> always runs under tumbler
 
 A `.tumbler` file in a repo lists the key names it needs (one per line) and optionally
 `project = <name>`. Without one, `run` calls `tumbler auto` first and writes it, so the command gets
-only the keys the repo needs. Commit the file so the set is reviewed like code. A failure never widens
+only the keys the repo needs. Auto writes a `project =` line only when you name one (`-p`,
+`TUMBLER_PROJECT`), never the pin of the token that ran it: a token pinned to one project reads it
+without the line, and a line naming another project would make the broker refuse every other token. Commit the file so the set is reviewed like code. A failure never widens
 the set: if auto can't reach the broker the command doesn't start, and if `.tumbler` can't be written
 (a read-only checkout) the command runs with just the picked keys. `TUMBLER_AUTO=off` skips auto and
 fetches every key the token can read.
+
+The picked keys are added to the environment `run` was started in, so a credential already exported in
+that shell still reaches the command. `--clean` starts the command from a runtime allowlist instead
+(`PATH`, `HOME`, locale, temp dirs, `XDG_*`, proxy and CA-bundle settings, `TUMBLER_URL`) plus its keys,
+and `--pass A,B` lets named variables through as well. `TUMBLER_TOKEN` isn't on the list, so a shimmed
+tool inside a clean command needs the network secret or `--pass TUMBLER_TOKEN`. It filters the
+environment only: the command can still read a dotenv file or a credentials directory such as
+`~/.aws`.
 
 ### When keys change
 
@@ -105,7 +115,8 @@ changes inside a running command unless you ask for it.
 ### How `auto` picks keys
 
 The CLI sends the broker the repo's file paths (three levels deep) and dependency names from
-`package.json`, `requirements*.txt`, `pyproject.toml`, `go.mod` and `Cargo.toml`. It never sends file
+`package.json`, `requirements*.txt`, `pyproject.toml` (with its optional extras, dependency groups and
+Poetry tables), `go.mod` and `Cargo.toml`. It never sends file
 contents or values. The broker then:
 
 1. **Rules:** known signals map to key prefixes. For example, `wrangler.jsonc` maps to `CLOUDFLARE_*`
@@ -119,7 +130,9 @@ never wider access. Without the `AI` binding, auto uses the rules only.
 
 `TUMBLER_TTL` (seconds, default 300, `0` disables the cache). The cache is a helper process on a
 private unix socket (`$XDG_RUNTIME_DIR/tumbler` or `~/.cache/tumbler`, mode 0700) that exits after
-30 minutes unused. It is keyed by broker and token, so one token never gets another's values. An
+30 minutes unused. It is keyed by broker and token, so one token never gets another's values. The
+socket's name carries a hash of the CLI, so after an upgrade the new CLI starts its own helper and
+never reads from one an older version started; the old one exits once idle. An
 env holding a minted key is cached at most 5 minutes whatever `TUMBLER_TTL` says, so a cached child
 is never handed out past its expiry.
 

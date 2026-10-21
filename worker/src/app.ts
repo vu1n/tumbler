@@ -3,7 +3,7 @@ import { Catalog, checkScope, GLOBAL, isKeyName, Refused } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
-import { MINTED_MAX_AGE_S, type GrantRow, type Grants } from "./grants.ts";
+import { errorClass, MINTED_MAX_AGE_S, type GrantRow, type Grants } from "./grants.ts";
 import { checkKey, type Verifiers } from "./verify.ts";
 
 export interface Deps {
@@ -37,7 +37,9 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     return new Response("not found", { status: 404 });
   } catch (e) {
     if (e instanceof Refused) return json({ error: e.message }, e.status);
-    console.error("tumbler", (e as Error).message); // never the request body: it may carry a value
+    // A fixed event, the route and the error's class: never its message, stack or cause, nor the
+    // request body. A provider or library error can quote what it was sent, and that may be a value.
+    console.error("tumbler: request failed", new URL(request.url).pathname, errorClass(e));
     return json({ error: "internal error" }, 500);
   }
 }

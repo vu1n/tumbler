@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -51,6 +52,27 @@ const printEnv = ["node", "-e", "process.stdout.write([process.env.PYTH_API_KEY,
 test("run injects the project's values into the child only", async () => {
   const { stdout } = await cli(["run", "--", ...printEnv], { TUMBLER_TTL: "0" });
   assert.equal(stdout, "dev-pyth us-east-1");
+});
+
+test("--clean starts the command from a runtime allowlist plus its keys", async () => {
+  const probe = ["node", "-e", "process.stdout.write([process.env.AWS_REGION, process.env.AMBIENT_SECRET, process.env.KEEP_ME, !!process.env.PATH].join(' '))"];
+  const env = { TUMBLER_TTL: "0", AMBIENT_SECRET: "leak", KEEP_ME: "kept" };
+  assert.equal((await cli(["run", "-k", "AWS_REGION", "--", ...probe], env)).stdout, "us-east-1 leak kept true");
+  assert.equal((await cli(["run", "-k", "AWS_REGION", "--clean", "--", ...probe], env)).stdout, "us-east-1   true");
+  assert.equal((await cli(["run", "-k", "AWS_REGION", "--clean", "--pass", "KEEP_ME", "--", ...probe], env)).stdout, "us-east-1  kept true");
+  await assert.rejects(cli(["run", "--pass", "KEEP_ME", "--", "true"], env), /--pass only applies with --clean/);
+});
+
+test("a helper left by another CLI version is never asked", async () => {
+  // A stand-in for a pre-upgrade helper on the old socket name, serving a stale value.
+  const dir = join(home, "run", "tumbler");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const legacy = createNetServer((sock) => sock.end(JSON.stringify({ env: { PYTH_API_KEY: "stale" } }) + "\n"));
+  await new Promise<void>((ok) => legacy.listen(join(dir, `cache-${process.getuid?.() ?? 0}.sock`), ok));
+  try {
+    await cli(["reload"]);
+    assert.notEqual((await cli(["run", "--", ...printEnv])).stdout.split(" ")[0], "stale");
+  } finally { legacy.close(); }
 });
 
 test("a .tumbler manifest limits which keys are fetched", async () => {
@@ -129,9 +151,26 @@ test("auto picks keys by rule and by Clef, sends names only, and writes .tumbler
   assert.match(stdout, /POSTHOG_API_KEY\tclef 0\.90/);
   assert.doesNotMatch(stdout, /AWS_REGION|PYTH_API_KEY/);
   assert.doesNotMatch(JSON.stringify(seen), /do-not-send/);
-  const written = readFileSync(join(dir, ".tumbler"), "utf8");
-  assert.match(written, /^project = dev$/m);
+  // The token's pin is not written down: the committed file must not 403 for a token pinned elsewhere.
+  assert.doesNotMatch(readFileSync(join(dir, ".tumbler"), "utf8"), /^project =/m);
   await assert.rejects(cli(["auto"], {}, dir), /exists; pass --force/);
+  await cli(["auto", "--force", "-p", "dev"], {}, dir);
+  assert.match(readFileSync(join(dir, ".tumbler"), "utf8"), /^project = dev$/m);
+});
+
+test("auto reads every dependency a pyproject.toml declares, extras included", async () => {
+  const pyproject = [
+    "[project]", 'name = "x"', 'description = "not-a-dep>=1"', "dependencies = [", '    "typer>=0.12",  # a comment', '    "pyyaml",', "]",
+    "[project.optional-dependencies]", "# an extra", 's1 = ["typesafe-sdk>=0.7"]', 'git = ["brief[s1] @ git+https://example.com/b#egg=brief", "rich"]  # a ] in a comment',
+    // Codex's case: a `#` and a `]` inside a string must neither end the line nor close the array.
+    "llm = [", '    "brief[s1] @ git+https://example.com/b#egg=brief",', "    'openai>=1',", "]",
+    "[dependency-groups]", 'dev = ["pytest>=8"]',
+    "[tool.poetry.group.dev.dependencies]", 'python = "^3.12"', 'boto3 = "^1"',
+    "[tool.hatch.build]", 'packages = ["src/x"]',
+  ].join("\n");
+  await cli(["auto", "--dry-run"], {}, repo({ "pyproject.toml": pyproject }));
+  const deps = ((seen as any).signals as string[]).filter((s) => s.startsWith("dep:")).sort();
+  assert.deepEqual(deps, ["dep:boto3", "dep:brief", "dep:openai", "dep:pytest", "dep:pyyaml", "dep:rich", "dep:typer", "dep:typesafe-sdk"]);
 });
 
 test("run with no .tumbler runs auto first and gets only those keys", async () => {
