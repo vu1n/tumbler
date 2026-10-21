@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -60,6 +61,18 @@ test("--clean starts the command from a runtime allowlist plus its keys", async 
   assert.equal((await cli(["run", "-k", "AWS_REGION", "--clean", "--", ...probe], env)).stdout, "us-east-1   true");
   assert.equal((await cli(["run", "-k", "AWS_REGION", "--clean", "--pass", "KEEP_ME", "--", ...probe], env)).stdout, "us-east-1  kept true");
   await assert.rejects(cli(["run", "--pass", "KEEP_ME", "--", "true"], env), /--pass only applies with --clean/);
+});
+
+test("a helper left by another CLI version is never asked", async () => {
+  // A stand-in for a pre-upgrade helper on the old socket name, serving a stale value.
+  const dir = join(home, "run", "tumbler");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const legacy = createNetServer((sock) => sock.end(JSON.stringify({ env: { PYTH_API_KEY: "stale" } }) + "\n"));
+  await new Promise<void>((ok) => legacy.listen(join(dir, `cache-${process.getuid?.() ?? 0}.sock`), ok));
+  try {
+    await cli(["reload"]);
+    assert.notEqual((await cli(["run", "--", ...printEnv])).stdout.split(" ")[0], "stale");
+  } finally { legacy.close(); }
 });
 
 test("a .tumbler manifest limits which keys are fetched", async () => {

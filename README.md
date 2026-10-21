@@ -130,7 +130,9 @@ never wider access. Without the `AI` binding, auto uses the rules only.
 
 `TUMBLER_TTL` (seconds, default 300, `0` disables the cache). The cache is a helper process on a
 private unix socket (`$XDG_RUNTIME_DIR/tumbler` or `~/.cache/tumbler`, mode 0700) that exits after
-30 minutes unused. It is keyed by broker and token, so one token never gets another's values. An
+30 minutes unused. It is keyed by broker and token, so one token never gets another's values. The
+socket's name carries a hash of the CLI, so after an upgrade the new CLI starts its own helper and
+never reads from one an older version started; the old one exits once idle. An
 env holding a minted key is cached at most 5 minutes whatever `TUMBLER_TTL` says, so a cached child
 is never handed out past its expiry.
 

@@ -42,7 +42,11 @@ import { fileURLToPath } from "node:url";
 const SELF = fileURLToPath(import.meta.url);
 const TTL = Number(process.env.TUMBLER_TTL ?? 300) * 1000;
 const RUN_DIR = join(process.env.XDG_RUNTIME_DIR || join(homedir(), ".cache"), "tumbler");
-const SOCK = join(RUN_DIR, `cache-${process.getuid?.() ?? 0}.sock`);
+// Why this file's own hash in the name: a helper started by another version of the CLI (before an
+// upgrade through /setup) keeps that version's cache rules, so this one never asks it. It is left
+// alone and exits once idle.
+const VERSION = createHash("sha256").update(readFileSync(SELF)).digest("hex").slice(0, 12);
+const SOCK = join(RUN_DIR, `cache-${process.getuid?.() ?? 0}-${VERSION}.sock`);
 const SHIM_DIR = join(homedir(), ".local", "share", "tumbler", "bin");
 const IDLE_EXIT = Number(process.env.TUMBLER_IDLE ?? 1800) * 1000; // the helper exits after this long unused
 
