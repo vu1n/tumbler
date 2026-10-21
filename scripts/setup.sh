@@ -7,10 +7,12 @@
 #   - Environment variable TUMBLER_URL=https://tumbler.example.com  (not a secret; a bare host means https)
 #   - Network secret on that host: Authorization: Bearer <the project's tumbler token>
 set -euo pipefail
-: "${TUMBLER_URL:?set TUMBLER_URL on the environment}"
+# Environment variables may not reach the setup script: set TUMBLER_URL here if they don't.
+# A failure here must never block the session from starting, so it warns and exits 0.
+if [ -z "${TUMBLER_URL:-}" ]; then echo "tumbler: TUMBLER_URL is not set; skipping" >&2; exit 0; fi
 case "$TUMBLER_URL" in *://*) ;; *) TUMBLER_URL="https://$TUMBLER_URL" ;; esac
 
-curl -fsSL "$TUMBLER_URL/cli" -o /usr/local/bin/tumbler
+curl -fsSL "$TUMBLER_URL/cli" -o /usr/local/bin/tumbler || { echo "tumbler: could not download the CLI from $TUMBLER_URL; skipping" >&2; exit 0; }
 chmod +x /usr/local/bin/tumbler
 
 # Tools that always run with keys from tumbler. Add or remove to taste.
