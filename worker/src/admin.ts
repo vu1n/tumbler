@@ -19,6 +19,7 @@ select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6
 form{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}input{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;min-width:0}
 button{font:inherit;padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);cursor:pointer}
 code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:auto}
+textarea.env{display:block;min-height:120px}
 #once{padding:12px;border:1px solid var(--warn);border-radius:6px;display:none}
 </style></head><body><main>
 <h1>Tumbler</h1>
@@ -38,6 +39,13 @@ code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:au
   <button>Save</button>
   <textarea name="config" placeholder='Optional. Left empty: workers:read (Workers, D1, KV, R2 read; granted on request) and workers:write (the same, write; waits for you here), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.'></textarea>
 </form>
+
+<form id="importEnv" method="post">
+  <textarea class="env" name="text" required spellcheck="false" autocomplete="off" placeholder="Paste a .env to save many static keys at once:&#10;OPENAI_API_KEY=sk-...&#10;export AWS_REGION=&quot;us-east-1&quot;  # comments, quotes and export are fine"></textarea>
+  <input name="scope" placeholder="global or project" value="global" required>
+  <button>Preview</button>
+</form>
+<div id="importPlan"></div>
 
 <h2>Grants</h2>
 <p class="muted">Minted keys. Read scopes are granted on request; anything else waits here for you.</p>
@@ -98,6 +106,24 @@ putKey.onsubmit = async e => { e.preventDefault(); const f = new FormData(e.targ
     // The check couldn't run (the service is down): offer to save unchecked, e.g. to replace a leaked key.
     if (!err.canSkip || !confirm(err.message + '\\n\\nSave it unchecked anyway? Running commands with --watch won\\'t get it pushed.')) return alert(err.message);
     try { await put(true); e.target.reset(); load(); } catch (err2) { alert(err2.message); } } };
+// Paste a .env: preview what each line does, then save. The text goes in a POST body only.
+const importEnv = document.getElementById('importEnv'), importPlan = document.getElementById('importPlan');
+const showPlan = (r, onSave) => { const rows = [...r.errors.map(e => ['line ' + e.line, '', 'error', e.error]),
+    ...r.keys.map(k => [String(k.line), k.name, k.action, k.reason || (k.checked ? 'tested before saving' : '')])];
+  const table = document.createElement('table');
+  table.replaceChildren(...rows.map(([line, name, action, note]) => { const tr = document.createElement('tr');
+    tr.append(td(line, 'muted'), td(name), td(action, ['error', 'failed', 'overwrite'].includes(action) ? 'warn' : action === 'skip' ? 'muted' : ''), td(note, 'muted')); return tr; }));
+  const parts = [table], n = r.keys.filter(k => k.action === 'create' || k.action === 'overwrite').length;
+  if (r.saved) parts.push(Object.assign(document.createElement('p'), { textContent: 'Saved ' + r.saved.length + ' key(s) to ' + r.scope + '.' }));
+  else if (r.errors.length) parts.push(Object.assign(document.createElement('p'), { className: 'warn', textContent: 'Fix the lines marked error, then preview again.' }));
+  else if (n) { const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Save ' + n + ' key(s) to ' + r.scope; b.onclick = onSave; parts.push(b); }
+  importPlan.replaceChildren(...parts); };
+const importCall = save => api('import', { method: 'POST', body: JSON.stringify({ scope: importEnv.scope.value, text: importEnv.text.value, save }) });
+importEnv.text.oninput = importEnv.scope.oninput = () => importPlan.replaceChildren();
+importEnv.onsubmit = async e => { e.preventDefault();
+  try { showPlan(await importCall(false), async () => {
+    try { const r = await importCall(true); showPlan(r); if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length) importEnv.text.value = ''; load(); }
+    catch (err) { alert(err.message); } }); } catch (err) { alert(err.message); } };
 document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
   const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);
   try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects }) });

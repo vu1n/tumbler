@@ -9,7 +9,9 @@ One store for env vars and API keys, for agent sessions and anywhere else you ru
 - **CLI:** `tumbler run -- <cmd>` fetches what the command needs, injects it into that process only,
   and keeps a short in-memory cache. Nothing is written to disk. Rotating a key in the broker
   reaches every session within the cache TTL (5 minutes by default) or on `tumbler reload`.
-- **Admin page:** `/admin`, behind Cloudflare Access. Values are write-only there.
+- **Admin page:** `/admin`, behind Cloudflare Access. Values are write-only there. To load many
+  static keys at once, paste a `.env` file: it previews which keys it creates, overwrites or skips
+  (minted keys are never overwritten) before anything is saved.
 
 The design and the reasons behind it: why not setup scripts, why not an encrypted `.env`, how network
 secrets fit. See [docs/design.md](docs/design.md).

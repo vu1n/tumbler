@@ -1,7 +1,8 @@
 // app.ts — routes, apart from index.ts so tests can drive them without Worker bindings.
-import { Catalog, GLOBAL, Refused } from "./catalog.ts";
+import { Catalog, checkScope, GLOBAL, isKeyName, Refused } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
+import { parseDotenv } from "./dotenv.ts";
 import type { GrantRow, Grants } from "./grants.ts";
 import { checkKey, type Verifiers } from "./verify.ts";
 
@@ -11,7 +12,7 @@ export interface Deps {
 }
 
 const verifiers = ({ grants, fetcher }: Deps): Verifiers => ({ providers: grants?.providers ?? {}, fetcher });
-const MAX_CHECKS = 20;
+const MAX_CHECKS = 20, MAX_IMPORT = 100;
 
 // What a caller learns about its grant: never the child credential or its provider id.
 const grantView = (g: GrantRow) => ({ id: g.id, name: g.name, state: g.state, scopes: g.scopes, requested: g.requested, expires_at: g.expires_at });
@@ -127,6 +128,47 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
   if (!path.startsWith("/admin/api/")) return json({ error: "not found" }, 404);
   const body = async () => (m === "GET" || m === "DELETE" ? {} : await request.json().catch(() => ({}))) as Record<string, any>;
 
+  // Paste a .env: {"scope", "text", "save"}. Without save it is a preview of what each line would do.
+  // Every line becomes a static key, checked like a single save; names and line numbers out, never values.
+  if (parts[0] === "import" && parts.length === 1 && m === "POST") {
+    const b = await body(), scope = String(b.scope ?? GLOBAL), save = b.save === true;
+    checkScope(scope);
+    const { entries, errors } = parseDotenv(String(b.text ?? ""));
+    for (const e of entries) if (!isKeyName(e.name)) errors.push({ line: e.line, error: `invalid key name ${e.name}; names are UPPER_SNAKE_CASE` });
+    const valid = entries.filter((e) => isKeyName(e.name));
+    if (valid.length > MAX_IMPORT) return json({ error: `at most ${MAX_IMPORT} keys per paste; nothing was saved` }, 400);
+    errors.sort((x, y) => x.line - y.line);
+    const last = new Map(valid.map((e) => [e.name, e.line]));
+    // What each line would do; `value` and `config` stay here, `view` is what goes back.
+    type Step = { name: string; line: number; action: string; reason?: string; checked?: boolean };
+    const plan = await Promise.all(valid.map(async (e): Promise<{ step: Step; value?: string; config?: string }> => {
+      const prev = await catalog.keyRow(scope, e.name), step = { name: e.name, line: e.line };
+      if (last.get(e.name) !== e.line) return { step: { ...step, action: "skip", reason: `set again on line ${last.get(e.name)}` } };
+      if (!e.value) return { step: { ...step, action: "skip", reason: "empty value" } };
+      // Why: a mint key's value is a parent credential; overwriting it as static would hand it out.
+      if (prev && prev.kind !== "static") return { step: { ...step, action: "skip", reason: `${prev.kind} key; change it with the form above` } };
+      return { step: { ...step, action: prev ? "overwrite" : "create", checked: !!JSON.parse(prev?.config || "{}").check }, value: e.value, config: prev?.config };
+    }));
+    const view = plan.map((p) => p.step);
+    if (!save) return json({ scope, keys: view, errors });
+    if (errors.length) return json({ error: "fix the lines the preview flags first; nothing was saved", errors }, 400);
+    const saved: string[] = [];
+    for (const [i, { value, config }] of plan.entries()) {
+      if (value === undefined) continue;
+      const cfg = JSON.parse(config || "{}");
+      // A key with a check keeps it, and a value that fails it is not saved, as in a single save.
+      const check = await checkKey("static", cfg, value, verifiers(deps));
+      if (check.status === "invalid" || check.status === "error") {
+        view[i] = { ...view[i], action: "failed", reason: `failed its check, ${check.detail}; the old value stays` };
+        continue;
+      }
+      await catalog.put(scope, view[i].name, value, { kind: "static", config: cfg, checked: check.status === "ok" });
+      view[i] = { ...view[i], action: view[i].action === "create" ? "created" : "overwritten" };
+      saved.push(view[i].name);
+    }
+    if (saved.length) await catalog.audit(who, "put", scope === GLOBAL ? null : scope, saved);
+    return json({ scope, keys: view, errors, saved });
+  }
   if (parts[0] === "keys") {
     if (m === "GET" && parts.length === 1) return json({ keys: await catalog.list() });
     if (parts.length === 3) {
