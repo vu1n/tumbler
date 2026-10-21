@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { handle } from "../src/app.ts";
 import { Catalog } from "../src/catalog.ts";
-import { cloudflare } from "../src/cloudflare.ts";
+import { cloudflare, DEFAULT_SCOPES } from "../src/cloudflare.ts";
 import { masterKey } from "../src/crypto.ts";
 import { Grants } from "../src/grants.ts";
 import { PRESETS, runCheck, staticCheck } from "../src/verify.ts";
@@ -12,6 +12,9 @@ import { memoryD1 } from "./d1.ts";
 
 const ACCT = "a".repeat(32), READ = "1".repeat(32);
 const CF = { account_id: ACCT, start: ["workers:read"], scopes: { "workers:read": [READ] } };
+// The account's permission groups, as Cloudflare lists them: every default name, plus a zone group.
+const GROUPS = [...Object.values(DEFAULT_SCOPES).flat().map((name, i) => ({ id: i.toString(16).padStart(32, "0"), name, scopes: ["com.cloudflare.api.account"] })),
+  { id: "f".repeat(32), name: "DNS Read", scopes: ["com.cloudflare.api.account.zone"] }];
 
 // A fake internet: `good-*` values pass, `bad-*` get a 401, `down-*` can't be reached.
 function fakeNet() {
@@ -23,6 +26,9 @@ function fakeNet() {
     if (/down-/.test(value)) throw new TypeError(`connect failed with ${value}`);
     if (/redir-/.test(value)) { assert.equal(init.redirect, "manual"); return new Response("", { status: 302, headers: { location: "http://evil.example/" } }); }
     const ok = /good-/.test(value);
+    if (url.includes("/tokens/permission_groups")) {
+      return new Response(JSON.stringify(ok ? { success: true, result: GROUPS } : { success: false, errors: [{ code: 9109 }] }), { status: ok ? 200 : 403 });
+    }
     if (url.includes("/tokens/verify")) {
       return new Response(JSON.stringify(ok ? { success: true, result: { status: /disabled/.test(value) ? "disabled" : "active" } } : { success: false, errors: [{ code: 1000 }] }), { status: ok ? 200 : 401 });
     }
@@ -109,6 +115,39 @@ test("a mint parent is verified with Cloudflare before saving; a rejected or dis
     assert.ok(!(await r.text()).includes(value));
   }
   assert.equal((await s.catalog.keyRow("global", "CF_TOKEN"))!.rev, rev); // the old parent stays
+});
+
+test("pasting only a Cloudflare parent fills the account from CLOUDFLARE_ACCOUNT_ID and the default scopes by id", async () => {
+  const s = await setup();
+  const none = await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare" });
+  assert.equal(none.status, 400);
+  assert.match((await none.json()).error, /save CLOUDFLARE_ACCOUNT_ID as a static key/);
+  assert.equal(await s.catalog.keyRow("global", "CLOUDFLARE_API_TOKEN"), null);
+
+  await s.save("CLOUDFLARE_ACCOUNT_ID", { value: ACCT });
+  assert.equal((await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare" })).status, 200);
+  const cfg = JSON.parse((await s.catalog.keyRow("global", "CLOUDFLARE_API_TOKEN"))!.config);
+  const id = (name: string) => GROUPS.find((g) => g.name === name)!.id;
+  assert.equal(cfg.account_id, ACCT);
+  assert.deepEqual(cfg.start, ["workers:read"]);
+  for (const [scope, names] of Object.entries(DEFAULT_SCOPES)) assert.deepEqual(cfg.scopes[scope], names.map(id));
+  const lookup = s.net.seen.find((r) => r.url.endsWith("/tokens/permission_groups"))!;
+  assert.deepEqual(lookup, { url: `https://api.cloudflare.com/client/v4/accounts/${ACCT}/tokens/permission_groups`, headers: { authorization: "Bearer good-parent", "content-type": "application/json" } });
+});
+
+test("permission names Cloudflare doesn't list, or zone ones, are refused; so is a parent it won't list them for", async () => {
+  const s = await setup();
+  const save = (value: string, scopes: Record<string, string[]>) =>
+    s.save("CLOUDFLARE_API_TOKEN", { value, kind: "mint:cloudflare", config: { account_id: ACCT, start: [], scopes } });
+  const bad = await save("good-parent", { "dns:read": ["DNS Read"], "x:write": ["Workers Scripts Write", "Nope Write"] });
+  assert.equal(bad.status, 400);
+  assert.equal((await bad.json()).error, 'Cloudflare has no account permission named "DNS Read", "Nope Write"');
+  const refused = await save("bad-parent", { "workers:read": ["Workers Scripts Read"] });
+  assert.equal(refused.status, 400);
+  const msg = (await refused.json()).error;
+  assert.match(msg, /Cloudflare refused this token \(403\)/);
+  assert.ok(!msg.includes("bad-parent"));
+  assert.equal(await s.catalog.keyRow("global", "CLOUDFLARE_API_TOKEN"), null);
 });
 
 test("a user-owned Cloudflare token is refused as a parent with a message that says so", async () => {

@@ -131,9 +131,16 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         const b = await body();
         const kind = b.kind ? String(b.kind) : undefined, config = b.config && typeof b.config === "object" ? b.config : undefined;
         const prev = await catalog.keyRow(scope, name), effective = kind ?? prev?.kind ?? "static";
-        const cfg = config ?? JSON.parse(prev?.config || "{}"), value = String(b.value ?? "");
+        let cfg = config ?? JSON.parse(prev?.config || "{}");
+        const value = String(b.value ?? "");
         if (effective !== "static") {
           if (!grants) return json({ error: "minting is off" }, 501);
+          // A static key the admin saved, read here and never returned: the scope's, else global.
+          const setting = async (n: string) => {
+            const row = (scope !== GLOBAL ? await catalog.keyRow(scope, n) : null) ?? await catalog.keyRow(GLOBAL, n);
+            return row && row.kind === "static" ? await catalog.value(row) : undefined;
+          };
+          if (value) cfg = await grants.prepare(effective, value, cfg, setting);
           grants.validate(effective, cfg);
         }
         // Test the new value before it replaces the old one: a key that fails saves nothing.
