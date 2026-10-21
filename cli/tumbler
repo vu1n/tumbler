@@ -30,7 +30,7 @@
 // every key the token can read.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { constants, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -263,11 +263,13 @@ function parseFlags(args) {
 // --- commands --------------------------------------------------------------------------------
 
 function realBinary(tool) {
-  // The first `tool` on PATH that isn't one of our shims.
+  // The first `tool` on PATH that isn't one of our shims, or a link to one (setup.sh links them
+  // into ~/.local/bin, which agent shells have on PATH without reading a profile).
+  const shims = existsSync(SHIM_DIR) ? realpathSync(SHIM_DIR) : SHIM_DIR;
   for (const dir of (process.env.PATH ?? "").split(":")) {
     if (!dir || resolve(dir) === SHIM_DIR) continue;
     const p = join(dir, tool);
-    if (existsSync(p)) return p;
+    if (existsSync(p) && dirname(realpathSync(p)) !== shims) return p;
   }
   return null;
 }
