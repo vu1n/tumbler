@@ -3,13 +3,14 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
-  // Create it once with `npx wrangler d1 create tumbler` and put its id here, so migrations (which
-  // run before each deploy) and CI deploys always reach the same database.
+  // No id, so the repo stays account-neutral: `npm run deploy` (scripts/deploy.mjs) finds the database
+  // by name and creates it on the first deploy.
   "d1_databases": [
-    { "binding": "DB", "database_name": "tumbler", "database_id": "<your-d1-database-id>", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "tumbler", "migrations_dir": "migrations" }
   ],
   // The one secret tumbler needs: a 32-byte base64 master key (`openssl rand -base64 32`) in a
-  // Cloudflare Secrets Store. Every value in D1 is sealed under it. Fill in your store id.
+  // Cloudflare Secrets Store. Every value in D1 is sealed under it. Leave the placeholder:
+  // `npm run deploy` fills in the account's one store.
   "secrets_store_secrets": [
     { "binding": "MASTER_KEY", "store_id": "<your-secrets-store-id>", "secret_name": "tumbler-master-key" }
   ],

@@ -16,27 +16,23 @@ secrets fit. See [docs/design.md](docs/design.md).
 
 ## Deploy
 
-One-time setup, from a machine where `wrangler` is logged in:
+One-time setup, from a machine where `wrangler` is logged in. `wrangler.jsonc` holds no account's
+ids: `npm run deploy` finds the D1 database by name (creating it on the first deploy) and uses your
+account's Secrets Store (Cloudflare allows one per account).
 
 ```sh
 cd worker && npm install
-# 1. The D1 database. Put the id it prints into wrangler.jsonc (d1_databases[0].database_id):
-npx wrangler d1 create tumbler
-# 2. A Secrets Store (or use an existing one: `npx wrangler secrets-store store list --remote`) and
-#    the master key, 32 random bytes. Put the store id into wrangler.jsonc (secrets_store_secrets).
-npx wrangler secrets-store store create tumbler --remote          # note the store id
+# 1. The master key, 32 random bytes, in your account's Secrets Store. Find the store id with
+#    `npx wrangler secrets-store store list --remote` (create one with `store create` if the list is empty).
 openssl rand -base64 32    # paste this at the next command's prompt, and keep a copy offline
 npx wrangler secrets-store secret create <store-id> --name tumbler-master-key --scopes workers --remote
-# 3. Migrations, then the Worker:
+# 2. Database, migrations, then the Worker (`npm run deploy -- --dry-run` only prints what it found):
 npm run deploy
-# 4. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
+# 3. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
 #    path /admin*, allow your email), then set the Worker's vars:
 #    ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com  ACCESS_AUD=<the application's AUD tag>
 #    TUMBLER_ADMINS=<your email>
 ```
-
-The two ids in `wrangler.jsonc` are not secrets; commit them. Steps 1 and 2 must come first: the
-migrations need the database to exist.
 
 ### Deploy from GitHub
 
@@ -46,13 +42,14 @@ migrations need the database to exist.
 1. Create a Cloudflare API token (My Profile > API Tokens > Create Token, from the "Edit Cloudflare
    Workers" template) for your account, and add **D1: Edit** and **Secrets Store: Read**. If a deploy
    fails with an authentication error, its log names the permission that's missing.
-2. In the GitHub repo, under Settings > Secrets and variables > Actions, add the secret
-   `CLOUDFLARE_API_TOKEN` (the token) and the variable `CLOUDFLARE_ACCOUNT_ID`.
+2. In the GitHub repo, under Settings > Secrets and variables > Actions, add two secrets:
+   `CLOUDFLARE_API_TOKEN` (the token) and `CLOUDFLARE_ACCOUNT_ID`. Nothing else is configured in
+   GitHub, and nothing account-specific is committed.
 3. Optional: add required reviewers to the `production` environment (Settings > Environments) so
    each deploy waits for an approval.
 
-Until `CLOUDFLARE_ACCOUNT_ID` is set, the deploy job is skipped. A deploy also refuses to run while
-`wrangler.jsonc` lacks the database or store id.
+Until both secrets are set, the deploy job skips with a warning. The first deploy creates the D1
+database; the master key (step 1 above) must exist before it.
 
 The admin API checks the Access JWT itself, so a gap in the Access policy (or a request straight to
 `*.workers.dev`) still can't reach it. Losing the master key loses every value: keep a copy offline.

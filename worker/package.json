@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "npm run db:migrate && wrangler deploy",
+    "deploy": "node scripts/deploy.mjs",
     "db:migrate": "wrangler d1 migrations apply DB --remote",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types test/*.test.ts"
