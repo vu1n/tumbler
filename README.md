@@ -18,18 +18,24 @@ secrets fit. See [docs/design.md](docs/design.md).
 
 ```sh
 cd worker && npm install
-# 1. A Secrets Store and the master key (32 random bytes):
-npx wrangler secrets-store store create tumbler --remote          # note the store id
+# 1. The master key (32 random bytes) in the account's Secrets Store. An account has one store;
+#    `store list` shows its id (create it with `store create` if the list is empty):
+npx wrangler secrets-store store list --remote
 openssl rand -base64 32    # paste this at the next command's prompt, and keep a copy offline
 npx wrangler secrets-store secret create <store-id> --name tumbler-master-key --scopes workers --remote
-#    then put the store id into wrangler.jsonc (secrets_store_secrets).
-# 2. Deploy (creates the D1 database on first run) and apply migrations:
-npx wrangler deploy && npm run db:migrate
+# 2. Deploy. Fills in the store id, creates the D1 database on the first run, applies migrations:
+npm run deploy
 # 3. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
 #    path /admin*, allow your email), then set the Worker's vars:
 #    ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com  ACCESS_AUD=<the application's AUD tag>
 #    TUMBLER_ADMINS=<your email>
 ```
+
+To deploy on every push instead, connect the repo in Workers Builds (Workers & Pages > Create >
+Import a repository) with root directory `worker`, build command `npm ci && npm test && npm run
+typecheck` and deploy command `npm run deploy`. A failing test stops the deploy. Nothing
+account-specific lives in the repo or GitHub: the store id is looked up at deploy time
+(`TUMBLER_STORE_ID` overrides it) and the vars above stay on the Worker across deploys.
 
 The admin API checks the Access JWT itself, so a gap in the Access policy (or a request straight to
 `*.workers.dev`) still can't reach it. Losing the master key loses every value: keep a copy offline.
