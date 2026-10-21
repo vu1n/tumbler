@@ -11,6 +11,7 @@ export class Refused extends Error {
   constructor(status: number, message: string) { super(message); this.status = status; }
 }
 
+export const isKeyName = (name: string) => NAME.test(name);
 export function checkName(name: string) { if (!NAME.test(name)) throw new Refused(400, `invalid key name: ${name}`); }
 export function checkScope(scope: string) {
   if (scope !== GLOBAL && !PROJECT.test(scope)) throw new Refused(400, `invalid scope: ${scope}`);
