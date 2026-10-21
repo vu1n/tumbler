@@ -333,7 +333,8 @@ export class Grants {
       await this.db.prepare("DELETE FROM pending_revokes WHERE child_id = ?").bind(childId).run();
       return true;
     } catch (e) {
-      console.error("tumbler: revoke failed, queued for retry", row.name, (e as Error).message);
+      // The class only, never the message: a provider error can quote the parent it was sent.
+      console.error("tumbler: revoke failed, queued for retry", row.name, e instanceof Error ? e.name : typeof e);
       await this.db.prepare(
         `INSERT INTO pending_revokes (child_id, key_scope, name, key_rev, expires_at, last_at) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (child_id) DO UPDATE SET attempts = attempts + 1, last_at = excluded.last_at`,

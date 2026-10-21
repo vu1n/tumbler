@@ -37,10 +37,14 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     return new Response("not found", { status: 404 });
   } catch (e) {
     if (e instanceof Refused) return json({ error: e.message }, e.status);
-    console.error("tumbler", (e as Error).message); // never the request body: it may carry a value
+    // A fixed event, the route and the error's class: never its message, stack or cause, nor the
+    // request body. A provider or library error can quote what it was sent, and that may be a value.
+    console.error("tumbler: request failed", new URL(request.url).pathname, errorClass(e));
     return json({ error: "internal error" }, 500);
   }
 }
+
+const errorClass = (e: unknown) => e instanceof Error ? e.name : typeof e;
 
 async function agentRoute(request: Request, url: URL, deps: Deps) {
   const { catalog, s1, grants } = deps;
