@@ -43,7 +43,7 @@ The admin API checks the Access JWT itself, so a gap in the Access policy (or a 
    prefix `Bearer`). The session never sees the token: the agent proxy adds it on the way out.
 3. Make the environment's setup script one line: `curl -fsSL https://tumbler.example.com/setup | bash`.
    The broker serves [scripts/setup.sh](scripts/setup.sh) with its own URL filled in. It installs the
-   CLI, shims `aws`, `wrangler` and `tailscale`, sets `TUMBLER_URL` for sessions, and tells agents
+   CLI, installs `wrangler` if it's missing, shims `wrangler` (and `aws` and `tailscale` when installed), sets `TUMBLER_URL` for sessions, and tells agents
    to use `tumbler run`. If anything fails, it skips and the session still starts.
 4. Remove the old secrets from the environment's variables.
 
