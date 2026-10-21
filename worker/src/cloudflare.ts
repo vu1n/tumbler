@@ -27,6 +27,12 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
     }
     return j.result;
   };
+  // Whether `parent` is an active user-owned token, which account routes reject.
+  const userToken = async (parent: string) => {
+    const r = await fetcher(`${API}/user/tokens/verify`, { headers: { authorization: `Bearer ${parent}` }, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) })
+      .catch(() => null);
+    return !!r?.ok && (await r.json().catch(() => ({})) as any).result?.status === "active";
+  };
   return {
     validate(config: MintConfig) {
       if (!ACCOUNT.test(String(config.account_id ?? ""))) throw new Refused(400, "config.account_id must be a 32-hex account id");
@@ -63,6 +69,11 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
           { headers: { authorization: `Bearer ${parent}` }, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) });
         const j = await r.json().catch(() => ({})) as any;
         const o = byStatus(r.status);
+        // Why the second call: a user-owned token (My Profile > API Tokens) is rejected here even
+        // when it works, and "rejected (401)" alone sends the admin looking for the wrong problem.
+        if (r.status === 401 && await userToken(parent)) {
+          return { status: "invalid", detail: "this is a user token; create an account-owned one under Manage Account > Account API Tokens" };
+        }
         if (o.status !== "ok") return o;
         // Never Cloudflare's text in the detail: a fixed phrase only.
         return j.success !== false && j.result?.status === "active" ? o : { status: "invalid", detail: "token is not active" };

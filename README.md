@@ -124,7 +124,7 @@ token, and every caller gets its own short-lived **child** token with only the s
 The parent never leaves the broker.
 
 Set one up in `/admin`:
-1. Create an account-owned Cloudflare token with **Account > Account API Tokens > Edit** (it can
+1. Create an **account-owned** Cloudflare token (Manage Account > Account API Tokens, not My Profile) with **Account API Tokens: Edit** (it can
    create other tokens and nothing else). Save it as the key's value with kind `mint:cloudflare`.
 2. Give it a config. Scope names are yours; each maps to Cloudflare permission group ids
    (`GET /accounts/{id}/tokens/permission_groups`; use ids, since names are cosmetic):

@@ -111,6 +111,19 @@ test("a mint parent is verified with Cloudflare before saving; a rejected or dis
   assert.equal((await s.catalog.keyRow("global", "CF_TOKEN"))!.rev, rev); // the old parent stays
 });
 
+test("a user-owned Cloudflare token is refused as a parent with a message that says so", async () => {
+  const seen: string[] = [];
+  const fetcher = (async (url: string) => {
+    seen.push(url);
+    return url.includes("/user/tokens/verify")
+      ? new Response(JSON.stringify({ success: true, result: { status: "active" } }))
+      : new Response(JSON.stringify({ success: false, errors: [{ code: 1000 }] }), { status: 401 });
+  }) as unknown as typeof fetch;
+  const o = await cloudflare(fetcher).verify!("user-token", CF);
+  assert.deepEqual(o, { status: "invalid", detail: "this is a user token; create an account-owned one under Manage Account > Account API Tokens" });
+  assert.equal(seen.length, 2);
+});
+
 test("/v1/check reports each key's check on its current value, never the value", async () => {
   const s = await setup();
   await s.save("GOOD", { value: "good-1", config: { check: "github" } });
