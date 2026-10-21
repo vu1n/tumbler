@@ -16,7 +16,11 @@ curl -fsSL "$TUMBLER_URL/cli" -o /usr/local/bin/tumbler || skip "could not downl
 chmod +x /usr/local/bin/tumbler
 
 # Tools that always run with keys from tumbler. Add or remove to taste.
-tumbler shim aws wrangler tailscale || echo "tumbler: shims not installed" >&2
+TOOLS="aws wrangler tailscale"
+tumbler shim $TOOLS || echo "tumbler: shims not installed" >&2
+# Agent shells don't read a profile, so link the shims into ~/.local/bin, which is on their PATH.
+mkdir -p "$HOME/.local/bin"
+for t in $TOOLS; do ln -sf "$HOME/.local/share/tumbler/bin/$t" "$HOME/.local/bin/$t"; done
 cat > /etc/profile.d/tumbler.sh <<SH
 export TUMBLER_URL="\${TUMBLER_URL:-$TUMBLER_URL}"
 export PATH="\$HOME/.local/share/tumbler/bin:\$PATH"
