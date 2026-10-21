@@ -3,7 +3,7 @@ import { Catalog, checkScope, GLOBAL, isKeyName, Refused } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
-import { MINTED_MAX_AGE_S, type GrantRow, type Grants } from "./grants.ts";
+import { errorClass, MINTED_MAX_AGE_S, type GrantRow, type Grants } from "./grants.ts";
 import { checkKey, type Verifiers } from "./verify.ts";
 
 export interface Deps {
@@ -43,8 +43,6 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     return json({ error: "internal error" }, 500);
   }
 }
-
-const errorClass = (e: unknown) => e instanceof Error ? e.name : typeof e;
 
 async function agentRoute(request: Request, url: URL, deps: Deps) {
   const { catalog, s1, grants } = deps;

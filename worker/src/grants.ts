@@ -9,6 +9,11 @@ import { open, seal } from "./crypto.ts";
 import { autoApproved, type GrantEvent, type GrantState, isLive, transition } from "./machine.ts";
 import type { Outcome } from "./verify.ts";
 
+// What a log line may say about an error: a built-in class from this fixed list, or "other". Never
+// its message, stack or cause, and not a free-form `name` either, since any thrower can set that.
+const KNOWN_ERRORS = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "ReferenceError", "AbortError", "TimeoutError"]);
+export const errorClass = (e: unknown) => e instanceof Error && KNOWN_ERRORS.has(e.name) ? e.name : "other";
+
 export { autoApproved };
 
 export interface Minted { id: string; value: string }
@@ -334,7 +339,7 @@ export class Grants {
       return true;
     } catch (e) {
       // The class only, never the message: a provider error can quote the parent it was sent.
-      console.error("tumbler: revoke failed, queued for retry", row.name, e instanceof Error ? e.name : typeof e);
+      console.error("tumbler: revoke failed, queued for retry", row.name, errorClass(e));
       await this.db.prepare(
         `INSERT INTO pending_revokes (child_id, key_scope, name, key_rev, expires_at, last_at) VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT (child_id) DO UPDATE SET attempts = attempts + 1, last_at = excluded.last_at`,

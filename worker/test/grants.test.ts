@@ -469,9 +469,13 @@ test("an unexpected mint or revoke error never reaches the logs or the response 
   try {
     const mint = s.fake.provider.mint;
     s.fake.provider.mint = async () => { throw new Error(`mint refused for ${SENTINEL}`); };
-    const r = await s.env();
+    let r = await s.env();
     assert.equal(r.status, 500);
     assert.doesNotMatch(await r.text(), new RegExp(SENTINEL));
+    // `name` is writable, so a thrower can put anything there too: only a known class name is logged.
+    s.fake.provider.mint = async () => { throw Object.assign(new Error("x"), { name: `ProviderError ${SENTINEL}` }); };
+    r = await s.env();
+    assert.equal(r.status, 500);
     s.fake.provider.mint = mint;
     await s.env();
     const revoke = s.fake.provider.revoke;
@@ -483,9 +487,9 @@ test("an unexpected mint or revoke error never reaches the logs or the response 
     await s.grants.sweep();
     assert.equal(await s.grants.pendingRevokes(), 0);
   } finally { console.error = error; }
-  assert.ok(logged.length >= 2);
+  assert.ok(logged.length >= 3);
   assert.doesNotMatch(logged.map(String).join(" "), new RegExp(SENTINEL));
-  assert.ok(logged.includes("Error") && logged.includes("TypeError")); // the class is kept for debugging
+  assert.ok(["Error", "other", "TypeError"].every((c) => logged.includes(c))); // a known class is kept for debugging
 });
 
 test("a project key overriding a global one starts a new grant instead of reusing the old key's child", async () => {
