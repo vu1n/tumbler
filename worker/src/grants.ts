@@ -30,6 +30,9 @@ export const DEFAULT_TTL_MIN = 30, MIN_TTL_MIN = 15, MAX_TTL_MIN = 24 * 60;
 // default) can never hold one past its expiry.
 // Approval therefore lasts ttl_minutes minus this margin.
 export const REUSE_MARGIN_MS = 6 * 60 * 1000;
+// How long a client may cache an env holding a minted child: a minute inside the reuse margin, so
+// even a long TUMBLER_TTL can't hand out a child past its expiry.
+export const MINTED_MAX_AGE_S = REUSE_MARGIN_MS / 1000 - 60;
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // an unanswered request lapses to denied
 const ABANDONED_MS = 60 * 1000; // a read claim still unminted after this was left by a dead request
 
@@ -138,6 +141,15 @@ export class Grants {
     for (const r of results) await this.close(parse(r), "revoked", who);
   }
 
+  // Live grants whose caller token is revoked: closeCaller after the revoke was interrupted.
+  async closeRevokedCallers() {
+    const { results } = await this.db.prepare(
+      `SELECT g.* FROM grants g JOIN tokens t ON t.name = g.caller WHERE g.${LIVE} AND t.revoked_at IS NOT NULL`,
+    ).all<any>();
+    for (const r of results) await this.close(parse(r), "revoked", "system");
+    return results.length;
+  }
+
   // After a mint key is rotated or deleted: end every live grant on it from a revision that is no
   // longer current (any older one, not just the one this write replaced, so concurrent saves or a
   // retry after a failed close still catch them). close() revokes with the minting revision.
@@ -156,6 +168,7 @@ export class Grants {
       .bind(this.now().toISOString()).all<any>();
     for (const r of results) await this.close(parse(r), "expired", "system");
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
+    await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
     await this.retryRevokes();
     // Nobody answered: a pending grant lapses to denied, and a waiting step-up is dropped.
     const stale = new Date(this.now().getTime() - PENDING_TTL_MS).toISOString();
@@ -384,13 +397,20 @@ export class Grants {
       ? [`id = ? AND ${LIVE}`, [g.id]]
       : [`id = ? AND state = ? AND requested IS ? AND child_id IS ?${extra.guard ? ` AND ${extra.guard}` : ""}`,
         [g.id, g.state, asJson(g.requested), g.child_id, ...(extra.binds ?? [])]];
-    const [, r] = await this.db.batch([
+    // Ending a live grant records its child's delete in the same write, so a crash before the
+    // provider call still leaves it for sweep() to retry; revokeChild() clears the row on success.
+    const intent = extra.live ? [this.db.prepare(
+      `INSERT INTO pending_revokes (child_id, key_scope, name, key_rev, expires_at, attempts, last_at)
+        SELECT child_id, key_scope, name, key_rev, expires_at, 0, ? FROM grants WHERE ${where} AND child_id IS NOT NULL
+        ON CONFLICT (child_id) DO NOTHING`).bind(t, ...binds)] : [];
+    const r = (await this.db.batch([
+      ...intent,
       this.db.prepare(`INSERT INTO grant_events (grant_id, at, type, actor, from_state, to_state, scopes)
         SELECT ?, ?, ?, ?, (SELECT state FROM grants WHERE id = ?), ?, ? WHERE EXISTS (SELECT 1 FROM grants WHERE ${where})`)
         .bind(g.id, t, e.type, e.who, g.id, next.state, eventScopes(e), ...binds),
       this.db.prepare(`UPDATE grants SET ${cols.map((c) => `${c} = ?`).join(", ")} WHERE ${where} RETURNING child_id, expires_at`)
         .bind(...cols.map((c) => set[c]), ...binds),
-    ]);
+    ])).at(-1)!;
     const row = (r.results as { child_id: string | null; expires_at: string | null }[] | undefined)?.[0];
     return row ? { ...g, ...next, child_id: row.child_id, expires_at: row.expires_at, updated_at: t } : null;
   }

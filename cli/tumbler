@@ -22,7 +22,7 @@
 //
 // Config (environment): TUMBLER_URL (required), TUMBLER_TOKEN (optional: leave unset when the
 // environment's network secret adds the Authorization header), TUMBLER_TTL seconds (default 300,
-// 0 disables the cache), TUMBLER_PROJECT (default project), TUMBLER_WATCH seconds between --watch
+// 0 disables the cache; an env with a minted key is cached at most 5 minutes), TUMBLER_PROJECT (default project), TUMBLER_WATCH seconds between --watch
 // polls (default 30), TUMBLER_DIAGNOSE=off to skip the failure report. A `.tumbler` file in the working
 // directory or any parent lists the key names a project wants, one per line, plus an optional
 // `project = <name>` line. With no `.tumbler`, `run` writes one with `tumbler auto` first and passes
@@ -107,10 +107,11 @@ function daemon() {
         // gets values fetched for someone else.
         const path = envPath(req.project, req.keys), slot = createHash("sha256").update(`${req.url}\0${req.token}\0${path}`).digest("hex");
         const hit = cache.get(slot);
-        // Why: the caller's TTL, not the one the helper started with, so lowering it takes effect.
-        if (hit && !req.fresh && Date.now() - hit.at < req.ttl) return reply({ env: hit.env });
-        const { env } = await brokerGet(path, { url: req.url, token: req.token });
-        cache.set(slot, { at: Date.now(), env });
+        // Why: the caller's TTL, not the one the helper started with, so lowering it takes effect. An
+        // env with a minted child also carries the broker's max_age, so it never outlives the child.
+        if (hit && !req.fresh && Date.now() - hit.at < Math.min(req.ttl, hit.maxAge)) return reply({ env: hit.env });
+        const { env, max_age } = await brokerGet(path, { url: req.url, token: req.token });
+        cache.set(slot, { at: Date.now(), env, maxAge: max_age === undefined ? Infinity : Number(max_age) * 1000 });
         reply({ env });
       } catch (e) { reply({ error: e.message }); }
     });
@@ -416,7 +417,9 @@ async function watching(state, path, known, load, cmd, argv) {
     }
     // Why again: a save between the poll and the fetch may have put an unchecked value behind the
     // checked revision. Only a key still at that revision is pushed; the next poll sees the rest.
-    try { const after = (await brokerGet(path)).keys; push = push.filter((n) => after[n]?.rev === now[n].rev); } catch { continue; }
+    // If that check fails, the rotation stays pending: undo known so the next poll fetches it again.
+    try { const after = (await brokerGet(path)).keys; push = push.filter((n) => after[n]?.rev === now[n].rev); }
+    catch { for (const n of push) known[n] = seen[n]; continue; }
     const prev = state.env, next = { ...prev };
     for (const n of push) if (n in fresh) next[n] = fresh[n];
     if (!push.length || state.interrupted) continue;

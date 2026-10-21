@@ -58,9 +58,13 @@ export class Catalog {
     return token;
   }
 
-  async revokeToken(name: string) {
+  // True when this call revoked it; false when it was already revoked, so a retry still reaches the
+  // grant cleanup that an interrupted first attempt left undone.
+  async revokeToken(name: string): Promise<boolean> {
     const r = await this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL").bind(now(), name).run();
-    if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
+    if (r.meta.changes) return true;
+    if (await this.db.prepare("SELECT 1 FROM tokens WHERE name = ?").bind(name).first()) return false;
+    throw new Refused(404, `no token ${name}`);
   }
 
   async tokens(): Promise<TokenRow[]> {
