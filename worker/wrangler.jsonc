@@ -22,6 +22,7 @@
   "ai": { "binding": "AI" },
   // Expires minted grants and deletes their children at the provider (see src/grants.ts sweep).
   "triggers": { "crons": ["*/5 * * * *"] },
-  // Serves cli/tumbler at /cli, so setup scripts install the CLI straight from the broker.
-  "rules": [{ "type": "Text", "globs": ["**/cli/tumbler"], "fallthrough": false }]
+  // Serves cli/tumbler at /cli and scripts/setup.sh at /setup, so an environment installs the CLI
+  // straight from the broker.
+  "rules": [{ "type": "Text", "globs": ["**/cli/tumbler", "**/scripts/setup.sh"], "fallthrough": false }]
 }

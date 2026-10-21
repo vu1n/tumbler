@@ -6,7 +6,7 @@ import type { GrantRow, Grants } from "./grants.ts";
 import { checkKey, type Verifiers } from "./verify.ts";
 
 export interface Deps {
-  catalog: Catalog; admin: (request: Request) => Promise<string | null>; cli?: string; s1?: S1Client | null; grants?: Grants;
+  catalog: Catalog; admin: (request: Request) => Promise<string | null>; cli?: string; setup?: string; s1?: S1Client | null; grants?: Grants;
   fetcher?: typeof fetch; // what static key checks call; global fetch unless a test swaps it
 }
 
@@ -27,6 +27,10 @@ export async function handle(request: Request, deps: Deps): Promise<Response> {
     // The CLI itself is public (it holds no secrets), so a setup script can fetch it before the
     // agent proxy is up: curl -fsSL "$TUMBLER_URL/cli" -o /usr/local/bin/tumbler
     if (path === "/cli" && deps.cli) return new Response(deps.cli, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    // The setup script, with this broker's own URL as the default, so an environment's whole setup
+    // script is one line: curl -fsSL https://<broker>/setup | bash
+    if (path === "/setup" && deps.setup) return new Response(deps.setup.replace(/^#!\/bin\/bash\n/, `#!/bin/bash\nTUMBLER_URL="\${TUMBLER_URL:-${url.origin}}"\n`),
+      { headers: { "content-type": "text/plain; charset=utf-8" } });
     if (path.startsWith("/v1/")) return await agentRoute(request, url, deps);
     if (path === "/admin" || path.startsWith("/admin/")) return await adminRoute(request, url, deps);
     return new Response("not found", { status: 404 });

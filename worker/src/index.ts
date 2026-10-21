@@ -8,6 +8,7 @@ import { cloudflare } from "./cloudflare.ts";
 import { Grants } from "./grants.ts";
 // Bundled as text by the "rules" entry in wrangler.jsonc.
 import CLI from "../../cli/tumbler";
+import SETUP from "../../scripts/setup.sh";
 
 export interface Env {
   DB: D1Database;
@@ -38,6 +39,7 @@ export default {
       catalog,
       grants,
       cli: CLI,
+      setup: SETUP,
       s1: s1Client(env.AI, env.TUMBLER_AUTO_MODEL || "clef"),
       admin: (r) => accessAdmin(r, { teamDomain: env.ACCESS_TEAM_DOMAIN, aud: env.ACCESS_AUD, admins }),
     });
