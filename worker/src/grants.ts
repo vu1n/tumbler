@@ -146,12 +146,15 @@ export class Grants {
     for (const r of results) await this.close(parse(r), "revoked", who);
   }
 
-  // Live grants whose caller token is revoked: closeCaller after the revoke was interrupted.
+  // Live grants whose caller token is revoked (closeCaller after the revoke was interrupted) or has
+  // expired. Expiry has no request to hang the cleanup on, so the sweep is where its grants end; it
+  // re-reads every time, so a cleanup cut short is finished by the next one.
   async closeRevokedCallers() {
     const { results } = await this.db.prepare(
-      `SELECT g.* FROM grants g JOIN tokens t ON t.name = g.caller WHERE g.${LIVE} AND t.revoked_at IS NOT NULL`,
-    ).all<any>();
-    for (const r of results) await this.close(parse(r), "revoked", "system");
+      `SELECT g.*, t.revoked_at IS NOT NULL AS by_revoke FROM grants g JOIN tokens t ON t.name = g.caller
+         WHERE g.${LIVE} AND (t.revoked_at IS NOT NULL OR t.expires_at <= ?)`,
+    ).bind(this.now().toISOString()).all<any>();
+    for (const { by_revoke, ...r } of results) await this.close(parse(r), "revoked", by_revoke ? "system" : "token-expiry");
     return results.length;
   }
 

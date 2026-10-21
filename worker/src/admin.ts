@@ -54,10 +54,11 @@ textarea.env{display:block;min-height:120px}
 
 <h2>Tokens</h2>
 <div id="once"></div>
-<div class="wrap"><table><thead><tr><th>Name</th><th>Pinned to</th><th>Created</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Name</th><th>Pinned to</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
 <form id="newToken" method="post">
   <input name="name" placeholder="token name" required>
   <input name="projects" placeholder="projects, comma-separated (empty = global only)">
+  <input name="hours" type="number" min="1" step="1" placeholder="expires in hours (empty = never)" title="The token stops working then; grants it holds are ended by the next sweep.">
   <button>Create</button>
 </form>
 
@@ -87,7 +88,9 @@ async function load() {
     if (live) b('Revoke', async () => { if (confirm('Revoke ' + g.name + ' for ' + g.caller + '? Its token stops working now, and its next request waits for your approval for a day.')) act('', g.id, 'DELETE')(); });
     return tr; }));
   document.getElementById('tokens').replaceChildren(...tokens.map(t => { const tr = document.createElement('tr');
+    const expired = t.expires_at && Date.parse(t.expires_at) <= Date.now();
     tr.append(td(t.name), td(t.projects ? t.projects.join(', ') : 'global only'), td(day(t.created_at)),
+      td(t.expires_at ? (expired ? 'expired ' : '') + t.expires_at.slice(0, 16).replace('T', ' ') + ' UTC' : 'never', expired ? 'muted' : ''),
       t.revoked_at ? td('revoked ' + day(t.revoked_at), 'muted') : btn('Revoke', async () => { if (confirm('Revoke ' + t.name + '?')) { await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }); load(); } }));
     return tr; }));
   document.getElementById('audit').replaceChildren(...audit.map(a => { const tr = document.createElement('tr');
@@ -126,7 +129,8 @@ importEnv.onsubmit = async e => { e.preventDefault();
     catch (err) { alert(err.message); } }); } catch (err) { alert(err.message); } };
 document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
   const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);
-  try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects }) });
+  const hours = Number(f.get('hours')), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
+  try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects, expires_at }) });
     const once = document.getElementById('once'); once.style.display = 'block';
     const copy = (label, text) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
       b.onclick = () => navigator.clipboard.writeText(text).then(() => { b.textContent = 'Copied'; setTimeout(() => b.textContent = label, 1500); }, () => alert('Copy failed; select the token and copy it by hand.')); return b; };
