@@ -1,5 +1,8 @@
 // admin.ts — the admin page. Values are write-only here: the page can set or rotate one, never read it.
 // Grants show state and scopes only, never a minted child.
+// ADMIN_HTML is a template literal: a backslash in the script must be doubled (\\n, \\'), or the
+// served script stops parsing. test/admin.test.ts parses it. The forms are method="post" so that if
+// the script ever fails, a value is never put in a URL.
 export const ADMIN_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tumbler</title>
@@ -23,7 +26,7 @@ code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:au
 
 <h2>Keys</h2>
 <div class="wrap"><table><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Checked</th><th>Description</th><th>Rotated</th><th>Expires</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
-<form id="putKey">
+<form id="putKey" method="post">
   <input name="name" placeholder="NAME" required pattern="[A-Z_][A-Z0-9_]*">
   <input name="scope" placeholder="global or project" value="global" required>
   <select name="kind" title="static: the value is handed out. mint: the value is a parent token that mints short-lived children.">
@@ -44,7 +47,7 @@ code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:au
 <h2>Tokens</h2>
 <div id="once"></div>
 <div class="wrap"><table><thead><tr><th>Name</th><th>Pinned to</th><th>Created</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
-<form id="newToken">
+<form id="newToken" method="post">
   <input name="name" placeholder="token name" required>
   <input name="projects" placeholder="projects, comma-separated (empty = global only)">
   <button>Create</button>
@@ -92,7 +95,7 @@ putKey.onsubmit = async e => { e.preventDefault(); const f = new FormData(e.targ
     body: JSON.stringify({ value: f.get('value'), kind, config, skip_check, description: f.get('description'), expires_at: f.get('expires_at') || null }) }); };
   try { await put(false); e.target.reset(); load(); } catch (err) {
     // The check couldn't run (the service is down): offer to save unchecked, e.g. to replace a leaked key.
-    if (!err.canSkip || !confirm(err.message + '\n\nSave it unchecked anyway? Running commands with --watch won\'t get it pushed.')) return alert(err.message);
+    if (!err.canSkip || !confirm(err.message + '\\n\\nSave it unchecked anyway? Running commands with --watch won\\'t get it pushed.')) return alert(err.message);
     try { await put(true); e.target.reset(); load(); } catch (err2) { alert(err2.message); } } };
 document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
   const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);
