@@ -49,7 +49,9 @@ const die = (msg, code = 1) => { process.stderr.write(`tumbler: ${msg}\n`); proc
 
 // Why curl: it honours HTTPS_PROXY and the proxy's CA bundle everywhere, which Node's fetch does
 // not by default, and the agent proxy is what attaches the network secret.
-const callerCfg = () => ({ url: process.env.TUMBLER_URL, token: process.env.TUMBLER_TOKEN || "" });
+// A bare host (TUMBLER_URL=tumbler.example.com) means https: plain http would miss the proxy's auth header.
+const withScheme = u => u && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u) ? "https://" + u : u;
+const callerCfg = () => ({ url: withScheme(process.env.TUMBLER_URL), token: process.env.TUMBLER_TOKEN || "" });
 
 function brokerGet(path, cfg = callerCfg()) { return brokerCall("GET", path, null, cfg); }
 

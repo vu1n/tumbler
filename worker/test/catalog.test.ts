@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { handle } from "../src/app.ts";
@@ -116,6 +117,15 @@ test("admin creates a pinned token that works immediately", async () => {
   assert.match(r.token, /^tmb_/);
   assert.equal((await (await get("/v1/env", r.token)).json()).env.OPENROUTER_API_KEY, "kypp-or");
   assert.equal((await admin(deps, "tokens", { method: "POST", as: "vu@example.com", body: JSON.stringify({ name: "x", projects: ["global"] }) })).status, 400);
+});
+
+test("the setup script is served with this broker's URL as its default", async () => {
+  const { catalog } = await setup();
+  const script = readFileSync(new URL("../../scripts/setup.sh", import.meta.url), "utf8");
+  const r = await handle(new Request("https://t.example/setup"), { catalog, admin: async () => null, setup: script });
+  const lines = (await r.text()).split("\n");
+  assert.equal(lines[0], "#!/bin/bash");
+  assert.equal(lines[1], 'TUMBLER_URL="${TUMBLER_URL:-https://t.example}"');
 });
 
 test("the CLI is served without a token, and nothing else is", async () => {

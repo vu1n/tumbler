@@ -39,11 +39,12 @@ The admin API checks the Access JWT itself, so a gap in the Access policy (or a 
 
 1. In `/admin`, create a token pinned to the project (or with no pin, for global keys only). It's
    shown once.
-2. On the environment: add `TUMBLER_URL=https://tumbler.<you>.workers.dev` as an environment variable,
-   and the token as a **network secret** for that host (`Authorization`, prefix `Bearer`). The
-   session never sees the token: the agent proxy adds it on the way out.
-3. Paste [scripts/setup.sh](scripts/setup.sh) into the environment's setup script. It installs the
-   CLI from the broker, shims `aws`, `wrangler` and `tailscale`, and tells agents to use `tumbler run`.
+2. On the environment, add the token as a **network secret** for the broker's host (`Authorization`,
+   prefix `Bearer`). The session never sees the token: the agent proxy adds it on the way out.
+3. Make the environment's setup script one line: `curl -fsSL https://tumbler.example.com/setup | bash`.
+   The broker serves [scripts/setup.sh](scripts/setup.sh) with its own URL filled in. It installs the
+   CLI, shims `aws`, `wrangler` and `tailscale`, sets `TUMBLER_URL` for sessions, and tells agents
+   to use `tumbler run`. If anything fails, it skips and the session still starts.
 4. Remove the old secrets from the environment's variables.
 
 A different project gets its own environment with its own pinned token.
