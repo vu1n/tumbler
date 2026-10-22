@@ -221,7 +221,9 @@ export class Grants {
   }
 
   async approvals(): Promise<Approval[]> {
-    const { results } = await this.db.prepare("SELECT * FROM approvals WHERE ended_at IS NULL AND until > ? ORDER BY until DESC LIMIT 200")
+    // Only those on a key's current revision: a rotated or deleted key's approvals can't mint.
+    const { results } = await this.db.prepare(`SELECT * FROM approvals a WHERE ended_at IS NULL AND until > ?
+      AND EXISTS (SELECT 1 FROM keys k WHERE k.scope = a.key_scope AND k.name = a.name AND k.rev = a.key_rev) ORDER BY until DESC LIMIT 200`)
       .bind(this.now().toISOString()).all<any>();
     return results.map((r) => ({ id: r.id, caller: r.caller, key_scope: r.key_scope, name: r.name, scopes: JSON.parse(r.scopes),
       approved_by: r.approved_by, grant_id: r.grant_id, created_at: r.created_at, until: r.until }));

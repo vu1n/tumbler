@@ -767,6 +767,7 @@ test("revoking a grant, revoking the token, ending it in /admin, or rotating the
     const g = await stepUp(s);
     await approve(s, g, 60);
     await end(s, g);
+    assert.deepEqual((await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json()).approvals, [], name);
     s.tick(30); await s.grants.sweep();
     await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
     await s.env();
