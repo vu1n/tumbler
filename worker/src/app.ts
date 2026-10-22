@@ -228,7 +228,8 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     // The moved mint keys' children and every grant read as `from` stop now. A rerun after a crash
     // repeats both; the sweep's closeStale() also catches moved keys a crash left behind.
     for (const k of moved) if (k.kind !== "static") await grants?.closeStale(from, k.name);
-    await grants?.closeProject(from, who);
+    // "system": a migration must not block the next grant the way an admin's revoke does (blocked()).
+    await grants?.closeProject(from, "system");
     await catalog.audit(who, "scope-move", to, [from, ...moved.map((k) => k.name)]);
     return json({ from, to, moved: moved.map((k) => k.name), repinned: repinned.map((t) => t.name) });
   }

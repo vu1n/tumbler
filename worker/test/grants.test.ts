@@ -719,4 +719,6 @@ test("a move ends grants read as the old scope on keys that didn't move, even wh
   const r = await s.call("POST", "/admin/api/scopes/move", undefined, { from: "dev", to: "dev/staging" }, "vu@example.com");
   assert.deepEqual((await r.json()).repinned, ["other"]); // "dev" was repinned by the first attempt
   assert.deepEqual(s.fake.revoked, ["id-1"]);
+  // A migration isn't a revoke: the moved token's next read mints at once instead of waiting.
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
 });
