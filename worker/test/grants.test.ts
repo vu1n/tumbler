@@ -722,3 +722,109 @@ test("a move ends grants read as the old scope on keys that didn't move, even wh
   // A migration isn't a revoke: the moved token's next read mints at once instead of waiting.
   assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
 });
+
+// Standing approvals: approve once for a while, and the same caller gets the scopes again unasked.
+const approve = (s: Awaited<ReturnType<typeof setup>>, g: any, for_minutes?: number) =>
+  s.call("POST", `/admin/api/grants/${g.id}/approve`, undefined, { requested: g.requested, for_minutes }, "vu@example.com");
+const stepUp = async (s: Awaited<ReturnType<typeof setup>>, token = s.dev, path = "/v1/step-up") =>
+  (await (await s.call("POST", path, token, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).json()).grants?.[0];
+
+test("standing approval: after its child expires, the same write is minted again without asking, until the approval ends", async () => {
+  const s = await setup();
+  await s.env();
+  assert.equal((await approve(s, await stepUp(s), 60)).status, 200);
+  s.tick(25); // the child is too close to expiry to hand out again
+  const again = await stepUp(s);
+  assert.equal(again.state, "active");
+  assert.deepEqual(again.scopes, ["workers:read", "workers:write"]);
+  // A plain run gets the approved write back too, not just the start scopes.
+  s.tick(25); await s.grants.sweep();
+  assert.equal((await s.env()).status, 200);
+  assert.deepEqual(s.fake.minted.at(-1)!.scopes, ["workers:read", "workers:write"]);
+  const audit = (await (await s.call("GET", "/admin/api/audit", undefined, undefined, "vu@example.com")).json()).audit;
+  assert.ok(audit.some((a: any) => a.actor === "standing" && a.action === "grant-mint"));
+  // Once the last child minted under it expires (it outlives the approval by up to its TTL), a
+  // write waits again: the approval stood for an hour.
+  s.tick(30); await s.grants.sweep();
+  assert.equal((await stepUp(s)).state, "pending");
+  assert.equal((await s.env()).status, 409);
+});
+
+test("standing approval covers the caller's other projects on the same key, but never another caller", async () => {
+  const s = await setup();
+  await s.catalog.put("global", "CF_G", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  const both = await s.catalog.createToken("both", ["dev", "prod"]);
+  const up = (project: string, token = both) => s.call("POST", `/v1/step-up?project=${project}`, token, { keys: ["CF_G"], scopes: ["workers:write"] }).then((r) => r.json());
+  // Asked on prod before the approval on dev: minted once the approval stands, on the next request.
+  const prod = (await up("prod")).grants[0];
+  assert.equal(prod.state, "pending");
+  const dev = (await up("dev")).grants[0];
+  await approve(s, dev, 60);
+  assert.equal((await s.call("GET", "/v1/env?project=prod&keys=CF_G", both)).status, 200);
+  assert.equal((await adminGrants(s)).find((g: any) => g.id === prod.id).decided_by, "standing");
+  // Another token, same key: still waits.
+  const other = await s.catalog.createToken("other2", ["dev"]);
+  assert.equal((await up("dev", other)).grants[0].state, "pending");
+});
+
+test("approving without a duration is for one child only, as before", async () => {
+  const s = await setup();
+  await s.env();
+  await approve(s, await stepUp(s));
+  s.tick(25);
+  assert.equal((await stepUp(s)).requested.join(","), "workers:read,workers:write");
+  assert.deepEqual((await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json()).approvals, []);
+});
+
+test("revoking a grant, revoking the token, ending it in /admin, or rotating the key ends a standing approval", async () => {
+  const cases: [string, (s: Awaited<ReturnType<typeof setup>>, g: any) => Promise<unknown>][] = [
+    ["revoke grant", (s, g) => s.call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, "vu@example.com")],
+    ["revoke token", (s) => s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com")],
+    ["end", async (s) => { const [a] = (await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json()).approvals;
+      assert.equal((await s.call("DELETE", `/admin/api/approvals/${a.id}`, undefined, undefined, "vu@example.com")).status, 200); }],
+    ["rotate", (s) => s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT + "2", { kind: "mint:cloudflare", config: CONFIG }).then(() => s.grants.closeStale())],
+  ];
+  for (const [name, end] of cases) {
+    const s = await setup();
+    await s.env();
+    const g = await stepUp(s);
+    await approve(s, g, 60);
+    await end(s, g);
+    assert.deepEqual((await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json()).approvals, [], name);
+    s.tick(30); await s.grants.sweep();
+    await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+    await s.env();
+    // Only the first two children (read, then the approved write): nothing wider minted after.
+    assert.ok(!s.fake.minted.slice(2).some((m: any) => m.scopes.includes("workers:write")), name);
+  }
+});
+
+test("a standing approval can't run past 24 hours", async () => {
+  const s = await setup();
+  await s.env();
+  await approve(s, await stepUp(s), 7 * 24 * 60);
+  const [a] = (await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json()).approvals;
+  assert.equal(Date.parse(a.until) - Date.parse("2026-10-20T12:00:00Z"), 24 * 3600_000);
+});
+
+test("ending a standing approval, or its expiry, while its mint runs wins: the child is deleted, never handed out", async () => {
+  for (const race of ["end", "expire"]) {
+    const s = await setup();
+    await s.env();
+    await approve(s, await stepUp(s), 60);
+    s.tick(50); await s.grants.sweep(); // the approved child is gone; the next write rides the approval
+    const mint = s.fake.provider.mint;
+    s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+      if (race === "end") {
+        const [ap] = (await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json()).approvals;
+        await s.call("DELETE", `/admin/api/approvals/${ap.id}`, undefined, undefined, "vu@example.com");
+      } else s.tick(11);
+      return mint(...a);
+    };
+    const r = await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+    assert.equal(r.status, 409, race);
+    assert.ok(s.fake.revoked.includes(`id-${s.fake.n}`), race); // the mid-race child was deleted
+    s.fake.provider.mint = mint;
+    assert.equal((await stepUp(s)).state, "pending", race);
+  }
+});

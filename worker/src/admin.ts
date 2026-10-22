@@ -55,7 +55,11 @@ textarea.env{display:block;min-height:120px}
 <h2>Grants</h2>
 <p class="muted">Minted keys. Read scopes are granted on request; anything else waits here for you.</p>
 <p id="revokePending" class="warn"></p>
+<p>Approve for <select id="approveFor" title="After approving, the same caller gets these scopes on this key again without asking until then, on any project its pin reaches. Children stay short-lived.">
+  <option value="0">this token only</option><option value="60" selected>1 hour</option><option value="480">8 hours</option><option value="1440">24 hours</option></select></p>
 <div class="wrap"><table><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Wants</th><th>Expires</th><th></th></tr></thead><tbody id="grants"></tbody></table></div>
+<h3>Standing approvals</h3>
+<div class="wrap"><table><thead><tr><th>Key</th><th>Caller</th><th>Scopes</th><th>By</th><th>Until</th><th></th></tr></thead><tbody id="approvals"></tbody></table></div>
 
 <h2>Tokens</h2>
 <div id="once"></div>
@@ -77,20 +81,25 @@ const btn = (label, fn) => { const c = document.createElement('td'), b = documen
 const day = s => s ? s.slice(0, 10) : '';
 const stale = s => s && Date.parse(s) < Date.now() + 7 * 864e5;
 async function load() {
-  const [{ keys }, { tokens }, { audit }, { grants, revoke_pending }] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(() => ({ grants: [] }))]);
+  const [{ keys }, { tokens }, { audit }, { grants, approvals = [], revoke_pending }] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(() => ({ grants: [], approvals: [] }))]);
   document.getElementById('revokePending').textContent = revoke_pending
     ? revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
   document.getElementById('keys').replaceChildren(...keys.map(k => { const tr = document.createElement('tr');
     tr.append(td(k.name), td(k.scope), td(k.kind), td(k.checked ? 'yes' : 'no', k.checked ? '' : 'muted'), td(k.description, 'muted'), td(day(k.rotated_at)), td(day(k.expires_at), stale(k.expires_at) ? 'warn' : ''),
       btn('Delete', async () => { if (confirm('Delete ' + k.scope + '/' + k.name + '?')) { await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }); load(); } }));
     return tr; }));
-  const act = (label, path, method, body) => async () => { try { await api('grants/' + path, { method, body: body && JSON.stringify(body) }); } catch (err) { alert(err.message); } load(); };
+  // body may be a function, read on click (the duration select can change after load).
+  const act = (label, path, method, body) => async () => { const b = typeof body === 'function' ? body() : body; try { await api('grants/' + path, { method, body: b && JSON.stringify(b) }); } catch (err) { alert(err.message); } load(); };
   document.getElementById('grants').replaceChildren(...grants.map(g => { const tr = document.createElement('tr'), live = g.state === 'active' || g.state === 'pending', c = document.createElement('td');
     tr.append(td(g.name), td(g.caller), td(g.project ?? 'global'), td(g.state, g.requested ? 'warn' : ''), td(g.scopes.join(', ')),
       td((g.requested ?? []).join(', '), 'warn'), td((g.expires_at ?? '').replace('T', ' ').slice(0, 16)), c);
     const b = (label, fn) => { const e = document.createElement('button'); e.textContent = label; e.onclick = fn; c.append(e, ' '); };
-    if (g.requested) { b('Approve', act('approve', g.id + '/approve', 'POST', { requested: g.requested })); b('Deny', act('deny', g.id + '/deny', 'POST')); }
+    if (g.requested) { b('Approve', act('approve', g.id + '/approve', 'POST', () => ({ requested: g.requested, for_minutes: Number(document.getElementById('approveFor').value) }))); b('Deny', act('deny', g.id + '/deny', 'POST')); }
     if (live) b('Revoke', async () => { if (confirm('Revoke ' + g.name + ' for ' + g.caller + '? Its token stops working now, and its next request waits for your approval for a day.')) act('', g.id, 'DELETE')(); });
+    return tr; }));
+  document.getElementById('approvals').replaceChildren(...approvals.map(a => { const tr = document.createElement('tr');
+    tr.append(td(a.name), td(a.caller), td(a.scopes.join(', ')), td(a.approved_by, 'muted'), td(a.until.replace('T', ' ').slice(0, 16) + ' UTC'),
+      btn('End', async () => { try { await api('approvals/' + a.id, { method: 'DELETE' }); } catch (err) { alert(err.message); } load(); }));
     return tr; }));
   document.getElementById('tokens').replaceChildren(...tokens.map(t => { const tr = document.createElement('tr');
     const expired = t.expires_at && Date.parse(t.expires_at) <= Date.now();

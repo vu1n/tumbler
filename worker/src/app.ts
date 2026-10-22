@@ -258,14 +258,16 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     }
   }
   if (parts[0] === "grants" && grants) {
-    if (m === "GET" && parts.length === 1) return json({ revoke_pending: await grants.pendingRevokes(), grants: (await grants.list()).map((g) => ({ ...grantView(g), caller: g.caller, project: g.project, decided_by: g.decided_by, updated_at: g.updated_at })) });
+    if (m === "GET" && parts.length === 1) return json({ revoke_pending: await grants.pendingRevokes(), grants: (await grants.list()).map((g) => ({ ...grantView(g), caller: g.caller, project: g.project, decided_by: g.decided_by, updated_at: g.updated_at })), approvals: await grants.approvals() });
     if (m === "POST" && parts.length === 3 && (parts[2] === "approve" || parts[2] === "deny")) {
       const b = await body(), seen = Array.isArray(b.requested) ? b.requested.map(String) : undefined;
-      return json({ grant: grantView(await grants.decide(parts[1], parts[2] === "approve", who, seen)) });
+      const forMinutes = Number(b.for_minutes) > 0 ? Number(b.for_minutes) : 0;
+      return json({ grant: grantView(await grants.decide(parts[1], parts[2] === "approve", who, seen, forMinutes)) });
     }
     if (m === "DELETE" && parts.length === 2) { await grants.revoke(parts[1], who); return json({ ok: true }); }
     if (m === "GET" && parts.length === 3 && parts[2] === "events") return json({ events: await grants.events(parts[1]) });
   }
+  if (parts[0] === "approvals" && grants && m === "DELETE" && parts.length === 2) { await grants.endApproval(parts[1], who); return json({ ok: true }); }
   if (parts[0] === "audit" && m === "GET") return json({ audit: await catalog.recentAudit() });
   return json({ error: "not found" }, 404);
 }
