@@ -46,7 +46,7 @@ function fakeHuddles() {
   return Object.assign(h, { call, answer, open: () => [...h.asks.values()].filter((x: any) => x.state === "open" && !x.answer) });
 }
 
-async function setup(room: string | null = "room_approvals") {
+async function setup(room: string | null = "room_approvals", approver?: string) {
   const db = memoryD1(), catalog = new Catalog(db, await masterKey(Buffer.alloc(32, 3).toString("base64")));
   const minted: string[][] = [];
   const provider: Provider = { validate() {}, async mint(_p, _c, scopes) { minted.push(scopes); return { id: `id-${minted.length}`, value: `child-${minted.length}` }; }, async revoke() {} };
@@ -54,7 +54,7 @@ async function setup(room: string | null = "room_approvals") {
   const grants = new Grants(catalog, { cloudflare: provider }, () => new Date(clock));
   catalog.clock = () => new Date(clock);
   const huddles = fakeHuddles();
-  new Asks(grants, huddles.call, room ?? undefined);
+  new Asks(grants, huddles.call, room ?? undefined, approver);
   await catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
   const dev = await catalog.createToken("dev", ["dev"]);
   const deps = { catalog, grants, admin: async (r: Request) => r.headers.get("x-test-admin") };
@@ -104,6 +104,19 @@ test("only the member answers: an agent's, a delegate's or another person's answ
     assert.equal((await s.asks())[0].state, "refused", by.kind);
     assert.deepEqual((await s.admin()).approvals, [], by.kind);
   }
+});
+
+test("a credential acting for someone other than HUDDLES_APPROVER posts no ask and applies no answer", async () => {
+  const s = await setup("room_approvals", "user_someone_else");
+  await s.env();
+  const g = await s.stepUp();
+  assert.deepEqual(g.requested, ["workers:read", "workers:write"]);
+  assert.deepEqual(s.huddles.open(), []);
+  assert.deepEqual(await s.asks(), []);
+  const ok = await setup("room_approvals", "user_vu");
+  await ok.env();
+  await ok.stepUp();
+  assert.equal(ok.huddles.open().length, 1);
 });
 
 test("Deny, decline or an unknown choice: nothing is minted", async () => {

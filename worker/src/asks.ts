@@ -44,12 +44,13 @@ interface AskRow { ask_id: string; grant_id: string; room_id: string; requested:
 interface Me { actor: { kind: string; id: string }; on_behalf_of: { kind: "human"; id: string }; via: string }
 
 export class Asks implements Approver {
-  grants: Grants; call: HuddlesCall; room: string | undefined; me: Me | null = null;
+  grants: Grants; call: HuddlesCall; room: string | undefined; approver: string | undefined; me: Me | null = null;
   where = "Needs you in Huddles or /admin";
   // `room`: where asks go. Without one, tumbler's own room, created on first use: a delegate can
-  // create a room for its member, who gets admin there.
-  constructor(grants: Grants, call: HuddlesCall, room?: string) {
-    this.grants = grants; this.call = call; this.room = room;
+  // create a room for its member, who gets admin there. `approver`: the Huddles user id that must
+  // be the member the credential acts for, so swapping HUDDLES_TOKEN can't quietly swap who approves.
+  constructor(grants: Grants, call: HuddlesCall, room?: string, approver?: string) {
+    this.grants = grants; this.call = call; this.room = room; this.approver = approver;
     grants.approver = this;
   }
   get db() { return this.grants.db; }
@@ -84,7 +85,14 @@ export class Asks implements Approver {
     }
   }
 
-  async whoami(): Promise<Me> { return this.me ??= await this.call("whoami", {}); }
+  async whoami(): Promise<Me> {
+    if (this.me) return this.me;
+    const me: Me = await this.call("whoami", {});
+    if (me?.on_behalf_of?.kind !== "human" || (this.approver && me.on_behalf_of.id !== this.approver)) {
+      throw new Error("huddles credential does not act for HUDDLES_APPROVER"); // no ask, no answer
+    }
+    return this.me = me;
+  }
 
   async ask(g: GrantRow) {
     const me = await this.whoami(), room = this.room ?? `tumbler-approvals-${me.actor.id}`;

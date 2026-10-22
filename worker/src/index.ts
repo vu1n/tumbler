@@ -26,12 +26,13 @@ export interface Env {
   HUDDLES_TOKEN?: string;
   HUDDLES_ROOM?: string;
   HUDDLES_URL?: string;       // default https://huddles.dev
+  HUDDLES_APPROVER?: string;  // the approver's Huddles user id; asks stop if the credential acts for anyone else
 }
 
 function grantsFor(env: Env, catalog: Catalog) {
   const grants = new Grants(catalog, providers);
   if (env.HUDDLES_TOKEN) {
-    new Asks(grants, huddlesClient({ url: env.HUDDLES_URL || "https://huddles.dev", token: env.HUDDLES_TOKEN }), env.HUDDLES_ROOM || undefined);
+    new Asks(grants, huddlesClient({ url: env.HUDDLES_URL || "https://huddles.dev", token: env.HUDDLES_TOKEN }), env.HUDDLES_ROOM || undefined, env.HUDDLES_APPROVER || undefined);
   }
   return grants;
 }

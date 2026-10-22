@@ -270,16 +270,20 @@ Setup, once, from a huddles-up checkout with the core's `DATABASE_URL`:
 cd packages/server
 node src/cli.ts mint-delegate <your user id> tumbler tumbler | jq -r .credential \
   | wrangler secret put HUDDLES_TOKEN --name tumbler
+echo <your user id> | wrangler secret put HUDDLES_APPROVER --name tumbler
 ```
 
-That credential is a delegate acting for you, so you become the approver. Asks go to a room tumbler
+That credential is a delegate acting for you, so you become the approver. `HUDDLES_APPROVER` pins
+that: if the credential ever acts for anyone else, tumbler posts no ask and applies no answer. Asks go to a room tumbler
 creates for you on its first ask (`tumbler-approvals-<delegate id>`), or to `HUDDLES_ROOM` if you
 set it, as long as you have granted the delegate write access there. `HUDDLES_URL` defaults to
 `https://huddles.dev`. To stop, revoke the delegate (`cli.ts revoke-delegate`) or delete the secret.
 
 Every ask and its outcome is kept in `grant_asks`: what was shown, which option was picked, and who
-answered. That gives a later triage step (Clef flagging a request that asks for more than the work
-needs) labelled examples to be measured against before it is trusted with anything.
+answered. /admin decisions are in `grant_events` (its `actor` is the admin's email, or
+`huddles:<user id>`). That gives a later triage step (Clef flagging a request that asks for more
+than the work needs) labelled examples to be measured against before it is trusted with anything.
+Withdrawn and expired asks carry no label.
 
 ## API
 
