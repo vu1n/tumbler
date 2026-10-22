@@ -58,17 +58,32 @@ token pinned to one project reads it by default; one pinned to several reads glo
 command names one of them (`-p`, `TUMBLER_PROJECT`, or a repo's `.tumbler`), so one agent token can
 serve many repos and each repo's `.tumbler` picks its project.
 
-A scope is `global`, a project (`huddles`), or one of its deployments (`huddles/prod`,
-`huddles/dev`). A deployment reads its own keys first, then its project's, then global ones, so shared
-keys go on the project and only what differs goes on each deployment. A pin names exactly what it
-reads: a token pinned to `huddles` doesn't reach `huddles/prod`, and one pinned to `huddles/prod`
-reads the project's keys through prod but can't ask for `huddles` on its own. Pin dev and prod agents
-to their deployments so a dev token never sees a prod key. To turn a flat project into a deployment
-(`huddles-dev` into `huddles/dev`), use Move in `/admin` (`POST /admin/api/scopes/move {"from", "to"}`):
-it reseals every key under the new scope without re-entering values, repoints the pins that named
-the old one, and ends the minted children on the moved keys (the next read mints fresh ones). The old
-name stops resolving, so change `project =` in any `.tumbler` that names it. Until you move it, a
-flat project such as `huddles-dev` keeps working as before.
+A scope is `global`, a project (`huddles`), or one of its environments. Environments follow
+Infisical's model, a fixed set: `huddles/dev`, `huddles/staging`, `huddles/prod`. An environment reads
+its own keys first, then its project's shared keys, then global ones, so shared keys go on the project
+and only what differs goes on each environment.
+
+A token's pin lists what it reads beyond global keys: a project (its shared keys), `project/env` (one
+environment of it), `*` (every project's shared keys, including projects added later) or `*/env` (that
+environment of every project). An environment is always granted by name, so a token without `prod` in
+its pin never reaches a prod key. `/admin` shows a pin in words and offers presets:
+
+| preset | pin | reads |
+|---|---|---|
+| Everything | `*, */dev, */staging, */prod` | all projects (shared, dev, staging, prod) |
+| All projects, dev (an agent like Claude dev) | `*, */dev` | all projects (shared, dev) |
+| Global only | empty | global keys |
+
+Per project works too, as with an Infisical project role: `huddles/prod, kypp/dev`. A token whose pin is
+one project or one environment reads it by default; any other reads global keys until a command names a
+scope (`-p`, `TUMBLER_PROJECT`, or a repo's `.tumbler`).
+
+To turn a flat project into an environment (`huddles-dev` into `huddles/dev`), use Move in `/admin`
+(`POST /admin/api/scopes/move {"from", "to"}`). It reseals every key under the new scope without
+re-entering values, moves each token that read the old scope to the new one (a `*` token gets the
+environment named, so its reach doesn't change), and ends the minted children on the moved keys (the
+next read mints fresh ones). The old name stops resolving, so change `project =` in any `.tumbler`
+that names it. Until you move it, a flat project such as `huddles-dev` keeps working as before.
 
 A token can carry an expiry (set "expires in hours" when you create it; `tumbler whoami` shows it),
 for a pilot or anything else time-bound. From that moment the broker refuses it, and the next sweep

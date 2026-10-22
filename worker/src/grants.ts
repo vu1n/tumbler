@@ -382,6 +382,7 @@ export class Grants {
   // Otherwise the new child is deleted at the provider and nothing is handed out.
   // Why the pin is rechecked here: a request authorized before an admin narrowed the token's pin
   // may reach this after closeOutsidePin() scanned, and must not activate a child for a lost project.
+  // The json_each test is pinReaches() in SQL: the scope itself, or `*` / `*/<env>` for it.
   // `standing`: the approvals a mint by "standing" relies on, as read before minting. Each must still
   // be live when the child lands, so ending one (End, a grant or token revoke) or its expiry mid-mint
   // wins like a revoke does. A grant revoke ends them before it blocks the caller.
@@ -391,7 +392,8 @@ export class Grants {
     const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who, approved: standing?.scopes }, {
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
         AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
-          AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value = grants.project)))
+          AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value IN (grants.project,
+            CASE WHEN instr(grants.project, '/') > 0 THEN '*' || substr(grants.project, instr(grants.project, '/')) ELSE '*' END))))
         AND NOT EXISTS (SELECT 1 FROM json_each(?) j LEFT JOIN approvals a ON a.id = j.value WHERE a.id IS NULL OR a.ended_at IS NOT NULL OR a.until <= ?)`,
       binds: [row.rev, row.scope, row.name, row.rev, t, JSON.stringify(standing?.ids ?? []), t], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });

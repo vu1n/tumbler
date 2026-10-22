@@ -20,6 +20,7 @@ form{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}input{font:inherit;paddin
 button{font:inherit;padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);cursor:pointer}
 code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:auto}
 textarea.env{display:block;min-height:120px}
+.chips{display:flex;gap:4px;flex-wrap:wrap;align-items:center}.chips button{padding:2px 10px;border-radius:999px;font-size:12px}
 #once{padding:12px;border:1px solid var(--warn);border-radius:6px;display:none}
 </style></head><body><main>
 <h1>Tumbler</h1>
@@ -29,7 +30,7 @@ textarea.env{display:block;min-height:120px}
 <div class="wrap"><table><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Checked</th><th>Description</th><th>Rotated</th><th>Expires</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
 <form id="putKey" method="post">
   <input name="name" placeholder="NAME" required pattern="[A-Z_][A-Z0-9_]*">
-  <input name="scope" placeholder="global, project or project/deployment" value="global" required>
+  <input name="scope" placeholder="global, project, or project/dev|staging|prod" value="global" required>
   <select name="kind" title="static: the value is handed out. mint: the value is a parent token that mints short-lived children.">
     <option value="static">static</option><option value="mint:cloudflare">mint:cloudflare</option>
   </select>
@@ -42,7 +43,7 @@ textarea.env{display:block;min-height:120px}
 
 <form id="importEnv" method="post">
   <textarea class="env" name="text" required spellcheck="false" autocomplete="off" placeholder="Paste a .env to save many static keys at once:&#10;OPENAI_API_KEY=sk-...&#10;export AWS_REGION=&quot;us-east-1&quot;  # comments, quotes and export are fine"></textarea>
-  <input name="scope" placeholder="global, project or project/deployment" value="global" required>
+  <input name="scope" placeholder="global, project, or project/dev|staging|prod" value="global" required>
   <button>Preview</button>
 </form>
 <div id="importPlan"></div>
@@ -63,10 +64,11 @@ textarea.env{display:block;min-height:120px}
 
 <h2>Tokens</h2>
 <div id="once"></div>
-<div class="wrap"><table><thead><tr><th>Name</th><th>Pinned to</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Name</th><th>Reads</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
 <form id="newToken" method="post">
   <input name="name" placeholder="token name" required>
-  <input name="projects" placeholder="projects or project/deployment, comma-separated (empty = global only)">
+  <input name="projects" placeholder="huddles, huddles/prod, */dev (empty = global only)" title="A project reads its shared keys; project/env one environment (dev, staging, prod); * is every project, */env that environment of every project.">
+  <span class="chips" title="Fill in a preset"><button type="button" data-pin="*, */dev, */staging, */prod">Everything</button><button type="button" data-pin="*, */dev">All projects, dev</button><button type="button" data-pin="">Global only</button></span>
   <input name="hours" type="number" min="1" step="1" placeholder="expires in hours (empty = never)" title="The token stops working then; grants it holds are ended by the next sweep.">
   <button>Create</button>
 </form>
@@ -78,6 +80,10 @@ const api = (p, o = {}) => fetch('/admin/api/' + p, { ...o, headers: { 'content-
   .then(async r => { const b = await r.json(); if (!r.ok) throw Object.assign(new Error(b.error || r.status), { canSkip: !!b.can_skip }); return b; });
 const td = (t, cls) => { const e = document.createElement('td'); e.textContent = t ?? ''; if (cls) e.className = cls; return e; };
 const btn = (label, fn) => { const c = document.createElement('td'), b = document.createElement('button'); b.textContent = label; b.onclick = fn; c.append(b); return c; };
+// A pin in words: each project (or all of them) with what it reads, shared keys and environments.
+const reach = t => { if (!t.projects) return 'global only'; const by = new Map();
+  for (const p of t.projects) { const [proj, env] = p.split('/'), k = proj === '*' ? 'all projects' : proj; by.set(k, [...(by.get(k) ?? []), env ?? 'shared']); }
+  return [...by].map(([k, v]) => k + ' (' + v.join(', ') + ')').join(', '); };
 const day = s => s ? s.slice(0, 10) : '';
 const stale = s => s && Date.parse(s) < Date.now() + 7 * 864e5;
 async function load() {
@@ -104,13 +110,13 @@ async function load() {
   document.getElementById('tokens').replaceChildren(...tokens.map(t => { const tr = document.createElement('tr');
     const expired = t.expires_at && Date.parse(t.expires_at) <= Date.now();
     // A pin is edited in place, so reaching one more project never means a new token.
-    const pin = btn(t.projects ? t.projects.join(', ') : 'global only', async () => {
-      const next = prompt('Projects (or project/deployment) ' + t.name + ' reads, comma-separated (empty = global only). With several, a command that names none reads globals only.', (t.projects ?? []).join(', '));
+    const pin = btn(reach(t), async () => {
+      const next = prompt('What ' + t.name + ' reads, comma-separated (empty = global only): a project (its shared keys), project/env (dev, staging, prod), * for every project, */env for that environment of every project.', (t.projects ?? []).join(', '));
       if (next === null) return;
       try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ projects: next.split(',').map(s => s.trim()).filter(Boolean) }) }); } catch (err) { alert(err.message); }
       load(); });
     pin.firstChild.title = 'Edit pin';
-    tr.append(td(t.name), t.revoked_at ? td(t.projects ? t.projects.join(', ') : 'global only') : pin, td(day(t.created_at)),
+    tr.append(td(t.name), t.revoked_at ? td(reach(t)) : pin, td(day(t.created_at)),
       td(t.expires_at ? (expired ? 'expired ' : '') + t.expires_at.slice(0, 16).replace('T', ' ') + ' UTC' : 'never', expired ? 'muted' : ''),
       t.revoked_at ? td('revoked ' + day(t.revoked_at), 'muted') : btn('Revoke', async () => { if (confirm('Revoke ' + t.name + '?')) { await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }); load(); } }));
     return tr; }));
@@ -153,6 +159,8 @@ document.getElementById('moveScope').onsubmit = async e => { e.preventDefault();
   try { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from: f.get('from'), to: f.get('to') }) });
     alert('Moved ' + r.moved.length + ' key(s); repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); e.target.reset(); } catch (err) { alert(err.message); }
   load(); };
+// Presets fill the field, which stays editable.
+for (const b of document.querySelectorAll('#newToken [data-pin]')) b.onclick = () => { document.getElementById('newToken').projects.value = b.dataset.pin; };
 document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
   const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);
   const hours = Number(f.get('hours')), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;

@@ -173,7 +173,7 @@ A D1 table that describes every key. Values are never in it.
 | field | purpose |
 |---|---|
 | `name` | env var name, such as `AWS_ACCESS_KEY_ID` |
-| `scope` | `global`, a project (`huddles`), or a deployment (`huddles/prod`); a deployment overrides its project, which overrides global |
+| `scope` | `global`, a project (`huddles`), or one of its environments (`huddles/dev`, `/staging`, `/prod`); an environment overrides its project, which overrides global |
 | `kind` | `static`, or a minting provider such as `aws-sts`, `cloudflare-token`, `openrouter`, `tailscale`, `oauth:<provider>` |
 | `policy` | for minted keys: permissions or role, max TTL, spend limit |
 | `ref` | where the value lives (D1 ciphertext id or Secrets Store name) |
