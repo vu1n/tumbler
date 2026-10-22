@@ -153,3 +153,44 @@ test("admin edits a live token's pin in place: it reaches the new project at onc
   const audit = await (await admin(deps, "audit", { as: "vu@example.com" })).text();
   assert.match(audit, /token-pin/);
 });
+
+test("a deployment reads its own keys, then its project's, then global ones", async () => {
+  const { catalog, get } = await setup();
+  await catalog.put("huddles", "OPENROUTER_API_KEY", "huddles-or");
+  await catalog.put("huddles", "DATABASE_URL", "huddles-db");
+  await catalog.put("huddles/prod", "DATABASE_URL", "prod-db");
+  const prod = await catalog.createToken("huddles-prod", ["huddles/prod"]), base = await catalog.createToken("huddles", ["huddles"]);
+  assert.deepEqual((await (await get("/v1/env", prod)).json()).env,
+    { OPENROUTER_API_KEY: "huddles-or", AWS_REGION: "us-east-1", DATABASE_URL: "prod-db" });
+  assert.deepEqual((await (await get("/v1/keys", prod)).json()).keys, ["AWS_REGION", "DATABASE_URL", "OPENROUTER_API_KEY"]);
+  assert.deepEqual((await (await get("/v1/revs?keys=DATABASE_URL", prod)).json()).project, "huddles/prod");
+  // A pin names exactly what it reads: the project's pin doesn't reach prod, nor prod's the bare project.
+  assert.equal((await (await get("/v1/env", base)).json()).env.DATABASE_URL, "huddles-db");
+  assert.equal((await get("/v1/env?project=huddles/prod", base)).status, 403);
+  assert.equal((await get("/v1/env?project=huddles", prod)).status, 403);
+  await assert.rejects(catalog.put("huddles/prod/eu", "A", "x"), /invalid scope/);
+});
+
+test("admin moves a scope's keys and pins, so huddles-dev becomes huddles/dev without re-entering values", async () => {
+  const { catalog, deps, get } = await setup();
+  await catalog.put("huddles-dev", "DATABASE_URL", "dev-db", { description: "neon" });
+  await catalog.put("huddles", "OPENROUTER_API_KEY", "huddles-or");
+  const t = await catalog.createToken("huddles-dev", ["huddles-dev", "kypp"]);
+  const move = (body: unknown) => admin(deps, "scopes/move", { method: "POST", as: "vu@example.com", body: JSON.stringify(body) });
+  // Before: a flat project, still working as one.
+  assert.equal((await (await get("/v1/env?project=huddles-dev", t)).json()).env.DATABASE_URL, "dev-db");
+  const r = await move({ from: "huddles-dev", to: "huddles/dev" });
+  assert.deepEqual(await r.json(), { from: "huddles-dev", to: "huddles/dev", moved: ["DATABASE_URL"], repinned: ["huddles-dev"] });
+  assert.deepEqual((await (await get("/v1/env?project=huddles/dev", t)).json()).env,
+    { OPENROUTER_API_KEY: "huddles-or", AWS_REGION: "us-east-1", DATABASE_URL: "dev-db" });
+  assert.equal((await get("/v1/env?project=huddles-dev", t)).status, 403);
+  assert.equal((await get("/v1/env?project=kypp", t)).status, 200);
+  assert.match(await (await admin(deps, "keys", { as: "vu@example.com" })).text(), /"scope":"huddles\/dev","name":"DATABASE_URL","kind":"static","config":"\{\}","description":"neon"/);
+  // A clash moves nothing; global can't move.
+  await catalog.put("a", "DATABASE_URL", "a-db");
+  await catalog.put("b", "DATABASE_URL", "b-db");
+  assert.equal((await move({ from: "a", to: "b" })).status, 409);
+  assert.equal(await catalog.value((await catalog.keyRow("a", "DATABASE_URL"))!), "a-db");
+  assert.equal((await move({ from: "global", to: "x" })).status, 400);
+  assert.match(await (await admin(deps, "audit", { as: "vu@example.com" })).text(), /scope-move/);
+});

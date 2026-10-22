@@ -699,3 +699,13 @@ test("/v1/env tells the client how long it may cache a minted child, and nothing
   assert.equal((await (await t.env()).json()).max_age, 300);
   assert.equal("max_age" in (await (await t.env(t.dev, "AWS_REGION")).json()), false);
 });
+
+test("moving a scope ends the children minted from its keys; the next read mints from the moved key", async () => {
+  const s = await setup();
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+  const r = await s.call("POST", "/admin/api/scopes/move", undefined, { from: "dev", to: "dev/staging" }, "vu@example.com");
+  assert.equal(r.status, 200);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await s.call("GET", "/v1/env?keys=CLOUDFLARE_API_TOKEN", s.dev)).status, 200);
+  assert.deepEqual(s.fake.minted.map((m) => m.parent), [PARENT, PARENT]);
+});

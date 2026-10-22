@@ -4,7 +4,8 @@ import { staticCheck } from "./verify.ts";
 
 export const GLOBAL = "global";
 const NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
-const PROJECT = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+// A project, or one of its deployments: `huddles`, `huddles/prod`.
+const PART = "[a-z0-9][a-z0-9._-]{0,63}", PROJECT = new RegExp(`^${PART}(/${PART})?$`);
 
 export class Refused extends Error {
   status: number;
@@ -19,6 +20,25 @@ export function checkScope(scope: string) {
 
 function checkPin(projects: string[] | null) {
   for (const p of projects ?? []) { checkScope(p); if (p === GLOBAL) throw new Refused(400, "pin projects, not global"); }
+}
+
+// The scopes a read as `project` draws on, least specific first. A deployment reads its own keys,
+// then its project's, then global ones: huddles/prod over huddles over global.
+export function chain(project: string | null): string[] {
+  if (!project) return [GLOBAL];
+  const slash = project.indexOf("/");
+  return slash < 0 ? [GLOBAL, project] : [GLOBAL, project.slice(0, slash), project];
+}
+
+// One row per name, the most specific scope in `scopes` winning (rows from other scopes are ignored).
+function winners<T extends { scope: string; name: string }>(rows: T[], scopes: string[], names: string[] = []) {
+  const want = new Set(names), win = new Map<string, T>(), rank = (r: T) => scopes.indexOf(r.scope);
+  for (const r of rows) {
+    if ((want.size && !want.has(r.name)) || rank(r) < 0) continue;
+    const prev = win.get(r.name);
+    if (!prev || rank(r) > rank(prev)) win.set(r.name, r);
+  }
+  return win;
 }
 
 // Whether a pin still reaches a project; a grant on one it no longer reaches is ended.
@@ -155,18 +175,57 @@ export class Catalog {
       .bind(scope, name).first<MintRow>();
   }
 
-  // The row `caller` reads for `name`: the project's over the global one.
+  // The row `caller` reads for `name`: the most specific of deployment, project and global.
   async rowFor(caller: Caller, requested: string | null, name: string) {
     const project = this.scopeFor(caller, requested);
     checkName(name);
-    const row = (project ? await this.keyRow(project, name) : null) ?? await this.keyRow(GLOBAL, name);
+    const row = await this.nearest(project, name);
     if (!row) throw new Refused(404, `unknown keys: ${name}`);
     return { project, row };
+  }
+
+  async nearest(project: string | null, name: string) {
+    for (const scope of chain(project).reverse()) {
+      const row = await this.keyRow(scope, name);
+      if (row) return row;
+    }
+    return null;
   }
 
   async remove(scope: string, name: string) {
     const [, r] = await this.db.batch([this.retire(scope, name), this.db.prepare("DELETE FROM keys WHERE scope = ? AND name = ?").bind(scope, name)]);
     if (!r.meta.changes) throw new Refused(404, `no key ${scope}/${name}`);
+  }
+
+  // Moves every key in `from` to `to` (huddles-dev to huddles/dev), resealed under the new scope, and
+  // repoints the live pins that name `from`. Values are write-only, so this is the only way to move a
+  // scope without pasting each value again. Each key moves in one batch, so a move cut short is
+  // finished by running it again. The caller ends the grants on what moved (app.ts).
+  async moveScope(from: string, to: string) {
+    checkScope(from); checkScope(to);
+    if (from === GLOBAL || to === GLOBAL) throw new Refused(400, "move a project or deployment, not global");
+    if (from === to) throw new Refused(400, "from and to are the same scope");
+    const { results } = await this.db.prepare("SELECT * FROM keys WHERE scope = ? ORDER BY name").bind(from).all<any>();
+    const clash = [];
+    for (const r of results) if (await this.keyRow(to, r.name)) clash.push(r.name);
+    // Why refuse rather than overwrite: the row in `to` may be a different value someone relies on.
+    if (clash.length) throw new Refused(409, `${to} already has ${clash.join(", ")}; nothing was moved`);
+    for (const r of results) {
+      const { iv, ciphertext } = await seal(this.key, to, r.name, await this.value(r));
+      await this.db.batch([this.retire(from, r.name), this.db.prepare(
+        `INSERT INTO keys (scope, name, kind, config, rev, checked, description, owner, iv, ciphertext, created_at, rotated_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(to, r.name, r.kind, r.config, crypto.randomUUID(), r.checked, r.description, r.owner, iv, ciphertext, r.created_at, r.rotated_at, r.expires_at),
+      this.db.prepare("DELETE FROM keys WHERE scope = ? AND name = ?").bind(from, r.name)]);
+    }
+    const repinned: { name: string; projects: string[] }[] = [];
+    for (const t of await this.tokens()) {
+      if (t.revoked_at || !t.projects?.includes(from)) continue;
+      const projects = [...new Set(t.projects.map((p) => p === from ? to : p))];
+      await this.setPin(t.name, projects);
+      repinned.push({ name: t.name, projects });
+    }
+    return { moved: results.map((r) => ({ name: r.name as string, kind: r.kind as string })), repinned };
   }
 
   async list(): Promise<KeyRow[]> {
@@ -200,16 +259,11 @@ export class Catalog {
     mint?: (caller: Caller, project: string | null, row: MintRow) => Promise<string>): Promise<Record<string, string>> {
     const project = this.scopeFor(caller, requested);
     names.forEach(checkName);
-    const scopes = project ? [GLOBAL, project] : [GLOBAL];
+    const scopes = chain(project);
     const { results } = await this.db.prepare(
       `SELECT scope, name, kind, config, rev, iv, ciphertext FROM keys WHERE scope IN (${scopes.map(() => "?").join(",")})`,
     ).bind(...scopes).all<MintRow>();
-    const want = new Set(names), win = new Map<string, MintRow>();
-    for (const r of results) {
-      if (want.size && !want.has(r.name)) continue;
-      if (win.get(r.name)?.scope === project) continue; // a project row already won
-      win.set(r.name, r);
-    }
+    const win = winners(results, scopes, names);
     const out: Record<string, string> = {};
     // Why: refuse before minting anything when there is no minter to hand a parent to.
     for (const r of win.values()) if (r.kind !== "static" && !mint) throw new Refused(501, `${r.name} is a minted key and minting is off`);
@@ -225,32 +279,30 @@ export class Catalog {
   // A key's stored value. Only for a check run here; it is never returned (a mint key's is its parent).
   value(row: MintRow) { return open(this.key, row.scope, row.name, bytes(row.iv), bytes(row.ciphertext)); }
 
-  // Each key's revision and whether that revision passed its check, project rows over global ones.
+  // Each key's revision and whether that revision passed its check, the most specific row winning.
   // Never values and never a mint, so `tumbler run --watch` can poll it.
   async revisions(caller: Caller, requested: string | null, names: string[]) {
-    const project = this.scopeFor(caller, requested), scopes = project ? [GLOBAL, project] : [GLOBAL];
+    const project = this.scopeFor(caller, requested), scopes = chain(project);
     names.forEach(checkName);
     const { results } = await this.db.prepare(
       `SELECT scope, name, rev, checked FROM keys WHERE scope IN (${scopes.map(() => "?").join(",")})`,
     ).bind(...scopes).all<{ scope: string; name: string; rev: string; checked: number }>();
-    const out: Record<string, { rev: string; checked: boolean }> = {}, want = new Set(names), from = new Map<string, string>();
-    for (const r of results) {
-      if (want.size && !want.has(r.name)) continue;
-      if (from.get(r.name) === project) continue; // a project row already won
-      from.set(r.name, r.scope); out[r.name] = { rev: r.rev, checked: !!r.checked };
-    }
+    const out: Record<string, { rev: string; checked: boolean }> = {};
+    for (const r of winners(results, scopes, names).values()) out[r.name] = { rev: r.rev, checked: !!r.checked };
     return { project, keys: out };
   }
 
-  // Names and descriptions the caller could read, project rows over global ones. No values.
+  // Names and descriptions the caller could read, the most specific row winning; an empty description
+  // falls back to a less specific row's. No values.
   async visible(caller: Caller, requested: string | null): Promise<{ project: string | null; keys: { name: string; description: string }[] }> {
-    const project = this.scopeFor(caller, requested), scopes = project ? [GLOBAL, project] : [GLOBAL];
+    const project = this.scopeFor(caller, requested), scopes = chain(project);
     const { results } = await this.db.prepare(
       `SELECT scope, name, description FROM keys WHERE scope IN (${scopes.map(() => "?").join(",")}) ORDER BY name`,
     ).bind(...scopes).all<{ scope: string; name: string; description: string }>();
     const byName = new Map<string, string>();
-    for (const r of results) if (!byName.has(r.name) || r.scope === project) byName.set(r.name, r.description || byName.get(r.name) || "");
-    return { project, keys: [...byName].map(([name, description]) => ({ name, description })) };
+    results.sort((a, b) => scopes.indexOf(a.scope) - scopes.indexOf(b.scope));
+    for (const r of results) byName.set(r.name, r.description || byName.get(r.name) || "");
+    return { project, keys: [...byName].sort(([a], [b]) => a < b ? -1 : 1).map(([name, description]) => ({ name, description })) };
   }
 
   async recentAudit(limit = 100) {

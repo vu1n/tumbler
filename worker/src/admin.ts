@@ -29,7 +29,7 @@ textarea.env{display:block;min-height:120px}
 <div class="wrap"><table><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Checked</th><th>Description</th><th>Rotated</th><th>Expires</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
 <form id="putKey" method="post">
   <input name="name" placeholder="NAME" required pattern="[A-Z_][A-Z0-9_]*">
-  <input name="scope" placeholder="global or project" value="global" required>
+  <input name="scope" placeholder="global, project or project/deployment" value="global" required>
   <select name="kind" title="static: the value is handed out. mint: the value is a parent token that mints short-lived children.">
     <option value="static">static</option><option value="mint:cloudflare">mint:cloudflare</option>
   </select>
@@ -42,10 +42,15 @@ textarea.env{display:block;min-height:120px}
 
 <form id="importEnv" method="post">
   <textarea class="env" name="text" required spellcheck="false" autocomplete="off" placeholder="Paste a .env to save many static keys at once:&#10;OPENAI_API_KEY=sk-...&#10;export AWS_REGION=&quot;us-east-1&quot;  # comments, quotes and export are fine"></textarea>
-  <input name="scope" placeholder="global or project" value="global" required>
+  <input name="scope" placeholder="global, project or project/deployment" value="global" required>
   <button>Preview</button>
 </form>
 <div id="importPlan"></div>
+<form id="moveScope" method="post" title="Moves every key in a scope and repoints the token pins that name it. Minted children on the moved keys are ended.">
+  <input name="from" placeholder="move scope, e.g. huddles-dev" required>
+  <input name="to" placeholder="to, e.g. huddles/dev" required>
+  <button>Move</button>
+</form>
 
 <h2>Grants</h2>
 <p class="muted">Minted keys. Read scopes are granted on request; anything else waits here for you.</p>
@@ -57,7 +62,7 @@ textarea.env{display:block;min-height:120px}
 <div class="wrap"><table><thead><tr><th>Name</th><th>Pinned to</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
 <form id="newToken" method="post">
   <input name="name" placeholder="token name" required>
-  <input name="projects" placeholder="projects, comma-separated (empty = global only)">
+  <input name="projects" placeholder="projects or project/deployment, comma-separated (empty = global only)">
   <input name="hours" type="number" min="1" step="1" placeholder="expires in hours (empty = never)" title="The token stops working then; grants it holds are ended by the next sweep.">
   <button>Create</button>
 </form>
@@ -91,7 +96,7 @@ async function load() {
     const expired = t.expires_at && Date.parse(t.expires_at) <= Date.now();
     // A pin is edited in place, so reaching one more project never means a new token.
     const pin = btn(t.projects ? t.projects.join(', ') : 'global only', async () => {
-      const next = prompt('Projects ' + t.name + ' reads, comma-separated (empty = global only). With several, a command that names none reads globals only.', (t.projects ?? []).join(', '));
+      const next = prompt('Projects (or project/deployment) ' + t.name + ' reads, comma-separated (empty = global only). With several, a command that names none reads globals only.', (t.projects ?? []).join(', '));
       if (next === null) return;
       try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ projects: next.split(',').map(s => s.trim()).filter(Boolean) }) }); } catch (err) { alert(err.message); }
       load(); });
@@ -134,6 +139,11 @@ importEnv.onsubmit = async e => { e.preventDefault();
   try { showPlan(await importCall(false), async () => {
     try { const r = await importCall(true); showPlan(r); if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length) importEnv.text.value = ''; load(); }
     catch (err) { alert(err.message); } }); } catch (err) { alert(err.message); } };
+document.getElementById('moveScope').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
+  if (!confirm('Move every key in ' + f.get('from') + ' to ' + f.get('to') + ' and repoint pins? A repo whose .tumbler names ' + f.get('from') + ' needs its project line changed.')) return;
+  try { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from: f.get('from'), to: f.get('to') }) });
+    alert('Moved ' + r.moved.length + ' key(s); repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); e.target.reset(); } catch (err) { alert(err.message); }
+  load(); };
 document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
   const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);
   const hours = Number(f.get('hours')), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
