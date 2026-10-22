@@ -238,3 +238,14 @@ test("a move keeps each token's reach: * gets the new environment named, */dev n
   assert.deepEqual(pins["all-shared"], ["*", "huddles/dev"]);
   assert.deepEqual(pins["all-dev"], ["*", "*/dev"]);
 });
+
+test("keys in a deployment named before environments were fixed can still be moved into one", async () => {
+  const { catalog, db, deps } = await setup();
+  const { iv, ciphertext } = await seal(catalog.key, "huddles/qa", "DATABASE_URL", "qa-db");
+  db.raw.prepare("INSERT INTO keys (scope, name, iv, ciphertext, created_at, rotated_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("huddles/qa", "DATABASE_URL", iv, ciphertext, "2026-10-22T00:00:00Z", "2026-10-22T00:00:00Z");
+  const r = await admin(deps, "scopes/move", { method: "POST", as: "vu@example.com", body: JSON.stringify({ from: "huddles/qa", to: "huddles/staging" }) });
+  assert.deepEqual((await r.json()).moved, ["DATABASE_URL"]);
+  assert.equal(await catalog.value((await catalog.keyRow("huddles/staging", "DATABASE_URL"))!), "qa-db");
+  assert.equal((await admin(deps, "scopes/move", { method: "POST", as: "vu@example.com", body: JSON.stringify({ from: "huddles", to: "huddles/qa" }) })).status, 400);
+});

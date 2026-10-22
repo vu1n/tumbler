@@ -9,6 +9,9 @@ const NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
 export const ENVIRONMENTS = ["dev", "staging", "prod"];
 const PART = "[a-z0-9][a-z0-9._-]{0,63}", ENV = `(${ENVIRONMENTS.join("|")})`;
 const PROJECT = new RegExp(`^${PART}(/${ENV})?$`);
+// Any project/deployment name a broker may hold from before environments were fixed: still a valid
+// scope to move keys out of, so a `huddles/qa` can become `huddles/staging` without re-entering values.
+const LEGACY = new RegExp(`^${PART}(/${PART})?$`);
 // A pin entry: a project or one environment of it, where `*` stands for every project, present and
 // future. `huddles/prod` reads huddles' prod; `*/dev` reads every project's dev.
 const PIN = new RegExp(`^(${PART}|\\*)(/${ENV})?$`);
@@ -215,7 +218,8 @@ export class Catalog {
   // scope without pasting each value again. Each key moves in one batch, so a move cut short is
   // finished by running it again. The caller ends the grants on what moved (app.ts).
   async moveScope(from: string, to: string) {
-    checkScope(from); checkScope(to);
+    if (!LEGACY.test(from)) throw new Refused(400, `invalid scope: ${from}`);
+    checkScope(to);
     if (from === GLOBAL || to === GLOBAL) throw new Refused(400, "move a project or deployment, not global");
     if (from === to) throw new Refused(400, "from and to are the same scope");
     const { results } = await this.db.prepare("SELECT * FROM keys WHERE scope = ? ORDER BY name").bind(from).all<any>();
