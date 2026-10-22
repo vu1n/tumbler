@@ -342,7 +342,7 @@ export class Grants {
         await this.apply(g, { type: "abandon", who: "system" });
         throw err;
       }
-      await this.store(g, row, minted, scopes, unasked, standing?.scopes);
+      await this.store(g, row, minted, scopes, unasked, unasked === "standing" ? standing! : undefined);
       await this.catalog.audit(unasked === "policy" ? caller.name : "standing", "grant-mint", project,
         [`${row.name}:${scopes.join("+")}`, ...(unasked === "standing" ? standing!.ids : [])]);
       return (await this.get(id))!;
@@ -353,7 +353,7 @@ export class Grants {
 
   async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string, standing?: Standing): Promise<GrantRow> {
     const minted = await this.mint(row, g, scopes), old = g.child_id;
-    await this.store(g, row, minted, scopes, who, standing?.scopes);
+    await this.store(g, row, minted, scopes, who, standing);
     if (old) await this.revokeChild(row, old, g.expires_at);
     await this.catalog.audit(who, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`, ...(standing?.ids ?? [])]);
     return (await this.get(g.id))!;
@@ -375,14 +375,18 @@ export class Grants {
   // Otherwise the new child is deleted at the provider and nothing is handed out.
   // Why the pin is rechecked here: a request authorized before an admin narrowed the token's pin
   // may reach this after closeOutsidePin() scanned, and must not activate a child for a lost project.
-  // `approved`: what a standing approval covered when it was read, for a mint by "standing".
-  async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string, approved?: string[]) {
+  // `standing`: the approvals a mint by "standing" relies on, as read before minting. Each must still
+  // be live when the child lands, so ending one (End, a grant or token revoke) or its expiry mid-mint
+  // wins like a revoke does. A grant revoke ends them before it blocks the caller.
+  async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string, standing?: Standing) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(g.id), row.name, m.value);
-    const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who, approved }, {
+    const t = this.now().toISOString();
+    const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who, approved: standing?.scopes }, {
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
         AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
-          AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value = grants.project)))`,
-      binds: [row.rev, row.scope, row.name, row.rev, this.now().toISOString()], store: { iv, ciphertext },
+          AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value = grants.project)))
+        AND NOT EXISTS (SELECT 1 FROM json_each(?) j LEFT JOIN approvals a ON a.id = j.value WHERE a.id IS NULL OR a.ended_at IS NOT NULL OR a.until <= ?)`,
+      binds: [row.rev, row.scope, row.name, row.rev, t, JSON.stringify(standing?.ids ?? []), t], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
     if (!done) {
       await this.revokeChild(row, m.id, m.expires_at);

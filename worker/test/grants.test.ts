@@ -783,3 +783,25 @@ test("a standing approval can't run past 24 hours", async () => {
   const [a] = (await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json()).approvals;
   assert.equal(Date.parse(a.until) - Date.parse("2026-10-20T12:00:00Z"), 24 * 3600_000);
 });
+
+test("ending a standing approval, or its expiry, while its mint runs wins: the child is deleted, never handed out", async () => {
+  for (const race of ["end", "expire"]) {
+    const s = await setup();
+    await s.env();
+    await approve(s, await stepUp(s), 60);
+    s.tick(50); await s.grants.sweep(); // the approved child is gone; the next write rides the approval
+    const mint = s.fake.provider.mint;
+    s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+      if (race === "end") {
+        const [ap] = (await (await s.call("GET", "/admin/api/grants", undefined, undefined, "vu@example.com")).json()).approvals;
+        await s.call("DELETE", `/admin/api/approvals/${ap.id}`, undefined, undefined, "vu@example.com");
+      } else s.tick(11);
+      return mint(...a);
+    };
+    const r = await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+    assert.equal(r.status, 409, race);
+    assert.ok(s.fake.revoked.includes(`id-${s.fake.n}`), race); // the mid-race child was deleted
+    s.fake.provider.mint = mint;
+    assert.equal((await stepUp(s)).state, "pending", race);
+  }
+});
