@@ -243,7 +243,9 @@ export class Catalog {
       const projects = t.projects!.filter((p) => p !== from);
       if (!pinReaches(projects, to)) projects.push(to);
       if (projects.length === t.projects!.length && projects.every((p, i) => p === t.projects![i])) continue;
-      await this.setPin(t.name, projects);
+      // Not setPin(): `to` is already checked, and other pre-environment entries a token still holds
+      // must not block moving this one (they're moved by their own runs).
+      await this.db.prepare("UPDATE tokens SET projects = ? WHERE name = ? AND revoked_at IS NULL").bind(JSON.stringify(projects), t.name).run();
       repinned.push({ name: t.name, projects });
     }
     return { moved: results.map((r) => ({ name: r.name as string, kind: r.kind as string })), repinned };

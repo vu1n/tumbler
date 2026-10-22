@@ -247,5 +247,13 @@ test("keys in a deployment named before environments were fixed can still be mov
   const r = await admin(deps, "scopes/move", { method: "POST", as: "vu@example.com", body: JSON.stringify({ from: "huddles/qa", to: "huddles/staging" }) });
   assert.deepEqual((await r.json()).moved, ["DATABASE_URL"]);
   assert.equal(await catalog.value((await catalog.keyRow("huddles/staging", "DATABASE_URL"))!), "qa-db");
+  // A token holding another old name too is repinned for this one; the other waits for its own move.
+  db.raw.prepare("INSERT INTO tokens (name, hash, projects, created_at) VALUES ('legacy', 'h', ?, '2026-10-22T00:00:00Z')").run(JSON.stringify(["huddles/qa", "other/qa"]));
+  const { iv: iv2, ciphertext: ct2 } = await seal(catalog.key, "huddles/qa", "OTHER", "x");
+  db.raw.prepare("INSERT INTO keys (scope, name, iv, ciphertext, created_at, rotated_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("huddles/qa", "OTHER", iv2, ct2, "2026-10-22T00:00:00Z", "2026-10-22T00:00:00Z");
+  const again = await admin(deps, "scopes/move", { method: "POST", as: "vu@example.com", body: JSON.stringify({ from: "huddles/qa", to: "huddles/dev" }) });
+  assert.deepEqual((await again.json()).repinned, ["legacy"]);
+  assert.deepEqual((await catalog.tokens()).find((t) => t.name === "legacy")!.projects, ["other/qa", "huddles/dev"]);
   assert.equal((await admin(deps, "scopes/move", { method: "POST", as: "vu@example.com", body: JSON.stringify({ from: "huddles", to: "huddles/qa" }) })).status, 400);
 });
