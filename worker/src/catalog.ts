@@ -17,6 +17,14 @@ export function checkScope(scope: string) {
   if (scope !== GLOBAL && !PROJECT.test(scope)) throw new Refused(400, `invalid scope: ${scope}`);
 }
 
+function checkPin(projects: string[] | null) {
+  for (const p of projects ?? []) { checkScope(p); if (p === GLOBAL) throw new Refused(400, "pin projects, not global"); }
+}
+
+// Whether a pin still reaches a project; a grant on one it no longer reaches is ended.
+export const pinReaches = (projects: string[] | null, project: string | null) =>
+  project === null || (projects?.includes(project) ?? false);
+
 export interface Caller { name: string; projects: string[] | null; expires_at?: string | null }
 export interface KeyRow {
   scope: string; name: string; kind: string; config: string; description: string; owner: string;
@@ -54,7 +62,7 @@ export class Catalog {
   // token lives until revoked, as every token made before expiry existed does.
   async createToken(name: string, projects: string[] | null, expiresAt: string | null = null): Promise<string> {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
-    for (const p of projects ?? []) { checkScope(p); if (p === GLOBAL) throw new Refused(400, "pin projects, not global"); }
+    checkPin(projects);
     let expires: string | null = null;
     if (expiresAt !== null) {
       const t = Date.parse(expiresAt);
@@ -67,6 +75,15 @@ export class Catalog {
       .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), now(), expires).run()
       .catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} exists`) : e; });
     return token;
+  }
+
+  // Changes which projects a live token reads, so widening one never means minting a new token and
+  // re-entering the network secret that carries it. null = global keys only.
+  async setPin(name: string, projects: string[] | null) {
+    checkPin(projects);
+    const r = await this.db.prepare("UPDATE tokens SET projects = ? WHERE name = ? AND revoked_at IS NULL")
+      .bind(projects === null ? null : JSON.stringify(projects), name).run();
+    if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
   }
 
   // True when this call revoked it; false when it was already revoked, so a retry still reaches the
@@ -160,7 +177,8 @@ export class Catalog {
   }
 
   // The project the caller reads as. Identity comes from the token, never the request: a pinned
-  // token may pick among its pins (or defaults to its only one); anything else is refused.
+  // token may pick among its pins (or defaults to its only one; with several, to globals only);
+  // any other project is refused.
   scopeFor(caller: Caller, requested: string | null): string | null {
     if (caller.projects === null) {
       if (requested) throw new Refused(403, "this token reads global keys only");
@@ -171,7 +189,9 @@ export class Catalog {
       return requested;
     }
     if (caller.projects.length === 1) return caller.projects[0];
-    throw new Refused(400, "this token is pinned to several projects; pass ?project=");
+    // Why not refuse: one agent token serves many repos, and a repo with no `.tumbler` project
+    // still needs its global keys. Globals are what every token reads anyway.
+    return null;
   }
 
   // Values for `names` (or every visible key when empty), project rows over global rows. A minted

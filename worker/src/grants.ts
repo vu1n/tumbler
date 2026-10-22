@@ -4,7 +4,7 @@
 // machine.ts holds the states and what moves between them, and apply() is the only writer.
 //
 // Only `active` ever yields a credential. Every other state, and every failure, yields none.
-import { type Caller, type Catalog, Refused } from "./catalog.ts";
+import { type Caller, type Catalog, pinReaches, Refused } from "./catalog.ts";
 import { open, seal } from "./crypto.ts";
 import { autoApproved, type GrantEvent, type GrantState, isLive, transition } from "./machine.ts";
 import type { Outcome } from "./verify.ts";
@@ -144,6 +144,12 @@ export class Grants {
   async closeCaller(caller: string, who: string) {
     const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND ${LIVE}`).bind(caller).all<any>();
     for (const r of results) await this.close(parse(r), "revoked", who);
+  }
+
+  // After a token's pin narrows: its children minted for a project it no longer reaches stop now.
+  async closeOutsidePin(caller: string, projects: string[] | null, who: string) {
+    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND project IS NOT NULL AND ${LIVE}`).bind(caller).all<any>();
+    for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who);
   }
 
   // Live grants whose caller token is revoked (closeCaller after the revoke was interrupted) or has

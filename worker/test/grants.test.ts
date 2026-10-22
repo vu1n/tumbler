@@ -233,6 +233,16 @@ test("revoking a caller token, deleting a key or rotating its parent ends live g
   assert.deepEqual(s.fake.revoked, ["id-1", "id-2", "id-3"]);
 });
 
+test("narrowing a token's pin ends the children it holds for projects it no longer reaches", async () => {
+  const s = await setup();
+  await s.env();
+  await s.call("PATCH", "/admin/api/tokens/dev", undefined, { projects: ["dev", "kypp"] }, "vu@example.com");
+  assert.deepEqual(s.fake.revoked, []); // still reaches dev: its child keeps working
+  await s.call("PATCH", "/admin/api/tokens/dev", undefined, { projects: ["kypp"] }, "vu@example.com");
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await s.call("GET", "/v1/env?project=dev&keys=CLOUDFLARE_API_TOKEN", s.dev)).status, 403);
+});
+
 test("a revoke during a first mint sticks: the claim is not deleted, so the next read still waits", async () => {
   const s = await setup();
   const mint = s.fake.provider.mint;

@@ -89,7 +89,14 @@ async function load() {
     return tr; }));
   document.getElementById('tokens').replaceChildren(...tokens.map(t => { const tr = document.createElement('tr');
     const expired = t.expires_at && Date.parse(t.expires_at) <= Date.now();
-    tr.append(td(t.name), td(t.projects ? t.projects.join(', ') : 'global only'), td(day(t.created_at)),
+    // A pin is edited in place, so reaching one more project never means a new token.
+    const pin = btn(t.projects ? t.projects.join(', ') : 'global only', async () => {
+      const next = prompt('Projects ' + t.name + ' reads, comma-separated (empty = global only). With several, a command that names none reads globals only.', (t.projects ?? []).join(', '));
+      if (next === null) return;
+      try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ projects: next.split(',').map(s => s.trim()).filter(Boolean) }) }); } catch (err) { alert(err.message); }
+      load(); });
+    pin.firstChild.title = 'Edit pin';
+    tr.append(td(t.name), t.revoked_at ? td(t.projects ? t.projects.join(', ') : 'global only') : pin, td(day(t.created_at)),
       td(t.expires_at ? (expired ? 'expired ' : '') + t.expires_at.slice(0, 16).replace('T', ' ') + ' UTC' : 'never', expired ? 'muted' : ''),
       t.revoked_at ? td('revoked ' + day(t.revoked_at), 'muted') : btn('Revoke', async () => { if (confirm('Revoke ' + t.name + '?')) { await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }); load(); } }));
     return tr; }));

@@ -230,6 +230,14 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       await catalog.audit(who, "token-create", null, [String(b.name)]);
       return json({ name: b.name, token }); // shown once
     }
+    if (m === "PATCH" && parts.length === 2) {
+      const b = await body();
+      const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
+      await catalog.setPin(parts[1], projects?.length ? projects : null);
+      await grants?.closeOutsidePin(parts[1], projects?.length ? projects : null, who);
+      await catalog.audit(who, "token-pin", null, [parts[1], ...(projects ?? ["global-only"])]);
+      return json({ ok: true });
+    }
     if (m === "DELETE" && parts.length === 2) {
       const fresh = await catalog.revokeToken(parts[1]);
       await grants?.closeCaller(parts[1], who); // its children stop working now, not at expiry
