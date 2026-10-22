@@ -305,11 +305,14 @@ export class Grants {
   // caller's token is still unrevoked and unexpired (a revoke, or the expiry, can land between
   // authenticating and storing).
   // Otherwise the new child is deleted at the provider and nothing is handed out.
+  // Why the pin is rechecked here: a request authorized before an admin narrowed the token's pin
+  // may reach this after closeOutsidePin() scanned, and must not activate a child for a lost project.
   async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(g.id), row.name, m.value);
     const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who }, {
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
-        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?))`,
+        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
+          AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value = grants.project)))`,
       binds: [row.rev, row.scope, row.name, row.rev, this.now().toISOString()], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
     if (!done) {

@@ -243,6 +243,22 @@ test("narrowing a token's pin ends the children it holds for projects it no long
   assert.equal((await s.call("GET", "/v1/env?project=dev&keys=CLOUDFLARE_API_TOKEN", s.dev)).status, 403);
 });
 
+test("a pin narrowed while a first mint runs: the child is deleted, never handed out", async () => {
+  const s = await setup();
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+    // The pin changes after this request's grant was opened but where the cleanup's scan missed it:
+    // only store()'s own check stands between it and the child.
+    await s.catalog.setPin("dev", ["kypp"]);
+    return mint(...a);
+  };
+  const r = await s.env();
+  s.fake.provider.mint = mint;
+  assert.equal(r.status, 409);
+  assert.doesNotMatch(await r.text(), /child-/);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
 test("a revoke during a first mint sticks: the claim is not deleted, so the next read still waits", async () => {
   const s = await setup();
   const mint = s.fake.provider.mint;
