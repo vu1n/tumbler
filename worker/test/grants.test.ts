@@ -38,6 +38,7 @@ async function setup() {
   const fake = fakeProvider();
   let clock = Date.parse("2026-10-20T12:00:00Z");
   const grants = new Grants(catalog, { cloudflare: fake.provider }, () => new Date(clock));
+  catalog.clock = () => new Date(clock);
   await catalog.put("global", "AWS_REGION", "us-east-1");
   await catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
   const dev = await catalog.createToken("dev", ["dev"]), other = await catalog.createToken("other", ["dev"]);
@@ -443,6 +444,52 @@ test("the sweep ends live grants of a revoked caller nobody retried", async () =
   await s.grants.sweep();
   assert.deepEqual(s.fake.revoked, ["id-1"]);
   assert.equal((await adminGrants(s))[0].state, "revoked");
+});
+
+test("an expiring caller token works until its expiry, then stops at once; the sweep ends its grants", async () => {
+  const s = await setup(), admin = "vu@example.com";
+  const r = await (await s.call("POST", "/admin/api/tokens", undefined, { name: "pilot", projects: ["dev"], expires_at: "2026-10-20T13:00:00Z" }, admin)).json();
+  const listed = (await (await s.call("GET", "/admin/api/tokens", undefined, undefined, admin)).json()).tokens;
+  assert.equal(listed.find((t: any) => t.name === "pilot").expires_at, "2026-10-20T13:00:00.000Z");
+  assert.equal(listed.find((t: any) => t.name === "dev").expires_at, null);
+  assert.equal((await (await s.call("GET", "/v1/whoami", r.token)).json()).expires_at, "2026-10-20T13:00:00.000Z");
+  s.tick(59);
+  assert.equal((await s.env(r.token)).status, 200); // a minute before expiry: still works, and holds a grant
+  s.tick(1);
+  assert.equal((await s.env(r.token)).status, 401); // at expiry: refused before any sweep runs
+  assert.equal((await s.env()).status, 200);        // a token without expiry is untouched
+  assert.equal((await adminGrants(s)).filter((g: any) => g.caller === "pilot" && g.state === "active").length, 1);
+  // The first sweep dies mid-cleanup; the next one finishes it.
+  const close = s.grants.close.bind(s.grants);
+  s.grants.close = async () => { throw new Error("worker died"); };
+  await assert.rejects(s.grants.sweep());
+  s.grants.close = close;
+  await s.grants.sweep();
+  const mine = (await adminGrants(s)).filter((g: any) => g.caller === "pilot");
+  assert.deepEqual(mine.map((g: any) => [g.state, g.decided_by]), [["revoked", "token-expiry"]]);
+  assert.ok(s.fake.revoked.includes("id-1")); // its child is deleted at the provider
+  assert.equal((await adminGrants(s)).filter((g: any) => g.caller === "dev" && g.state === "active").length, 1);
+});
+
+test("a token that expires while its child is being minted gets nothing, and the child is deleted", async () => {
+  const s = await setup();
+  const r = await (await s.call("POST", "/admin/api/tokens", undefined, { name: "pilot", projects: ["dev"], expires_at: "2026-10-20T12:30:00Z" }, "vu@example.com")).json();
+  s.tick(29);
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => { s.tick(2); return mint(...a); }; // the mint outlives the expiry
+  const res = await s.env(r.token);
+  s.fake.provider.mint = mint;
+  assert.equal(res.status, 409);
+  assert.doesNotMatch(await res.text(), /child-1/);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
+test("an expiry must be a valid time in the future", async () => {
+  const s = await setup(), admin = "vu@example.com";
+  const create = (expires_at: unknown) => s.call("POST", "/admin/api/tokens", undefined, { name: "t" + String(expires_at).length, expires_at }, admin);
+  assert.equal((await create("not a time")).status, 400);
+  assert.equal((await create("2026-10-20T11:00:00Z")).status, 400); // the past
+  assert.equal((await create("")).status, 200);                     // empty means never
 });
 
 test("a failed delete at the provider is queued, shown in /admin, and retried by the sweep", async () => {

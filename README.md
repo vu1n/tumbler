@@ -51,6 +51,13 @@ The admin API checks the Access JWT itself, so a gap in the Access policy (or a 
 
 A different project gets its own environment with its own pinned token.
 
+A token can carry an expiry (set "expires in hours" when you create it; `tumbler whoami` shows it),
+for a pilot or anything else time-bound. From that moment the broker refuses it, and the next sweep
+(every five minutes) ends the grants it holds and deletes their children at the provider. Expiry
+can't take back what was already handed out: a static value a command received stays valid until you
+rotate it, and a CLI's cache can hold values it fetched before the expiry for up to its TTL. Tokens
+without an expiry live until revoked.
+
 Elsewhere (your laptop, CI), set `TUMBLER_URL` and `TUMBLER_TOKEN` instead of the network secret.
 
 ## CLI

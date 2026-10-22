@@ -94,7 +94,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     return json({ project, checks });
   }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
-  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects });
+  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, expires_at: caller.expires_at ?? null });
   // Names only: listing must not mint a child for every minted key.
   if (url.pathname === "/v1/keys") {
     const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
@@ -226,7 +226,7 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     if (m === "POST" && parts.length === 1) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
-      const token = await catalog.createToken(String(b.name ?? ""), projects);
+      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at));
       await catalog.audit(who, "token-create", null, [String(b.name)]);
       return json({ name: b.name, token }); // shown once
     }

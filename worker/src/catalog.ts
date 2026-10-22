@@ -17,13 +17,13 @@ export function checkScope(scope: string) {
   if (scope !== GLOBAL && !PROJECT.test(scope)) throw new Refused(400, `invalid scope: ${scope}`);
 }
 
-export interface Caller { name: string; projects: string[] | null }
+export interface Caller { name: string; projects: string[] | null; expires_at?: string | null }
 export interface KeyRow {
   scope: string; name: string; kind: string; config: string; description: string; owner: string;
   created_at: string; rotated_at: string; expires_at: string | null; checked: number;
 }
 export interface MintRow { scope: string; name: string; kind: string; config: string; rev: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }
-export interface TokenRow { name: string; projects: string[] | null; created_at: string; revoked_at: string | null }
+export interface TokenRow { name: string; projects: string[] | null; created_at: string; revoked_at: string | null; expires_at: string | null }
 
 const now = () => new Date().toISOString();
 // Children live at most 24h (MAX_TTL_MIN in grants.ts); a retired parent is kept a little longer.
@@ -32,6 +32,7 @@ const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as 
 
 export class Catalog {
   db: D1Database; key: CryptoKey;
+  clock: () => Date = () => new Date(); // what token expiry is checked against; tests move it
   constructor(db: D1Database, key: CryptoKey) { this.db = db; this.key = key; }
 
   async audit(actor: string, action: string, project: string | null, names: string[] = []) {
@@ -42,18 +43,28 @@ export class Catalog {
   // --- caller tokens ---
 
   async caller(token: string): Promise<Caller | null> {
-    const row = await this.db.prepare("SELECT name, projects FROM tokens WHERE hash = ? AND revoked_at IS NULL")
-      .bind(await sha256hex(token)).first<{ name: string; projects: string | null }>();
-    return row ? { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects) } : null;
+    // Why here and not only in the sweep: an expired token must stop at its expiry, not up to one
+    // sweep later. The sweep then ends the grants it still holds.
+    const row = await this.db.prepare("SELECT name, projects, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
+      .bind(await sha256hex(token), this.clock().toISOString()).first<{ name: string; projects: string | null; expires_at: string | null }>();
+    return row ? { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects), expires_at: row.expires_at } : null;
   }
 
-  // Returns the token once; only its hash is stored.
-  async createToken(name: string, projects: string[] | null): Promise<string> {
+  // Returns the token once; only its hash is stored. expiresAt (ISO time) is optional: without it the
+  // token lives until revoked, as every token made before expiry existed does.
+  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null): Promise<string> {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     for (const p of projects ?? []) { checkScope(p); if (p === GLOBAL) throw new Refused(400, "pin projects, not global"); }
+    let expires: string | null = null;
+    if (expiresAt !== null) {
+      const t = Date.parse(expiresAt);
+      if (Number.isNaN(t)) throw new Refused(400, `invalid expiry: ${expiresAt}`);
+      if (t <= this.clock().getTime()) throw new Refused(400, "expiry must be in the future");
+      expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
+    }
     const token = randomToken();
-    await this.db.prepare("INSERT INTO tokens (name, hash, projects, created_at) VALUES (?, ?, ?, ?)")
-      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), now()).run()
+    await this.db.prepare("INSERT INTO tokens (name, hash, projects, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), now(), expires).run()
       .catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} exists`) : e; });
     return token;
   }
@@ -68,7 +79,7 @@ export class Catalog {
   }
 
   async tokens(): Promise<TokenRow[]> {
-    const { results } = await this.db.prepare("SELECT name, projects, created_at, revoked_at FROM tokens ORDER BY name").all<any>();
+    const { results } = await this.db.prepare("SELECT name, projects, created_at, revoked_at, expires_at FROM tokens ORDER BY name").all<any>();
     return results.map((r) => ({ ...r, projects: r.projects === null ? null : JSON.parse(r.projects) }));
   }
 

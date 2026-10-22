@@ -146,12 +146,15 @@ export class Grants {
     for (const r of results) await this.close(parse(r), "revoked", who);
   }
 
-  // Live grants whose caller token is revoked: closeCaller after the revoke was interrupted.
+  // Live grants whose caller token is revoked (closeCaller after the revoke was interrupted) or has
+  // expired. Expiry has no request to hang the cleanup on, so the sweep is where its grants end; it
+  // re-reads every time, so a cleanup cut short is finished by the next one.
   async closeRevokedCallers() {
     const { results } = await this.db.prepare(
-      `SELECT g.* FROM grants g JOIN tokens t ON t.name = g.caller WHERE g.${LIVE} AND t.revoked_at IS NOT NULL`,
-    ).all<any>();
-    for (const r of results) await this.close(parse(r), "revoked", "system");
+      `SELECT g.*, t.revoked_at IS NOT NULL AS by_revoke FROM grants g JOIN tokens t ON t.name = g.caller
+         WHERE g.${LIVE} AND (t.revoked_at IS NOT NULL OR t.expires_at <= ?)`,
+    ).bind(this.now().toISOString()).all<any>();
+    for (const { by_revoke, ...r } of results) await this.close(parse(r), "revoked", by_revoke ? "system" : "token-expiry");
     return results.length;
   }
 
@@ -293,14 +296,15 @@ export class Grants {
   // The new child lands only if the grant is still in the state `g` was read in: still live, holding
   // the child it held when minting began, with the request this mint answers still the one pending
   // (a deny or lapse clears it). Also the key is still at the revision that minted it, and the
-  // caller's token is still unrevoked (a revoke can land between authenticating and storing).
+  // caller's token is still unrevoked and unexpired (a revoke, or the expiry, can land between
+  // authenticating and storing).
   // Otherwise the new child is deleted at the provider and nothing is handed out.
   async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(g.id), row.name, m.value);
     const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who }, {
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
-        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL)`,
-      binds: [row.rev, row.scope, row.name, row.rev], store: { iv, ciphertext },
+        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?))`,
+      binds: [row.rev, row.scope, row.name, row.rev, this.now().toISOString()], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
     if (!done) {
       await this.revokeChild(row, m.id, m.expires_at);
