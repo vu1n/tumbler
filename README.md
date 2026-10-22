@@ -58,6 +58,18 @@ token pinned to one project reads it by default; one pinned to several reads glo
 command names one of them (`-p`, `TUMBLER_PROJECT`, or a repo's `.tumbler`), so one agent token can
 serve many repos and each repo's `.tumbler` picks its project.
 
+A scope is `global`, a project (`huddles`), or one of its deployments (`huddles/prod`,
+`huddles/dev`). A deployment reads its own keys first, then its project's, then global ones, so shared
+keys go on the project and only what differs goes on each deployment. A pin names exactly what it
+reads: a token pinned to `huddles` doesn't reach `huddles/prod`, and one pinned to `huddles/prod`
+reads the project's keys through prod but can't ask for `huddles` on its own. Pin dev and prod agents
+to their deployments so a dev token never sees a prod key. To turn a flat project into a deployment
+(`huddles-dev` into `huddles/dev`), use Move in `/admin` (`POST /admin/api/scopes/move {"from", "to"}`):
+it reseals every key under the new scope without re-entering values, repoints the pins that named
+the old one, and ends the minted children on the moved keys (the next read mints fresh ones). The old
+name stops resolving, so change `project =` in any `.tumbler` that names it. Until you move it, a
+flat project such as `huddles-dev` keeps working as before.
+
 A token can carry an expiry (set "expires in hours" when you create it; `tumbler whoami` shows it),
 for a pilot or anything else time-bound. From that moment the broker refuses it, and the next sweep
 (every five minutes) ends the grants it holds and deletes their children at the provider. Expiry

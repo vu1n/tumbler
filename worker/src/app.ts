@@ -185,9 +185,9 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         const value = String(b.value ?? "");
         if (effective !== "static") {
           if (!grants) return json({ error: "minting is off" }, 501);
-          // A static key the admin saved, read here and never returned: the scope's, else global.
+          // A static key the admin saved, read here and never returned: the nearest of the scope's chain.
           const setting = async (n: string) => {
-            const row = (scope !== GLOBAL ? await catalog.keyRow(scope, n) : null) ?? await catalog.keyRow(GLOBAL, n);
+            const row = await catalog.nearest(scope === GLOBAL ? null : scope, n);
             return row && row.kind === "static" ? await catalog.value(row) : undefined;
           };
           if (value) cfg = await grants.prepare(effective, value, cfg, setting);
@@ -220,6 +220,18 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         return json({ ok: true });
       }
     }
+  }
+  // Move a scope's keys and pins: {"from": "huddles-dev", "to": "huddles/dev"}. Names out, never values.
+  if (parts[0] === "scopes" && parts[1] === "move" && parts.length === 2 && m === "POST") {
+    const b = await body(), from = String(b.from ?? ""), to = String(b.to ?? "");
+    const { moved, repinned } = await catalog.moveScope(from, to);
+    // The moved mint keys' children and every grant read as `from` stop now. A rerun after a crash
+    // repeats both; the sweep's closeStale() also catches moved keys a crash left behind.
+    for (const k of moved) if (k.kind !== "static") await grants?.closeStale(from, k.name);
+    // "system": a migration must not block the next grant the way an admin's revoke does (blocked()).
+    await grants?.closeProject(from, "system");
+    await catalog.audit(who, "scope-move", to, [from, ...moved.map((k) => k.name)]);
+    return json({ from, to, moved: moved.map((k) => k.name), repinned: repinned.map((t) => t.name) });
   }
   if (parts[0] === "tokens") {
     if (m === "GET" && parts.length === 1) return json({ tokens: await catalog.tokens() });

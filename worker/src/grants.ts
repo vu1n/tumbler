@@ -166,6 +166,13 @@ export class Grants {
     for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who);
   }
 
+  // After a scope move: no token reads as `project` any more, so every grant read as it ends. By
+  // project, not by the tokens a move repinned, so a retry of a move cut short still finds them.
+  async closeProject(project: string, who: string) {
+    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE project = ? AND ${LIVE}`).bind(project).all<any>();
+    for (const r of results) await this.close(parse(r), "revoked", who);
+  }
+
   // Live grants whose caller token is revoked (closeCaller after the revoke was interrupted) or has
   // expired. Expiry has no request to hang the cleanup on, so the sweep is where its grants end; it
   // re-reads every time, so a cleanup cut short is finished by the next one.

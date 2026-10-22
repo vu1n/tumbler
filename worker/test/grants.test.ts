@@ -700,6 +700,29 @@ test("/v1/env tells the client how long it may cache a minted child, and nothing
   assert.equal("max_age" in (await (await t.env(t.dev, "AWS_REGION")).json()), false);
 });
 
+test("moving a scope ends the children minted from its keys; the next read mints from the moved key", async () => {
+  const s = await setup();
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+  const r = await s.call("POST", "/admin/api/scopes/move", undefined, { from: "dev", to: "dev/staging" }, "vu@example.com");
+  assert.equal(r.status, 200);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await s.call("GET", "/v1/env?keys=CLOUDFLARE_API_TOKEN", s.dev)).status, 200);
+  assert.deepEqual(s.fake.minted.map((m) => m.parent), [PARENT, PARENT]);
+});
+
+test("a move ends grants read as the old scope on keys that didn't move, even when a first attempt already repinned", async () => {
+  const s = await setup();
+  await s.catalog.remove("dev", "CLOUDFLARE_API_TOKEN");
+  await s.catalog.put("global", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  await s.env(); // id-1, on the global key, read as dev
+  await s.catalog.setPin("dev", ["dev/staging"]); // an earlier move that crashed after repinning
+  const r = await s.call("POST", "/admin/api/scopes/move", undefined, { from: "dev", to: "dev/staging" }, "vu@example.com");
+  assert.deepEqual((await r.json()).repinned, ["other"]); // "dev" was repinned by the first attempt
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  // A migration isn't a revoke: the moved token's next read mints at once instead of waiting.
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
+});
+
 // Standing approvals: approve once for a while, and the same caller gets the scopes again unasked.
 const approve = (s: Awaited<ReturnType<typeof setup>>, g: any, for_minutes?: number) =>
   s.call("POST", `/admin/api/grants/${g.id}/approve`, undefined, { requested: g.requested, for_minutes }, "vu@example.com");

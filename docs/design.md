@@ -65,7 +65,7 @@ A small Cloudflare Worker, since that's already your stack (kypp runs there):
 
 - **Storage**: secret values encrypted at rest (D1 or KV with an envelope key held as a Worker
   secret; Cloudflare's Secrets Store is worth a look for the global tier).
-- **Resolution**: `GET /v1/env?keys=A,B` returns, for each key, the project value if set, else the
+- **Resolution**: `GET /v1/env?keys=A,B` returns, for each key, the deployment value if set, else the project value, else the
   global value. This is the same override order pillbox already uses (global pillbox, then project
   pillbox), so the two stay consistent and pillbox's vault can later read from the same broker.
 - **Identity comes from the credential, never the request.** Each caller token is pinned to the
@@ -173,7 +173,7 @@ A D1 table that describes every key. Values are never in it.
 | field | purpose |
 |---|---|
 | `name` | env var name, such as `AWS_ACCESS_KEY_ID` |
-| `scope` | `global`, or a project name for an override |
+| `scope` | `global`, a project (`huddles`), or a deployment (`huddles/prod`); a deployment overrides its project, which overrides global |
 | `kind` | `static`, or a minting provider such as `aws-sts`, `cloudflare-token`, `openrouter`, `tailscale`, `oauth:<provider>` |
 | `policy` | for minted keys: permissions or role, max TTL, spend limit |
 | `ref` | where the value lives (D1 ciphertext id or Secrets Store name) |
