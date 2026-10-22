@@ -21,11 +21,15 @@ export const CHOICES: Record<string, number> = {
   "Approve for 1 hour": 60, "Approve for 8 hours": 480, "Approve for 24 hours": 1440, "Approve this token only": 0, "Deny": -1,
 };
 
+export const HUDDLES_TIMEOUT_MS = 5_000;
+
 export function huddlesClient(cfg: HuddlesConfig, fetcher: typeof fetch = fetch): HuddlesCall {
   const base = cfg.url.replace(/\/+$/, "");
   return async (route, body) => {
+    // A deadline on the whole exchange, body included, so a stalled Huddles can't hold a caller's
+    // run or an /admin click: the error path leaves the grant waiting.
     const r = await fetcher(`${base}/net/v1/${route}`, {
-      method: "POST", body: JSON.stringify(body),
+      method: "POST", body: JSON.stringify(body), signal: AbortSignal.timeout(HUDDLES_TIMEOUT_MS),
       headers: { authorization: `Bearer ${cfg.token}`, "content-type": "application/json" },
     });
     if (!r.ok) throw new Error(`huddles ${route}: ${r.status}`); // the status only, never the body
@@ -62,7 +66,11 @@ export class Asks implements Approver {
   async settle(g: GrantRow): Promise<GrantRow | null> {
     if (!g.requested || !isLive(g.state)) return null;
     try {
-      const open = await this.openAsk(g.id);
+      let open = await this.openAsk(g.id);
+      if (open && isClaim(open)) {
+        if (!(await this.dropStale(open))) return null; // another run is posting it
+        open = null;
+      }
       if (open && current(open, g)) return await this.check(g, open);
       if (open) await this.withdraw(open, "the request changed; a new ask follows");
       await this.ask(g);
@@ -78,7 +86,8 @@ export class Asks implements Approver {
     for (const r of results) {
       try {
         const ask = toRow(r), g = await this.grants.get(ask.grant_id);
-        if (g && isLive(g.state) && g.requested && current(ask, g)) await this.check(g, ask);
+        if (isClaim(ask)) await this.dropStale(ask);
+        else if (g && isLive(g.state) && g.requested && current(ask, g)) await this.check(g, ask);
         else if (!(await this.reconcile(ask))) await this.withdraw(ask, "the request was decided or changed");
       } catch (e) {
         console.error("tumbler: huddles ask check failed", errorClass(e));
@@ -88,7 +97,7 @@ export class Asks implements Approver {
 
   async decided(grantId: string) {
     const open = await this.openAsk(grantId);
-    if (open) await this.withdraw(open, "decided in /admin");
+    if (open && !isClaim(open)) await this.withdraw(open, "decided in /admin"); // a claim: the cron withdraws it once posted
   }
 
   async whoami(): Promise<Me> {
@@ -104,20 +113,30 @@ export class Asks implements Approver {
     const me = await this.whoami(), room = this.room ?? `tumbler-approvals-${me.actor.id}`;
     const request: AskRequest = { grant: g.id, caller: g.caller, project: g.project, key: g.name, scopes: g.requested!, held: g.scopes };
     const expires = new Date(Date.parse(g.requested_at ?? this.now()) + PENDING_TTL_MS).toISOString();
+    // Claim the grant's one open ask before posting, so two runs overlapping can't both post one.
+    const claim = `claim_${crypto.randomUUID()}`;
+    const won = await this.db.prepare("INSERT OR IGNORE INTO grant_asks (ask_id, grant_id, room_id, requested, request_at, request, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(claim, g.id, room, JSON.stringify(g.requested), g.requested_at, JSON.stringify(request), this.now()).run();
+    if (!won.meta.changes) return;
     const commit = () => this.call("rooms/commit", {
       room_id: room, base_seq: 0, origin: "auto", attribution: me,
       items: [{ verb: "ask", question: describe(request), resolver: me.on_behalf_of,
         response_schema: { type: "string", enum: Object.keys(CHOICES) }, expires_at: expires }],
     });
-    const r = await commit().catch(async (e) => {
-      if (this.room) throw e;
-      await this.call("rooms/create", { room_id: room }).catch(() => {}); // already there: the retry says
-      return commit();
-    });
-    const askId = r?.status === "committed" ? r.result.outcomes[0]?.minted?.ask_id : undefined;
-    if (!askId) throw new Error("huddles ask not accepted");
-    await this.db.prepare("INSERT INTO grant_asks (ask_id, grant_id, room_id, requested, request_at, request, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(askId, g.id, room, JSON.stringify(g.requested), g.requested_at, JSON.stringify(request), this.now()).run();
+    let askId: string | undefined;
+    try {
+      const r = await commit().catch(async (e) => {
+        if (this.room) throw e;
+        await this.call("rooms/create", { room_id: room }).catch(() => {}); // already there: the retry says
+        return commit();
+      });
+      askId = r?.status === "committed" ? r.result.outcomes[0]?.minted?.ask_id : undefined;
+      if (!askId) throw new Error("huddles ask not accepted");
+    } catch (e) {
+      await this.db.prepare("DELETE FROM grant_asks WHERE ask_id = ?").bind(claim).run();
+      throw e;
+    }
+    await this.db.prepare("UPDATE grant_asks SET ask_id = ?, asked_at = ? WHERE ask_id = ?").bind(askId, this.now(), claim).run();
     await this.grants.catalog.audit("huddles", "grant-ask", g.project, [`${g.name}:${g.requested!.join("+")}`, g.id, askId]);
   }
 
@@ -176,6 +195,13 @@ export class Asks implements Approver {
     await this.mark(ask, "withdrawn");
   }
 
+  // A claim left by a run that died while posting: dropped after CLAIM_MS, so the grant is asked again.
+  async dropStale(claim: AskRow): Promise<boolean> {
+    if (Date.parse(this.now()) - Date.parse(claim.asked_at) < CLAIM_MS) return false;
+    await this.db.prepare("DELETE FROM grant_asks WHERE ask_id = ? AND state = 'open'").bind(claim.ask_id).run();
+    return true;
+  }
+
   async openAsk(grantId: string): Promise<AskRow | null> {
     const r = await this.db.prepare("SELECT * FROM grant_asks WHERE grant_id = ? AND state = 'open' ORDER BY asked_at DESC LIMIT 1").bind(grantId).first<any>();
     return r ? toRow(r) : null;
@@ -187,6 +213,8 @@ export class Asks implements Approver {
   }
 }
 
+const CLAIM_MS = 60_000;
+const isClaim = (ask: AskRow) => ask.ask_id.startsWith("claim_");
 const toRow = (r: any): AskRow => ({ ask_id: r.ask_id, grant_id: r.grant_id, room_id: r.room_id, requested: JSON.parse(r.requested), request_at: r.request_at, asked_at: r.asked_at });
 // Whether an ask is for the grant's request as it stands: the same scopes, asked at the same time.
 const current = (ask: AskRow, g: GrantRow) => same(ask.requested, g.requested!) && ask.request_at === g.requested_at;

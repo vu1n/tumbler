@@ -17,3 +17,6 @@ CREATE TABLE grant_asks (
   decision_event INTEGER     -- the grant_events row the answer made, when it was applied
 );
 CREATE INDEX grant_asks_open ON grant_asks (state, grant_id);
+-- One open ask per grant. A run claims it (ask_id claim_…) before posting, so overlapping runs
+-- can't post two asks for one request.
+CREATE UNIQUE INDEX grant_asks_one_open ON grant_asks (grant_id) WHERE state = 'open';

@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { handle } from "../src/app.ts";
-import { Asks, CHOICES, type HuddlesCall } from "../src/asks.ts";
+import { Asks, CHOICES, huddlesClient, type HuddlesCall } from "../src/asks.ts";
 import { Catalog } from "../src/catalog.ts";
 import { masterKey } from "../src/crypto.ts";
 import { Grants, type Provider } from "../src/grants.ts";
@@ -26,6 +26,7 @@ function fakeHuddles() {
       assert.deepEqual(body.attribution, ME);
       if (!h.rooms.has(body.room_id)) throw new Error("huddles rooms/commit: 404");
       if (item.verb === "ask") {
+        if (h.slow) await new Promise((r) => setTimeout(r, 5)); // so overlapping runs really overlap
         const ask_id = `ask_${++h.n}`;
         h.asks.set(ask_id, { ...item, ask_id, room: body.room_id, state: "open" });
         return { status: "committed", result: { outcomes: [{ index: 0, outcome: "accepted", minted: { ask_id } }] } };
@@ -219,6 +220,38 @@ test("the label follows the grant's log: a lost race or a crash before marking s
   await s.grants.sweep();
   row = (await s.asks())[1];
   assert.deepEqual([row.state, row.choice], ["applied", "Approve this token only"]);
+});
+
+test("overlapping runs post one ask for a request, and a claim left by a dead run is dropped", async () => {
+  const s = await setup();
+  await s.env();
+  await s.stepUp();
+  await s.db.prepare("DELETE FROM grant_asks").run(); // as if the first ask never got through
+  s.huddles.asks.clear(); s.huddles.slow = true;
+  const g = (await s.grants.get((await s.admin()).grants[0].id))!;
+  await Promise.all([s.grants.approver!.settle(g), s.grants.approver!.settle(g), s.stepUp()]);
+  assert.equal(s.huddles.open().length, 1);
+  assert.equal((await s.asks()).length, 1);
+  // A run that claimed the ask and died before posting it.
+  const [row] = await s.asks();
+  await s.db.prepare("UPDATE grant_asks SET ask_id = 'claim_dead' WHERE ask_id = ?").bind(row.ask_id).run();
+  s.huddles.asks.clear();
+  await s.stepUp();
+  assert.equal(s.huddles.open().length, 0); // still within the claim's minute
+  s.tick(2);
+  await s.stepUp();
+  assert.equal(s.huddles.open().length, 1);
+});
+
+test("a Huddles call that never answers is cut off, so the run falls back to waiting", async () => {
+  let aborted = false;
+  const hang = ((_url: string, init: RequestInit) => new Promise((_, reject) => {
+    init.signal!.addEventListener("abort", () => { aborted = true; reject(init.signal!.reason); });
+  })) as unknown as typeof fetch;
+  const t = Date.now(), alive = setTimeout(() => {}, 10_000); // the abort timer doesn't hold the loop open
+  await assert.rejects(huddlesClient({ url: "https://h.example", token: "hpc1.x" }, hang)("whoami", {}));
+  clearTimeout(alive);
+  assert.ok(aborted && Date.now() - t < 10_000);
 });
 
 test("with Huddles down the grant still waits and /admin still approves it", async () => {
