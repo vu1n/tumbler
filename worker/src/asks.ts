@@ -4,8 +4,9 @@
 //
 // The line: only that person approves. Huddles refuses an answer to a person's ask from anyone but
 // that person (agents and delegates included), and tumbler checks it again on what it reads back
-// with its own credential: the answer must be to the ask it posted for this grant, by that human,
-// and approval mints only the request the ask showed (decide()'s `expected`). Text in the room
+// with its own credential: the answer must be to the ask it posted for this grant's current request
+// (its scopes and its requested_at, so an answer to a request since denied can't approve the same
+// scopes asked again), by that human, and approval mints only the request the ask showed. Text in the room
 // approves nothing. Any failure here leaves the grant waiting, and /admin still decides it.
 import { Refused } from "./catalog.ts";
 import { errorClass, type Approver, type GrantRow, type Grants, PENDING_TTL_MS } from "./grants.ts";
@@ -40,7 +41,7 @@ export const describe = (r: AskRequest) =>
   `${r.project ? ` on project ${r.project}` : ""}${r.held.length ? ` (it holds ${r.held.join(", ")} now)` : ""}. ` +
   `An approval for a while lets ${r.caller} get these scopes on ${r.key} again without asking until then. Grant ${r.grant}.`;
 
-interface AskRow { ask_id: string; grant_id: string; room_id: string; requested: string[] }
+interface AskRow { ask_id: string; grant_id: string; room_id: string; requested: string[]; request_at: string | null; asked_at: string }
 interface Me { actor: { kind: string; id: string }; on_behalf_of: { kind: "human"; id: string }; via: string }
 
 export class Asks implements Approver {
@@ -62,7 +63,7 @@ export class Asks implements Approver {
     if (!g.requested || !isLive(g.state)) return null;
     try {
       const open = await this.openAsk(g.id);
-      if (open && same(open.requested, g.requested)) return await this.check(g, open);
+      if (open && current(open, g)) return await this.check(g, open);
       if (open) await this.withdraw(open, "the request changed; a new ask follows");
       await this.ask(g);
     } catch (e) {
@@ -77,12 +78,17 @@ export class Asks implements Approver {
     for (const r of results) {
       try {
         const ask = toRow(r), g = await this.grants.get(ask.grant_id);
-        if (!g || !isLive(g.state) || !g.requested || !same(ask.requested, g.requested)) await this.withdraw(ask, "the request was decided or changed");
-        else await this.check(g, ask);
+        if (g && isLive(g.state) && g.requested && current(ask, g)) await this.check(g, ask);
+        else if (!(await this.reconcile(ask))) await this.withdraw(ask, "the request was decided or changed");
       } catch (e) {
         console.error("tumbler: huddles ask check failed", errorClass(e));
       }
     }
+  }
+
+  async decided(grantId: string) {
+    const open = await this.openAsk(grantId);
+    if (open) await this.withdraw(open, "decided in /admin");
   }
 
   async whoami(): Promise<Me> {
@@ -110,8 +116,8 @@ export class Asks implements Approver {
     });
     const askId = r?.status === "committed" ? r.result.outcomes[0]?.minted?.ask_id : undefined;
     if (!askId) throw new Error("huddles ask not accepted");
-    await this.db.prepare("INSERT INTO grant_asks (ask_id, grant_id, room_id, requested, request, asked_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .bind(askId, g.id, room, JSON.stringify(g.requested), JSON.stringify(request), this.now()).run();
+    await this.db.prepare("INSERT INTO grant_asks (ask_id, grant_id, room_id, requested, request_at, request, asked_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .bind(askId, g.id, room, JSON.stringify(g.requested), g.requested_at, JSON.stringify(request), this.now()).run();
     await this.grants.catalog.audit("huddles", "grant-ask", g.project, [`${g.name}:${g.requested!.join("+")}`, g.id, askId]);
   }
 
@@ -128,15 +134,37 @@ export class Asks implements Approver {
     const minutes = answer.outcome === "accept" ? CHOICES[choice] : -1; // decline or cancel denies
     if (minutes === undefined) { await this.mark(ask, "refused", choice, answeredBy); return null; }
     try {
-      const done = await this.grants.decide(g.id, minutes >= 0, `huddles:${by.id}`, ask.requested, Math.max(minutes, 0));
-      await this.mark(ask, "applied", choice, answeredBy);
+      const done = await this.grants.decide(g.id, minutes >= 0, `huddles:${by.id}`, ask.requested, Math.max(minutes, 0), ask.request_at ?? undefined);
+      await this.mark(ask, "applied", choice, answeredBy, await this.decision(ask, by.id));
       return done;
     } catch (e) {
-      // The grant moved on (a rotation, a changed request, /admin got there first): nothing applied.
       if (!(e instanceof Refused)) throw e;
-      await this.mark(ask, "refused", choice, answeredBy);
+      // Another poller may have applied this same answer first; the grant's log says. Otherwise the
+      // grant moved on (a rotation, a changed request, /admin got there first): nothing applied.
+      const event = await this.decision(ask, by.id);
+      await this.mark(ask, event ? "applied" : "refused", choice, answeredBy, event);
       return null;
     }
+  }
+
+  // An ask whose request no longer waits: if its answer was applied (by a poller that died before
+  // marking it), record that instead of withdrawing it, so the label matches what happened.
+  async reconcile(ask: AskRow): Promise<boolean> {
+    const r = await this.call("asks/await", { room_id: ask.room_id, ask_id: ask.ask_id, wait_seconds: 0 });
+    const by = r.answered_by?.actor, me = await this.whoami();
+    if (r.state !== "answered" || by?.kind !== "human" || by.id !== me.on_behalf_of.id) return false;
+    const event = await this.decision(ask, by.id);
+    if (!event) return false;
+    const choice = r.answer?.outcome === "accept" ? String(r.answer.response) : String(r.answer?.outcome);
+    await this.mark(ask, "applied", choice, `human:${by.id}`, event);
+    return true;
+  }
+
+  // The grant_events row of a decision this member made in Huddles since the ask was posted.
+  async decision(ask: AskRow, member: string): Promise<number | null> {
+    const r = await this.db.prepare(`SELECT id FROM grant_events WHERE grant_id = ? AND actor = ? AND type IN ('mint', 'deny') AND at >= ?
+      ORDER BY id DESC LIMIT 1`).bind(ask.grant_id, `huddles:${member}`, ask.asked_at).first<{ id: number }>();
+    return r?.id ?? null;
   }
 
   async withdraw(ask: AskRow, reason: string) {
@@ -153,11 +181,13 @@ export class Asks implements Approver {
     return r ? toRow(r) : null;
   }
 
-  async mark(ask: AskRow, state: string, choice: string | null = null, by: string | null = null) {
-    await this.db.prepare("UPDATE grant_asks SET state = ?, choice = ?, answered_by = ?, answered_at = ? WHERE ask_id = ? AND state = 'open'")
-      .bind(state, choice, by, state === "withdrawn" || state === "expired" ? null : this.now(), ask.ask_id).run();
+  async mark(ask: AskRow, state: string, choice: string | null = null, by: string | null = null, event: number | null = null) {
+    await this.db.prepare("UPDATE grant_asks SET state = ?, choice = ?, answered_by = ?, read_at = ?, decision_event = ? WHERE ask_id = ? AND state = 'open'")
+      .bind(state, choice, by, state === "withdrawn" || state === "expired" ? null : this.now(), event, ask.ask_id).run();
   }
 }
 
-const toRow = (r: any): AskRow => ({ ask_id: r.ask_id, grant_id: r.grant_id, room_id: r.room_id, requested: JSON.parse(r.requested) });
+const toRow = (r: any): AskRow => ({ ask_id: r.ask_id, grant_id: r.grant_id, room_id: r.room_id, requested: JSON.parse(r.requested), request_at: r.request_at, asked_at: r.asked_at });
+// Whether an ask is for the grant's request as it stands: the same scopes, asked at the same time.
+const current = (ask: AskRow, g: GrantRow) => same(ask.requested, g.requested!) && ask.request_at === g.requested_at;
 const same = (a: string[], b: string[]) => [...a].sort().join("+") === [...b].sort().join("+");

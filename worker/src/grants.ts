@@ -54,6 +54,8 @@ export interface Approver {
   where: string;
   settle(g: GrantRow): Promise<GrantRow | null>;
   sweep(): Promise<void>;
+  // A decision made elsewhere (/admin): take back the grant's open ask, so its answer can't land later.
+  decided(grantId: string): Promise<void>;
 }
 // What the caller's live standing approvals on a key cover, and which ones (for the audit row).
 interface Standing { ids: string[]; scopes: string[] }
@@ -135,9 +137,13 @@ export class Grants {
   // between the page loading and the click.
   // `forMinutes` > 0 also lets the same caller hold these scopes on this key for that long (capped
   // at MAX_STANDING_MIN): a grant that expires, or one on another project, gets them again unasked.
-  async decide(id: string, approve: boolean, who: string, expected?: string[], forMinutes = 0): Promise<GrantRow> {
+  // `requestedAt` (from an ask): the request generation the answer was given for. A request denied
+  // and asked again carries the same scopes but a new requested_at, so an answer to the old one
+  // decides nothing; apply()'s compare-and-set holds requested_at, so this is checked atomically.
+  async decide(id: string, approve: boolean, who: string, expected?: string[], forMinutes = 0, requestedAt?: string): Promise<GrantRow> {
     const g = await this.get(id);
     if (!g || !isLive(g.state) || !g.requested) throw new Refused(404, `no grant ${id} waiting for a decision`);
+    if (requestedAt !== undefined && g.requested_at !== requestedAt) throw new Refused(409, `grant ${id} was asked again since; decide the new request`);
     if (approve) {
       if (!expected || [...expected].sort().join("+") !== g.requested.join("+")) {
         throw new Refused(409, `grant ${id} now asks for ${g.requested.join(", ")}; reload and decide again`);
@@ -150,6 +156,7 @@ export class Grants {
       }
       const done = await this.mintFor(g, row, g.requested, who);
       if (forMinutes > 0) await this.stand(done, row, who, forMinutes);
+      await this.decidedElsewhere(id, who);
       return done;
     }
     // A compare-and-set on the state read above, so a deny racing a revoke can't overwrite it (and
@@ -157,7 +164,13 @@ export class Grants {
     const done = await this.apply(g, { type: "deny", who });
     if (!done) throw new Refused(409, `grant ${id} changed meanwhile; reload and decide again`);
     await this.catalog.audit(who, "grant-deny", g.project, [`${g.name}:${g.requested.join("+")}`]);
+    await this.decidedElsewhere(id, who);
     return done;
+  }
+
+  async decidedElsewhere(id: string, who: string) {
+    if (who.startsWith("huddles:") || !this.approver) return;
+    await this.approver.decided(id).catch((e) => console.error("tumbler: taking back the ask failed", errorClass(e)));
   }
 
   async revoke(id: string, who: string) {
@@ -512,8 +525,8 @@ export class Grants {
     const cols = Object.keys(set);
     const [where, binds] = extra.live
       ? [`id = ? AND ${LIVE}`, [g.id]]
-      : [`id = ? AND state = ? AND requested IS ? AND child_id IS ?${extra.guard ? ` AND ${extra.guard}` : ""}`,
-        [g.id, g.state, asJson(g.requested), g.child_id, ...(extra.binds ?? [])]];
+      : [`id = ? AND state = ? AND requested IS ? AND requested_at IS ? AND child_id IS ?${extra.guard ? ` AND ${extra.guard}` : ""}`,
+        [g.id, g.state, asJson(g.requested), g.requested_at, g.child_id, ...(extra.binds ?? [])]];
     // Ending a live grant records its child's delete in the same write, so a crash before the
     // provider call still leaves it for sweep() to retry; revokeChild() clears the row on success.
     const intent = extra.live ? [this.db.prepare(

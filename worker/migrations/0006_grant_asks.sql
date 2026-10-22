@@ -6,11 +6,14 @@ CREATE TABLE grant_asks (
   grant_id    TEXT NOT NULL,
   room_id     TEXT NOT NULL,
   requested   TEXT NOT NULL, -- the grant's request when asked, sorted JSON; approval mints only this
+  request_at  TEXT,          -- the grant's requested_at when asked: which request this is, so an
+                             -- answer to one denied since can't decide the same scopes asked again
   request     TEXT NOT NULL, -- what the person was shown, as JSON (caller, project, key, scopes, held)
   asked_at    TEXT NOT NULL,
-  state       TEXT NOT NULL DEFAULT 'open', -- open | applied | refused | expired | withdrawn
-  choice      TEXT,          -- the option picked, or decline / cancel
+  state       TEXT NOT NULL DEFAULT 'open', -- what came of it: open | applied | refused | expired | withdrawn
+  choice      TEXT,          -- what the person picked (or decline / cancel), apart from what came of it
   answered_by TEXT,          -- the Huddles actor that answered, as kind:id
-  answered_at TEXT
+  read_at     TEXT,          -- when tumbler read the answer (Huddles doesn't return when it was given)
+  decision_event INTEGER     -- the grant_events row the answer made, when it was applied
 );
 CREATE INDEX grant_asks_open ON grant_asks (state, grant_id);

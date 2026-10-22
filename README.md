@@ -261,7 +261,8 @@ too.
 Only you can approve there. Huddles refuses an answer to your ask from anyone else, including
 agents and your own delegates. Tumbler also checks the answer it reads back with its own credential:
 it must be the ask it posted for that grant, answered by the person the credential acts for, and
-approving mints only the request the ask showed. A message in a room approves nothing. If Huddles
+approving mints only the request the ask showed. An ask is for one request: when /admin decides it
+first, the ask is taken back, and an answer to it can't approve the same scopes asked again later. A message in a room approves nothing. If Huddles
 can't be reached, the grant waits and /admin still works.
 
 Setup, once, from a huddles-up checkout with the core's `DATABASE_URL`:
@@ -279,8 +280,9 @@ creates for you on its first ask (`tumbler-approvals-<delegate id>`), or to `HUD
 set it, as long as you have granted the delegate write access there. `HUDDLES_URL` defaults to
 `https://huddles.dev`. To stop, revoke the delegate (`cli.ts revoke-delegate`) or delete the secret.
 
-Every ask and its outcome is kept in `grant_asks`: what was shown, which option was picked, and who
-answered. /admin decisions are in `grant_events` (its `actor` is the admin's email, or
+Every ask and its outcome is kept in `grant_asks`: what was shown, which request it was for, which
+option was picked and by whom, and, kept apart from the choice, what came of it, with the
+`grant_events` row the answer made when it was applied. /admin decisions are in `grant_events` (its `actor` is the admin's email, or
 `huddles:<user id>`). That gives a later triage step (Clef flagging a request that asks for more
 than the work needs) labelled examples to be measured against before it is trusted with anything.
 Withdrawn and expired asks carry no label.

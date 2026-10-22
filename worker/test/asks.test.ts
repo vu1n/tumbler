@@ -178,6 +178,49 @@ test("the cron applies an answer without the caller running again, and withdraws
   assert.equal(s.huddles.open().length, 0);
 });
 
+test("an answer to a request /admin denied can't approve the same scopes asked again", async () => {
+  const s = await setup();
+  await s.env();
+  const g = await s.stepUp();
+  s.huddles.answer("Approve for 24 hours"); // given, but tumbler hasn't read it yet
+  const deny = await s.call("POST", `/admin/api/grants/${g.id}/deny`, undefined, {}, "vu@example.com");
+  assert.equal(deny.status, 200);
+  assert.equal((await s.asks())[0].state, "withdrawn"); // taken back as /admin decides
+  // Even if that withdraw never landed, the old ask is for another request: same scopes, asked later.
+  await s.db.prepare("UPDATE grant_asks SET state = 'open'").run();
+  s.tick(1);
+  const again = await s.stepUp();
+  assert.deepEqual(again.requested, ["workers:read", "workers:write"]);
+  await s.grants.sweep();
+  assert.deepEqual(s.minted, [["workers:read"]]);
+  assert.deepEqual((await s.admin()).approvals, []);
+  assert.equal(s.huddles.open().length, 1); // the new request has its own ask
+});
+
+test("the label follows the grant's log: a lost race or a crash before marking still reads applied", async () => {
+  const s = await setup();
+  await s.env();
+  await s.stepUp();
+  s.huddles.answer("Approve for 1 hour");
+  await Promise.all([s.grants.sweep(), s.stepUp()]); // two pollers read the same answer
+  let [row] = await s.asks();
+  assert.equal(row.state, "applied");
+  const mints = await s.db.prepare("SELECT COUNT(*) AS n FROM grant_events WHERE type = 'mint' AND actor = 'huddles:user_vu'").first<any>();
+  assert.equal(mints.n, 1); // the loser's child is burned, not handed out
+  const [ev] = (await s.db.prepare("SELECT id, actor FROM grant_events WHERE id = ?").bind(row.decision_event).all<any>()).results;
+  assert.equal(ev.actor, "huddles:user_vu");
+  // A poller that applied the answer and died before marking: the cron records it as applied.
+  s.tick(60); await s.grants.sweep();
+  await s.env();
+  await s.stepUp();
+  s.huddles.answer("Approve this token only");
+  const g = (await s.admin()).grants[0], [, open] = await s.asks();
+  await s.grants.decide(g.id, true, "huddles:user_vu", g.requested, 0, open.request_at);
+  await s.grants.sweep();
+  row = (await s.asks())[1];
+  assert.deepEqual([row.state, row.choice], ["applied", "Approve this token only"]);
+});
+
 test("with Huddles down the grant still waits and /admin still approves it", async () => {
   const s = await setup();
   await s.env();
