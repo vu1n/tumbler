@@ -16,7 +16,8 @@ export interface GrantState {
 
 export type GrantEvent =
   | { type: "open"; scopes: string[]; at: string; who: string }
-  | { type: "mint"; scopes: string[]; child_id: string; expires_at: string; who: string }
+  // `approved`: what a live standing approval covers, for a mint with who "standing".
+  | { type: "mint"; scopes: string[]; child_id: string; expires_at: string; who: string; approved?: string[] }
   | { type: "step_up"; scopes: string[]; at: string; who: string }
   | { type: "deny"; who: string }
   | { type: "lapse"; who: string }       // nobody answered within PENDING_TTL
@@ -27,6 +28,9 @@ export type GrantEvent =
 // Why here and not in grants.ts: the approval line is part of the machine, so a mint the policy
 // makes on its own can never carry a scope an admin had to approve.
 export const autoApproved = (scope: string) => scope.endsWith(":read");
+
+// Mints no admin made just now. Admins are emails, so neither name can be one.
+export const unattended = (who: string) => who === "policy" || who === "standing";
 
 export const isLive = (state: string) => state === "pending" || state === "active";
 const sorted = (a: string[]) => [...new Set(a)].sort();
@@ -49,8 +53,12 @@ export function transition(g: GrantState | null, e: GrantEvent): GrantState | nu
       // admin saw; decide() refuses a mismatch first).
       if (g.requested) { if (!same(scopes, g.requested)) return null; }
       else if (g.state === "pending") return null;
-      // Without an admin, nothing beyond held or read scopes.
-      if (e.who === "policy" && !scopes.every((s) => held.has(s) || autoApproved(s))) return null;
+      // Without an admin, nothing beyond held or read scopes, or what an admin's standing approval
+      // covers ("standing" only; "policy" never carries one).
+      if (unattended(e.who)) {
+        const approved = new Set(e.who === "standing" ? e.approved ?? [] : []);
+        if (!scopes.every((s) => held.has(s) || autoApproved(s) || approved.has(s))) return null;
+      }
       return { ...g, state: "active", scopes, requested: null, requested_at: null, child_id: e.child_id, expires_at: e.expires_at, decided_by: e.who };
     }
     case "step_up": {

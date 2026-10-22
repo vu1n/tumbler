@@ -92,3 +92,12 @@ test("every grant change is logged in the same write, never with a credential, a
   assert.equal((await call("DELETE", `/admin/api/grants/${up.id}`)).status, 404);
   assert.equal((await (await call("GET", `/admin/api/grants/${up.id}/events`)).json()).events.length, before);
 });
+
+test("a standing mint carries only what the approval covers, and a policy mint can't borrow one", () => {
+  const wants = { ...active, requested: ["w:read", "w:write"] };
+  const mint = (who: string, approved?: string[]) => transition(wants, { type: "mint", scopes: ["w:read", "w:write"], child_id: "c2", expires_at: AT, who, approved });
+  assert.equal(mint("standing", ["w:write"])?.state, "active");
+  assert.equal(mint("standing", []), null);
+  assert.equal(mint("standing"), null);
+  assert.equal(mint("policy", ["w:write"]), null);
+});

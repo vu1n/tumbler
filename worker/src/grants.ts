@@ -39,12 +39,17 @@ export const REUSE_MARGIN_MS = 6 * 60 * 1000;
 // even a long TUMBLER_TTL can't hand out a child past its expiry.
 export const MINTED_MAX_AGE_S = REUSE_MARGIN_MS / 1000 - 60;
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // an unanswered request lapses to denied
+// The longest an admin's approval can stand: past it, the scopes need approving again.
+export const MAX_STANDING_MIN = 24 * 60;
 const ABANDONED_MS = 60 * 1000; // a read claim still unminted after this was left by a dead request
 
 export interface KeyRow { scope: string; name: string; kind: string; config: string; rev: string; iv: ArrayBuffer | Uint8Array; ciphertext: ArrayBuffer | Uint8Array }
 export interface GrantRow extends GrantState {
   id: string; caller: string; project: string | null; key_scope: string; key_rev: string; name: string; created_at: string; updated_at: string;
 }
+export interface Approval { id: string; caller: string; key_scope: string; name: string; scopes: string[]; approved_by: string; grant_id: string | null; created_at: string; until: string }
+// What the caller's live standing approvals on a key cover, and which ones (for the audit row).
+interface Standing { ids: string[]; scopes: string[] }
 
 const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as ArrayBuffer);
 const union = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort();
@@ -85,6 +90,8 @@ export class Grants {
   async issue(caller: Caller, project: string | null, row: KeyRow): Promise<string> {
     let g = await this.current(caller, project, row);
     if (!g) g = await this.open(caller, project, row, this.config(row).start ?? []);
+    // Approved for a while since it was asked (perhaps on another grant): mint without asking again.
+    if (g.requested) g = await this.byStanding(caller, g, row) ?? g;
     if (g.state !== "active") {
       // Another request's read grant, claimed but still minting: not a wait for approval.
       if ((g.requested ?? []).every(autoApproved) && !await this.blocked(caller, row)) throw new Refused(409, `${row.name} is being minted by another request; run again`);
@@ -106,12 +113,14 @@ export class Grants {
     const next = await this.apply(g, { type: "step_up", scopes, at: this.now().toISOString(), who: caller.name });
     if (!next) throw new Refused(409, `${row.name}: the grant changed meanwhile; run again`);
     if (g.state === "active") await this.catalog.audit(caller.name, "grant-step-up", project, [`${row.name}:${want.join("+")}`]);
-    return next;
+    return await this.byStanding(caller, next, row) ?? next;
   }
 
   // `expected` is the request the admin saw; approving mints only that, so a caller can't add scopes
   // between the page loading and the click.
-  async decide(id: string, approve: boolean, who: string, expected?: string[]): Promise<GrantRow> {
+  // `forMinutes` > 0 also lets the same caller hold these scopes on this key for that long (capped
+  // at MAX_STANDING_MIN): a grant that expires, or one on another project, gets them again unasked.
+  async decide(id: string, approve: boolean, who: string, expected?: string[], forMinutes = 0): Promise<GrantRow> {
     const g = await this.get(id);
     if (!g || !isLive(g.state) || !g.requested) throw new Refused(404, `no grant ${id} waiting for a decision`);
     if (approve) {
@@ -124,7 +133,9 @@ export class Grants {
         await this.close(g, "revoked", "system");
         throw new Refused(409, `key ${g.name} was rotated or deleted since this was asked; the caller asks again`);
       }
-      return this.mintFor(g, row, g.requested, who);
+      const done = await this.mintFor(g, row, g.requested, who);
+      if (forMinutes > 0) await this.stand(done, row, who, forMinutes);
+      return done;
     }
     // A compare-and-set on the state read above, so a deny racing a revoke can't overwrite it (and
     // unstick it). An active grant keeps its old, narrower child.
@@ -137,11 +148,14 @@ export class Grants {
   async revoke(id: string, who: string) {
     const g = await this.get(id);
     if (!g || !isLive(g.state)) throw new Refused(404, `no live grant ${id}`);
+    // First, so a request racing the revoke can't mint again under the approval.
+    await this.endApprovals("caller = ? AND key_scope = ? AND name = ?", [g.caller, g.key_scope, g.name], who);
     await this.close(g, "revoked", who);
   }
 
   // A revoked caller token: end its grants so their children stop working now, not at expiry.
   async closeCaller(caller: string, who: string) {
+    await this.endApprovals("caller = ?", [caller], who);
     const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND ${LIVE}`).bind(caller).all<any>();
     for (const r of results) await this.close(parse(r), "revoked", who);
   }
@@ -206,7 +220,53 @@ export class Grants {
     return results.map(parse);
   }
 
+  async approvals(): Promise<Approval[]> {
+    const { results } = await this.db.prepare("SELECT * FROM approvals WHERE ended_at IS NULL AND until > ? ORDER BY until DESC LIMIT 200")
+      .bind(this.now().toISOString()).all<any>();
+    return results.map((r) => ({ id: r.id, caller: r.caller, key_scope: r.key_scope, name: r.name, scopes: JSON.parse(r.scopes),
+      approved_by: r.approved_by, grant_id: r.grant_id, created_at: r.created_at, until: r.until }));
+  }
+
+  async endApproval(id: string, who: string) {
+    if (!await this.endApprovals("id = ?", [id], who)) throw new Refused(404, `no live approval ${id}`);
+  }
+
   // --- internals ---
+
+  // Records an admin's approval of a grant's scopes as standing for `minutes`.
+  async stand(g: GrantRow, row: KeyRow, who: string, minutes: number) {
+    const t = this.now(), until = new Date(t.getTime() + Math.min(minutes, MAX_STANDING_MIN) * 60_000).toISOString();
+    const id = "a_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    await this.db.prepare(`INSERT INTO approvals (id, caller, key_scope, name, key_rev, scopes, approved_by, grant_id, created_at, until)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, g.caller, row.scope, row.name, row.rev, JSON.stringify(g.scopes), who, g.id, t.toISOString(), until).run();
+    await this.catalog.audit(who, "approval-create", g.project, [`${row.name}:${g.scopes.join("+")}`, g.caller, id, until]);
+  }
+
+  // The caller's live standing approvals on this exact key revision, or null. None while an admin
+  // revoke blocks the caller.
+  async standing(caller: Caller, row: KeyRow): Promise<Standing | null> {
+    const { results } = await this.db.prepare(
+      "SELECT id, scopes FROM approvals WHERE caller = ? AND key_scope = ? AND name = ? AND key_rev = ? AND ended_at IS NULL AND until > ?",
+    ).bind(caller.name, row.scope, row.name, row.rev, this.now().toISOString()).all<any>();
+    if (!results.length || await this.blocked(caller, row)) return null;
+    return { ids: results.map((r) => r.id), scopes: union([], results.flatMap((r) => JSON.parse(r.scopes))) };
+  }
+
+  // A grant waiting on a request that a standing approval covers: mint it as asked. Null otherwise.
+  async byStanding(caller: Caller, g: GrantRow, row: KeyRow): Promise<GrantRow | null> {
+    if (!g.requested || g.key_scope !== row.scope || g.key_rev !== row.rev) return null;
+    const standing = await this.standing(caller, row);
+    if (!standing || !g.requested.every((s) => g.scopes.includes(s) || autoApproved(s) || standing.scopes.includes(s))) return null;
+    return this.mintFor(g, row, g.requested, "standing", standing);
+  }
+
+  async endApprovals(where: string, binds: unknown[], who: string) {
+    const t = this.now().toISOString();
+    const { results } = await this.db.prepare(`UPDATE approvals SET ended_at = ?, ended_by = ? WHERE ${where} AND ended_at IS NULL AND until > ? RETURNING id, name, caller`)
+      .bind(t, who, ...binds, t).all<any>();
+    for (const r of results) await this.catalog.audit(who, "approval-end", null, [r.name, r.caller, r.id]);
+    return results.length;
+  }
 
   config(row: KeyRow): MintConfig { return JSON.parse(row.config || "{}"); }
   fresh(g: GrantRow) { return !!g.expires_at && Date.parse(g.expires_at) - this.now().getTime() > REUSE_MARGIN_MS; }
@@ -253,7 +313,11 @@ export class Grants {
   }
 
   // A new grant: active at once when every scope is a read, otherwise pending with nothing minted.
+  // A standing approval adds its scopes, so a caller approved for a write gets it back after expiry
+  // without asking for it again.
   async open(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
+    const standing = await this.standing(caller, row);
+    if (standing) scopes = union(scopes, standing.scopes);
     if (!scopes.length) throw new Refused(400, `${row.name} has no start scopes; ask for one with --scope`);
     const t = this.now().toISOString(), id = "g_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     const e: GrantEvent = { type: "open", scopes, at: t, who: caller.name };
@@ -267,7 +331,8 @@ export class Grants {
       if (other) return other;
       throw new Refused(409, `${row.name}: a grant changed meanwhile; run again`);
     }
-    if (scopes.every(autoApproved) && !await this.blocked(caller, row)) {
+    const unasked = scopes.every(autoApproved) ? "policy" : standing && scopes.every((s) => autoApproved(s) || standing.scopes.includes(s)) ? "standing" : null;
+    if (unasked && !await this.blocked(caller, row)) {
       let minted;
       try { minted = await this.mint(row, g, scopes); } catch (err) {
         // A provider failure leaves no live grant behind. Only the untouched claim ends: a revoke
@@ -275,19 +340,20 @@ export class Grants {
         await this.apply(g, { type: "abandon", who: "system" });
         throw err;
       }
-      await this.store(g, row, minted, scopes, "policy");
-      await this.catalog.audit(caller.name, "grant-mint", project, [`${row.name}:${scopes.join("+")}`]);
+      await this.store(g, row, minted, scopes, unasked, standing?.scopes);
+      await this.catalog.audit(unasked === "policy" ? caller.name : "standing", "grant-mint", project,
+        [`${row.name}:${scopes.join("+")}`, ...(unasked === "standing" ? standing!.ids : [])]);
       return (await this.get(id))!;
     }
     await this.catalog.audit(caller.name, "grant-pending", project, [`${row.name}:${scopes.join("+")}`]);
     return g;
   }
 
-  async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string): Promise<GrantRow> {
+  async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string, standing?: Standing): Promise<GrantRow> {
     const minted = await this.mint(row, g, scopes), old = g.child_id;
-    await this.store(g, row, minted, scopes, who);
+    await this.store(g, row, minted, scopes, who, standing?.scopes);
     if (old) await this.revokeChild(row, old, g.expires_at);
-    await this.catalog.audit(who, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`]);
+    await this.catalog.audit(who, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`, ...(standing?.ids ?? [])]);
     return (await this.get(g.id))!;
   }
 
@@ -307,9 +373,10 @@ export class Grants {
   // Otherwise the new child is deleted at the provider and nothing is handed out.
   // Why the pin is rechecked here: a request authorized before an admin narrowed the token's pin
   // may reach this after closeOutsidePin() scanned, and must not activate a child for a lost project.
-  async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string) {
+  // `approved`: what a standing approval covered when it was read, for a mint by "standing".
+  async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string, approved?: string[]) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(g.id), row.name, m.value);
-    const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who }, {
+    const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who, approved }, {
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
         AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
           AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value = grants.project)))`,
