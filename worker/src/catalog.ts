@@ -4,8 +4,14 @@ import { staticCheck } from "./verify.ts";
 
 export const GLOBAL = "global";
 const NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
-// A project, or one of its deployments: `huddles`, `huddles/prod`.
-const PART = "[a-z0-9][a-z0-9._-]{0,63}", PROJECT = new RegExp(`^${PART}(/${PART})?$`);
+// A project, or one of its environments: `huddles`, `huddles/prod`. Environments are a fixed set (as
+// in Infisical), so access to one is granted by name, never by matching a naming habit.
+export const ENVIRONMENTS = ["dev", "staging", "prod"];
+const PART = "[a-z0-9][a-z0-9._-]{0,63}", ENV = `(${ENVIRONMENTS.join("|")})`;
+const PROJECT = new RegExp(`^${PART}(/${ENV})?$`);
+// A pin entry: a project or one environment of it, where `*` stands for every project, present and
+// future. `huddles/prod` reads huddles' prod; `*/dev` reads every project's dev.
+const PIN = new RegExp(`^(${PART}|\\*)(/${ENV})?$`);
 
 export class Refused extends Error {
   status: number;
@@ -19,7 +25,10 @@ export function checkScope(scope: string) {
 }
 
 function checkPin(projects: string[] | null) {
-  for (const p of projects ?? []) { checkScope(p); if (p === GLOBAL) throw new Refused(400, "pin projects, not global"); }
+  for (const p of projects ?? []) {
+    if (p === GLOBAL) throw new Refused(400, "pin projects, not global");
+    if (!PIN.test(p)) throw new Refused(400, `invalid pin: ${p}; pin a project, project/env or */env (env: ${ENVIRONMENTS.join(", ")})`);
+  }
 }
 
 // The scopes a read as `project` draws on, least specific first. A deployment reads its own keys,
@@ -41,9 +50,13 @@ function winners<T extends { scope: string; name: string }>(rows: T[], scopes: s
   return win;
 }
 
-// Whether a pin still reaches a project; a grant on one it no longer reaches is ended.
-export const pinReaches = (projects: string[] | null, project: string | null) =>
-  project === null || (projects?.includes(project) ?? false);
+// Whether a pin reaches a scope: the project (or all of them), or that environment of the project (or
+// of all of them). A grant on a scope it no longer reaches is ended.
+export function pinReaches(projects: string[] | null, scope: string | null) {
+  if (scope === null) return true;
+  const env = scope.split("/")[1];
+  return !!projects && (projects.includes(scope) || projects.includes(env ? `*/${env}` : "*"));
+}
 
 export interface Caller { name: string; projects: string[] | null; expires_at?: string | null }
 export interface KeyRow {
@@ -220,8 +233,12 @@ export class Catalog {
     }
     const repinned: { name: string; projects: string[] }[] = [];
     for (const t of await this.tokens()) {
-      if (t.revoked_at || !t.projects?.includes(from)) continue;
-      const projects = [...new Set(t.projects.map((p) => p === from ? to : p))];
+      // A token that read `from` reads `to` instead: `from` leaves its pin (so a later scope of that name
+      // isn't reached by accident), and `to` is added unless the pin already reaches it.
+      if (t.revoked_at || !pinReaches(t.projects, from)) continue;
+      const projects = t.projects!.filter((p) => p !== from);
+      if (!pinReaches(projects, to)) projects.push(to);
+      if (projects.length === t.projects!.length && projects.every((p, i) => p === t.projects![i])) continue;
       await this.setPin(t.name, projects);
       repinned.push({ name: t.name, projects });
     }
@@ -236,18 +253,19 @@ export class Catalog {
   }
 
   // The project the caller reads as. Identity comes from the token, never the request: a pinned
-  // token may pick among its pins (or defaults to its only one; with several, to globals only);
-  // any other project is refused.
+  // token may pick any scope its pin reaches (or defaults to its only entry, when that names one
+  // project; otherwise to globals only). Any other scope is refused.
   scopeFor(caller: Caller, requested: string | null): string | null {
     if (caller.projects === null) {
       if (requested) throw new Refused(403, "this token reads global keys only");
       return null;
     }
     if (requested) {
-      if (!caller.projects.includes(requested)) throw new Refused(403, `project ${requested} is outside this token's pin`);
+      checkScope(requested);
+      if (requested === GLOBAL || !pinReaches(caller.projects, requested)) throw new Refused(403, `project ${requested} is outside this token's pin`);
       return requested;
     }
-    if (caller.projects.length === 1) return caller.projects[0];
+    if (caller.projects.length === 1 && !caller.projects[0].startsWith("*")) return caller.projects[0];
     // Why not refuse: one agent token serves many repos, and a repo with no `.tumbler` project
     // still needs its global keys. Globals are what every token reads anyway.
     return null;

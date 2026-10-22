@@ -828,3 +828,28 @@ test("ending a standing approval, or its expiry, while its mint runs wins: the c
     assert.equal((await stepUp(s)).state, "pending", race);
   }
 });
+
+test("a token minting through */dev keeps its child while it holds dev, and loses it when dev goes", async () => {
+  const s = await setup();
+  await s.catalog.remove("dev", "CLOUDFLARE_API_TOKEN");
+  await s.catalog.put("huddles/dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  const pin = (projects: string[]) => s.call("PATCH", "/admin/api/tokens/dev", undefined, { projects }, "vu@example.com");
+  await pin(["*", "*/dev"]);
+  assert.equal((await (await s.call("GET", "/v1/env?project=huddles/dev&keys=CLOUDFLARE_API_TOKEN", s.dev)).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+  await pin(["huddles/dev"]);
+  assert.deepEqual(s.fake.revoked, []); // still reaches huddles/dev
+  await pin(["*", "*/prod"]);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
+test("*/env dropped while a first mint runs: the child is deleted, never handed out", async () => {
+  const s = await setup();
+  await s.catalog.remove("dev", "CLOUDFLARE_API_TOKEN");
+  await s.catalog.put("huddles/prod", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  await s.catalog.setPin("dev", ["*/prod"]);
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => { await s.catalog.setPin("dev", ["*", "*/dev"]); return mint(...a); };
+  const r = await s.call("GET", "/v1/env?project=huddles/prod&keys=CLOUDFLARE_API_TOKEN", s.dev);
+  assert.equal(r.status, 409);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});

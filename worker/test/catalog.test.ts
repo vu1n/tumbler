@@ -168,7 +168,8 @@ test("a deployment reads its own keys, then its project's, then global ones", as
   assert.equal((await (await get("/v1/env", base)).json()).env.DATABASE_URL, "huddles-db");
   assert.equal((await get("/v1/env?project=huddles/prod", base)).status, 403);
   assert.equal((await get("/v1/env?project=huddles", prod)).status, 403);
-  await assert.rejects(catalog.put("huddles/prod/eu", "A", "x"), /invalid scope/);
+  // Environments are a fixed set, so there's no naming habit to match: anything else is refused.
+  for (const scope of ["huddles/prod/eu", "huddles/development", "huddles/dev2"]) await assert.rejects(catalog.put(scope, "A", "x"), /invalid scope/);
 });
 
 test("admin moves a scope's keys and pins, so huddles-dev becomes huddles/dev without re-entering values", async () => {
@@ -193,4 +194,47 @@ test("admin moves a scope's keys and pins, so huddles-dev becomes huddles/dev wi
   assert.equal(await catalog.value((await catalog.keyRow("a", "DATABASE_URL"))!), "a-db");
   assert.equal((await move({ from: "global", to: "x" })).status, 400);
   assert.match(await (await admin(deps, "audit", { as: "vu@example.com" })).text(), /scope-move/);
+});
+
+test("* reaches every project's shared keys and */dev every project's dev, never prod", async () => {
+  const { catalog, deps, get } = await setup();
+  await catalog.put("huddles", "DATABASE_URL", "huddles-db");
+  await catalog.put("huddles/dev", "DATABASE_URL", "dev-db");
+  await catalog.put("huddles/prod", "DATABASE_URL", "prod-db");
+  const create = async (name: string, projects: string[]) =>
+    (await (await admin(deps, "tokens", { method: "POST", as: "vu@example.com", body: JSON.stringify({ name, projects }) })).json()).token;
+  const db = async (t: string, p?: string) => (await (await get(`/v1/env${p ? `?project=${p}` : ""}`, t)).json()).env.DATABASE_URL;
+  const dev = await create("claude-dev", ["*", "*/dev"]);
+  assert.equal(await db(dev), undefined); // globals until a command names a project
+  assert.equal(await db(dev, "huddles"), "huddles-db");
+  assert.equal(await db(dev, "huddles/dev"), "dev-db");
+  assert.equal((await (await get("/v1/env?project=kypp", dev)).json()).env.OPENROUTER_API_KEY, "kypp-or");
+  const status = async (t: string, p: string) => (await get(`/v1/env?project=${encodeURIComponent(p)}`, t)).status;
+  assert.equal(await status(dev, "huddles/prod"), 403);
+  assert.equal(await status(dev, "global"), 403);
+  assert.equal(await status(dev, "*"), 400); // a request names a scope, never a pin entry
+  // An environment is its own grant: `*` alone doesn't reach dev, and `*/dev` alone doesn't reach shared keys.
+  assert.equal(await status(await create("shared", ["*"]), "huddles/dev"), 403);
+  assert.equal(await status(await create("devonly", ["*/dev"]), "huddles"), 403);
+  const everything = await create("vu", ["*", "*/dev", "*/staging", "*/prod"]);
+  assert.equal(await db(everything, "huddles/prod"), "prod-db");
+  // Per project, as in Infisical: prod of one project, dev of another.
+  const mixed = await create("mixed", ["huddles/prod", "kypp/dev"]);
+  assert.equal(await db(mixed, "huddles/prod"), "prod-db");
+  assert.equal(await status(mixed, "kypp/prod"), 403);
+  for (const bad of ["hud*", "huddles/*", "*/development", "*/*"]) {
+    assert.equal((await admin(deps, "tokens", { method: "POST", as: "vu@example.com", body: JSON.stringify({ name: "bad", projects: [bad] }) })).status, 400, bad);
+  }
+});
+
+test("a move keeps each token's reach: * gets the new environment named, */dev needs nothing", async () => {
+  const { catalog, deps } = await setup();
+  await catalog.put("huddles-dev", "DATABASE_URL", "dev-db");
+  await catalog.createToken("all-shared", ["*"]);
+  await catalog.createToken("all-dev", ["*", "*/dev"]);
+  const r = await (await admin(deps, "scopes/move", { method: "POST", as: "vu@example.com", body: JSON.stringify({ from: "huddles-dev", to: "huddles/dev" }) })).json();
+  assert.deepEqual(r.repinned, ["all-shared"]);
+  const pins = Object.fromEntries((await catalog.tokens()).map((t) => [t.name, t.projects]));
+  assert.deepEqual(pins["all-shared"], ["*", "huddles/dev"]);
+  assert.deepEqual(pins["all-dev"], ["*", "*/dev"]);
 });
