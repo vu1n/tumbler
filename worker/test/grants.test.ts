@@ -709,3 +709,14 @@ test("moving a scope ends the children minted from its keys; the next read mints
   assert.equal((await s.call("GET", "/v1/env?keys=CLOUDFLARE_API_TOKEN", s.dev)).status, 200);
   assert.deepEqual(s.fake.minted.map((m) => m.parent), [PARENT, PARENT]);
 });
+
+test("a move ends grants read as the old scope on keys that didn't move, even when a first attempt already repinned", async () => {
+  const s = await setup();
+  await s.catalog.remove("dev", "CLOUDFLARE_API_TOKEN");
+  await s.catalog.put("global", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  await s.env(); // id-1, on the global key, read as dev
+  await s.catalog.setPin("dev", ["dev/staging"]); // an earlier move that crashed after repinning
+  const r = await s.call("POST", "/admin/api/scopes/move", undefined, { from: "dev", to: "dev/staging" }, "vu@example.com");
+  assert.deepEqual((await r.json()).repinned, ["other"]); // "dev" was repinned by the first attempt
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});

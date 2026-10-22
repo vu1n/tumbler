@@ -225,9 +225,10 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
   if (parts[0] === "scopes" && parts[1] === "move" && parts.length === 2 && m === "POST") {
     const b = await body(), from = String(b.from ?? ""), to = String(b.to ?? "");
     const { moved, repinned } = await catalog.moveScope(from, to);
-    // The moved mint keys' children and the repinned tokens' grants read as `from` stop now.
+    // The moved mint keys' children and every grant read as `from` stop now. A rerun after a crash
+    // repeats both; the sweep's closeStale() also catches moved keys a crash left behind.
     for (const k of moved) if (k.kind !== "static") await grants?.closeStale(from, k.name);
-    for (const t of repinned) await grants?.closeOutsidePin(t.name, t.projects, who);
+    await grants?.closeProject(from, who);
     await catalog.audit(who, "scope-move", to, [from, ...moved.map((k) => k.name)]);
     return json({ from, to, moved: moved.map((k) => k.name), repinned: repinned.map((t) => t.name) });
   }
