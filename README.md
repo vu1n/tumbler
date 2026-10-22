@@ -248,6 +248,39 @@ Other providers plug in as a `Provider` (`mint`, `revoke`, `validate` and option
 as one pure function, `transition(grant, event)`. Every change is written along with its event in
 `grant_events`, an append-only log (`GET /admin/api/grants/:id/events` shows a grant's history).
 
+### Approve in Huddles
+
+With `HUDDLES_TOKEN` set, a grant that waits for approval also shows up in your **Needs you** in
+Huddles, as an ask with chips: Approve for 1 hour, 8 hours or 24 hours, Approve this token only, or
+Deny. Your answer there decides the grant just as /admin would, and the duration works the same way
+(Approve for a while, above). The caller's next run picks it up, and so does the five-minute cron.
+The ask names the caller, key, project and scopes, never a value. If the request changes, tumbler
+takes the old ask back and posts a new one. When you decide in /admin first, the ask is taken back
+too.
+
+Only you can approve there. Huddles refuses an answer to your ask from anyone else, including
+agents and your own delegates. Tumbler also checks the answer it reads back with its own credential:
+it must be the ask it posted for that grant, answered by the person the credential acts for, and
+approving mints only the request the ask showed. A message in a room approves nothing. If Huddles
+can't be reached, the grant waits and /admin still works.
+
+Setup, once, from a huddles-up checkout with the core's `DATABASE_URL`:
+
+```sh
+cd packages/server
+node src/cli.ts mint-delegate <your user id> tumbler tumbler | jq -r .credential \
+  | wrangler secret put HUDDLES_TOKEN --name tumbler
+```
+
+That credential is a delegate acting for you, so you become the approver. Asks go to a room tumbler
+creates for you on its first ask (`tumbler-approvals-<delegate id>`), or to `HUDDLES_ROOM` if you
+set it, as long as you have granted the delegate write access there. `HUDDLES_URL` defaults to
+`https://huddles.dev`. To stop, revoke the delegate (`cli.ts revoke-delegate`) or delete the secret.
+
+Every ask and its outcome is kept in `grant_asks`: what was shown, which option was picked, and who
+answered. That gives a later triage step (Clef flagging a request that asks for more than the work
+needs) labelled examples to be measured against before it is trusted with anything.
+
 ## API
 
 | Route | Auth | |

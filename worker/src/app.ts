@@ -72,7 +72,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       if (mine.length) out.push(grantView(await grants.stepUp(caller, project, row, mine)));
     }
     if (!out.length) return json({ error: `no minted key in this set has scope ${scopes.join(", ")}` }, 400);
-    return json({ grants: out });
+    return json({ grants: out, approve_in: grants.approver?.where ?? "/admin" });
   }
   // Run each key's check on its current value: {"keys": [...]} (empty: every key the caller reads).
   // Statuses only, never a value; `tumbler run` calls this when a command fails.

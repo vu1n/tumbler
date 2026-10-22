@@ -343,7 +343,8 @@ async function stepUp(project, keys, scopes) {
     const r = await brokerCall("POST", "/v1/step-up" + (project ? `?project=${encodeURIComponent(project)}` : ""), { keys: names, scopes });
     const waiting = r.grants.filter((g) => g.state !== "active" || g.requested);
     if (waiting.length) {
-      die(waiting.map((g) => `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in /admin (grant ${g.id})`).join("\n          ") + "\n          run again once approved");
+      die(waiting.map((g) => g.state === "denied" ? `${g.name}: the request was denied (grant ${g.id})`
+        : `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in ${r.approve_in ?? "/admin"} (grant ${g.id})`).join("\n          ") + "\n          run again once approved");
     }
   } catch (e) { die(e.message); }
   try { await ask({ op: "reload" }); } catch {} // the cached env holds the narrower child

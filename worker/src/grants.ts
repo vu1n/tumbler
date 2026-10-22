@@ -48,6 +48,13 @@ export interface GrantRow extends GrantState {
   id: string; caller: string; project: string | null; key_scope: string; key_rev: string; name: string; created_at: string; updated_at: string;
 }
 export interface Approval { id: string; caller: string; key_scope: string; name: string; scopes: string[]; approved_by: string; grant_id: string | null; created_at: string; until: string }
+// Somewhere else a person can approve a waiting grant (asks.ts: Needs you in Huddles). settle()
+// applies an answer already given, or asks; it never approves on its own.
+export interface Approver {
+  where: string;
+  settle(g: GrantRow): Promise<GrantRow | null>;
+  sweep(): Promise<void>;
+}
 // What the caller's live standing approvals on a key cover, and which ones (for the audit row).
 interface Standing { ids: string[]; scopes: string[] }
 
@@ -57,7 +64,7 @@ const grantScope = (id: string) => `grant:${id}`; // AAD for the sealed child, a
 const LIVE = "state IN ('pending', 'active')";
 
 export class Grants {
-  catalog: Catalog; providers: Record<string, Provider>; now: () => Date;
+  catalog: Catalog; providers: Record<string, Provider>; now: () => Date; approver?: Approver;
   constructor(catalog: Catalog, providers: Record<string, Provider>, now = () => new Date()) {
     this.catalog = catalog; this.providers = providers; this.now = now;
   }
@@ -92,6 +99,8 @@ export class Grants {
     if (!g) g = await this.open(caller, project, row, this.config(row).start ?? []);
     // Approved for a while since it was asked (perhaps on another grant): mint without asking again.
     if (g.requested) g = await this.byStanding(caller, g, row) ?? g;
+    if (g.requested && this.approver) g = await this.approver.settle(g) ?? g;
+    if (!isLive(g.state)) throw new Refused(403, `${row.name}: the request was denied; run again to ask again`);
     if (g.state !== "active") {
       // Another request's read grant, claimed but still minting: not a wait for approval.
       if ((g.requested ?? []).every(autoApproved) && !await this.blocked(caller, row)) throw new Refused(409, `${row.name} is being minted by another request; run again`);
@@ -113,7 +122,8 @@ export class Grants {
     const next = await this.apply(g, { type: "step_up", scopes, at: this.now().toISOString(), who: caller.name });
     if (!next) throw new Refused(409, `${row.name}: the grant changed meanwhile; run again`);
     if (g.state === "active") await this.catalog.audit(caller.name, "grant-step-up", project, [`${row.name}:${want.join("+")}`]);
-    return await this.byStanding(caller, next, row) ?? next;
+    const done = await this.byStanding(caller, next, row) ?? next;
+    return done.requested && this.approver ? await this.approver.settle(done) ?? done : done;
   }
 
   // `expected` is the request the admin saw; approving mints only that, so a caller can't add scopes
@@ -205,6 +215,7 @@ export class Grants {
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
     await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
     await this.retryRevokes();
+    await this.approver?.sweep(); // answers given in Huddles since, before anything lapses
     // Nobody answered: a pending grant lapses to denied, and a waiting step-up is dropped.
     const stale = new Date(this.now().getTime() - PENDING_TTL_MS).toISOString();
     const { results: unanswered } = await this.db.prepare(`SELECT * FROM grants WHERE ${LIVE} AND requested IS NOT NULL AND requested_at <= ?`)
@@ -280,7 +291,7 @@ export class Grants {
   config(row: KeyRow): MintConfig { return JSON.parse(row.config || "{}"); }
   fresh(g: GrantRow) { return !!g.expires_at && Date.parse(g.expires_at) - this.now().getTime() > REUSE_MARGIN_MS; }
   waiting(g: GrantRow) {
-    return new Refused(409, `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in /admin (grant ${g.id}); run again once approved`);
+    return new Refused(409, `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in ${this.approver?.where ?? "/admin"} (grant ${g.id}); run again once approved`);
   }
 
   async get(id: string) {
