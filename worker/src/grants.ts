@@ -111,7 +111,13 @@ export class Grants {
 
   // Ask for more scopes on a mint key. Read scopes are added at once (a wider child is minted);
   // anything else is recorded as `requested` and waits for an admin while the old child keeps working.
+  // A request still waiting goes to the approver too (asks it, or applies an answer already given).
   async stepUp(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
+    const g = await this.stepUpOnly(caller, project, row, scopes);
+    return g.requested && this.approver ? await this.approver.settle(g) ?? g : g;
+  }
+
+  async stepUpOnly(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
     const config = this.config(row), known = Object.keys(config.scopes ?? {});
     for (const s of scopes) if (!known.includes(s)) throw new Refused(400, `${row.name} has no scope ${s}`);
     const g = await this.current(caller, project, row);
@@ -122,8 +128,7 @@ export class Grants {
     const next = await this.apply(g, { type: "step_up", scopes, at: this.now().toISOString(), who: caller.name });
     if (!next) throw new Refused(409, `${row.name}: the grant changed meanwhile; run again`);
     if (g.state === "active") await this.catalog.audit(caller.name, "grant-step-up", project, [`${row.name}:${want.join("+")}`]);
-    const done = await this.byStanding(caller, next, row) ?? next;
-    return done.requested && this.approver ? await this.approver.settle(done) ?? done : done;
+    return await this.byStanding(caller, next, row) ?? next;
   }
 
   // `expected` is the request the admin saw; approving mints only that, so a caller can't add scopes

@@ -341,9 +341,9 @@ async function stepUp(project, keys, scopes) {
   try {
     if (!names) names = (await brokerGet("/v1/keys" + (project ? `?project=${encodeURIComponent(project)}` : ""))).keys;
     const r = await brokerCall("POST", "/v1/step-up" + (project ? `?project=${encodeURIComponent(project)}` : ""), { keys: names, scopes });
-    const waiting = r.grants.filter((g) => g.state !== "active" || g.requested);
+    const waiting = r.grants.filter((g) => g.state !== "active" || g.requested || g.denied);
     if (waiting.length) {
-      die(waiting.map((g) => g.state === "denied" ? `${g.name}: the request was denied (grant ${g.id})`
+      die(waiting.map((g) => g.state === "denied" || g.denied ? `${g.name}: the request was denied (grant ${g.id})`
         : `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in ${r.approve_in ?? "/admin"} (grant ${g.id})`).join("\n          ") + "\n          run again once approved");
     }
   } catch (e) { die(e.message); }

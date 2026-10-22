@@ -188,3 +188,19 @@ test("without a room set, tumbler makes its own on the first ask and keeps using
   assert.equal((await s.stepUp()).requested, null);
   assert.equal(s.huddles.calls.filter((c: string) => c === "rooms/create").length, 1);
 });
+
+test("a first step-up with no grant yet is asked too, and a denied step-up is never reported as granted", async () => {
+  const s = await setup();
+  await s.db.prepare("UPDATE keys SET config = ?").bind(JSON.stringify({ ...CONFIG, scopes: { ...CONFIG.scopes, "dns:edit": ["3"] } })).run();
+  const g = await s.stepUp(); // no grant before this one
+  assert.equal(g.state, "pending");
+  assert.equal(s.huddles.open().length, 1);
+  s.huddles.answer("Approve this token only");
+  assert.equal((await s.stepUp()).requested, null);
+  // Wider again, denied in Huddles: the old child stays, but the step-up says denied.
+  assert.deepEqual((await s.stepUp(["dns:edit"])).requested, ["dns:edit", "workers:read", "workers:write"]);
+  s.huddles.answer("Deny");
+  const after = await s.stepUp(["dns:edit"]);
+  assert.equal(after.denied, true);
+  assert.equal(after.state, "active");
+});
