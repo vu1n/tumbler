@@ -52,9 +52,9 @@ test("a pinned token can't read outside its pin", async () => {
   assert.doesNotMatch(await r.text(), /kypp-or/);
 });
 
-test("a token pinned to several projects must name one, and gets that one", async () => {
+test("a token pinned to several projects reads globals until it names one, then gets that one", async () => {
   const { get, tokens } = await setup();
-  assert.equal((await get("/v1/env", tokens.both)).status, 400);
+  assert.deepEqual((await (await get("/v1/env", tokens.both)).json()).env, { OPENROUTER_API_KEY: "global-or", AWS_REGION: "us-east-1" });
   assert.equal((await (await get("/v1/env?project=kypp", tokens.both)).json()).env.OPENROUTER_API_KEY, "kypp-or");
 });
 
@@ -133,4 +133,23 @@ test("the CLI is served without a token, and nothing else is", async () => {
   const deps = { catalog, admin: async () => null, cli: "#!/usr/bin/env node\n" };
   assert.equal(await (await handle(new Request("https://t.example/cli"), deps)).text(), "#!/usr/bin/env node\n");
   assert.equal((await handle(new Request("https://t.example/v1/whoami"), deps)).status, 401);
+});
+
+test("admin edits a live token's pin in place: it reaches the new project at once, and nothing else", async () => {
+  const { deps, get, tokens } = await setup();
+  const pin = (name: string, projects: unknown) =>
+    admin(deps, `tokens/${name}`, { method: "PATCH", as: "vu@example.com", body: JSON.stringify({ projects }) });
+  assert.equal((await get("/v1/env?project=dev", tokens.global)).status, 403);
+  assert.equal((await pin("global-only", ["dev", "kypp"])).status, 200);
+  // The same token, no new secret: globals by default, a pinned project when named, nothing beyond.
+  assert.equal((await (await get("/v1/env", tokens.global)).json()).env.OPENROUTER_API_KEY, "global-or");
+  assert.equal((await (await get("/v1/env?project=dev", tokens.global)).json()).env.OPENROUTER_API_KEY, "dev-or");
+  assert.equal((await get("/v1/env?project=other", tokens.global)).status, 403);
+  // Narrowed back to global only, the project is refused again.
+  assert.equal((await pin("global-only", [])).status, 200);
+  assert.equal((await get("/v1/env?project=dev", tokens.global)).status, 403);
+  assert.equal((await pin("global-only", ["global"])).status, 400);
+  assert.equal((await pin("nobody", ["dev"])).status, 404);
+  const audit = await (await admin(deps, "audit", { as: "vu@example.com" })).text();
+  assert.match(audit, /token-pin/);
 });

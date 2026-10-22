@@ -233,6 +233,32 @@ test("revoking a caller token, deleting a key or rotating its parent ends live g
   assert.deepEqual(s.fake.revoked, ["id-1", "id-2", "id-3"]);
 });
 
+test("narrowing a token's pin ends the children it holds for projects it no longer reaches", async () => {
+  const s = await setup();
+  await s.env();
+  await s.call("PATCH", "/admin/api/tokens/dev", undefined, { projects: ["dev", "kypp"] }, "vu@example.com");
+  assert.deepEqual(s.fake.revoked, []); // still reaches dev: its child keeps working
+  await s.call("PATCH", "/admin/api/tokens/dev", undefined, { projects: ["kypp"] }, "vu@example.com");
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await s.call("GET", "/v1/env?project=dev&keys=CLOUDFLARE_API_TOKEN", s.dev)).status, 403);
+});
+
+test("a pin narrowed while a first mint runs: the child is deleted, never handed out", async () => {
+  const s = await setup();
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+    // The pin changes after this request's grant was opened but where the cleanup's scan missed it:
+    // only store()'s own check stands between it and the child.
+    await s.catalog.setPin("dev", ["kypp"]);
+    return mint(...a);
+  };
+  const r = await s.env();
+  s.fake.provider.mint = mint;
+  assert.equal(r.status, 409);
+  assert.doesNotMatch(await r.text(), /child-/);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
 test("a revoke during a first mint sticks: the claim is not deleted, so the next read still waits", async () => {
   const s = await setup();
   const mint = s.fake.provider.mint;

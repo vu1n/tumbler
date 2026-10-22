@@ -51,6 +51,13 @@ The admin API checks the Access JWT itself, so a gap in the Access policy (or a 
 
 A different project gets its own environment with its own pinned token.
 
+A token's pin is edited in place: click it in `/admin`'s token list and name the projects it reads
+(empty = global keys only). The same token, still held as the same network secret, reaches a project
+the moment it's added, and the children it holds for a project that's removed are ended at once. A
+token pinned to one project reads it by default; one pinned to several reads global keys only until a
+command names one of them (`-p`, `TUMBLER_PROJECT`, or a repo's `.tumbler`), so one agent token can
+serve many repos and each repo's `.tumbler` picks its project.
+
 A token can carry an expiry (set "expires in hours" when you create it; `tumbler whoami` shows it),
 for a pilot or anything else time-bound. From that moment the broker refuses it, and the next sweep
 (every five minutes) ends the grants it holds and deletes their children at the provider. Expiry

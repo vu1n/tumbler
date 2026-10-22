@@ -4,7 +4,7 @@
 // machine.ts holds the states and what moves between them, and apply() is the only writer.
 //
 // Only `active` ever yields a credential. Every other state, and every failure, yields none.
-import { type Caller, type Catalog, Refused } from "./catalog.ts";
+import { type Caller, type Catalog, pinReaches, Refused } from "./catalog.ts";
 import { open, seal } from "./crypto.ts";
 import { autoApproved, type GrantEvent, type GrantState, isLive, transition } from "./machine.ts";
 import type { Outcome } from "./verify.ts";
@@ -144,6 +144,12 @@ export class Grants {
   async closeCaller(caller: string, who: string) {
     const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND ${LIVE}`).bind(caller).all<any>();
     for (const r of results) await this.close(parse(r), "revoked", who);
+  }
+
+  // After a token's pin narrows: its children minted for a project it no longer reaches stop now.
+  async closeOutsidePin(caller: string, projects: string[] | null, who: string) {
+    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND project IS NOT NULL AND ${LIVE}`).bind(caller).all<any>();
+    for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who);
   }
 
   // Live grants whose caller token is revoked (closeCaller after the revoke was interrupted) or has
@@ -299,11 +305,14 @@ export class Grants {
   // caller's token is still unrevoked and unexpired (a revoke, or the expiry, can land between
   // authenticating and storing).
   // Otherwise the new child is deleted at the provider and nothing is handed out.
+  // Why the pin is rechecked here: a request authorized before an admin narrowed the token's pin
+  // may reach this after closeOutsidePin() scanned, and must not activate a child for a lost project.
   async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(g.id), row.name, m.value);
     const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who }, {
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
-        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?))`,
+        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
+          AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value = grants.project)))`,
       binds: [row.rev, row.scope, row.name, row.rev, this.now().toISOString()], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
     if (!done) {
