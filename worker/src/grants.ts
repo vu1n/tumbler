@@ -149,6 +149,13 @@ export class Grants {
     }
   }
 
+  // Live grants read as a project their caller's pin no longer reaches: a narrowing whose cleanup was
+  // cut short. Re-read every sweep, like closeOutsideCeilings.
+  async closeOutsidePins() {
+    const { results } = await this.db.prepare(`SELECT g.*, t.projects AS pin FROM grants g JOIN tokens t ON t.name = g.caller WHERE g.project IS NOT NULL AND g.${LIVE}`).all<any>();
+    for (const { pin, ...r } of results) if (!pinReaches(pin ? JSON.parse(pin) : null, r.project)) await this.close(parse(r), "revoked", "system");
+  }
+
   // Live grants holding a scope their caller's token no longer allows: a narrowing whose cleanup was
   // cut short, or grants from before ceilings. The sweep re-reads every time, so none is missed.
   async closeOutsideCeilings() {
@@ -198,6 +205,7 @@ export class Grants {
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
     await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
     await this.closeOutsideCeilings(); // grants an interrupted narrowing left behind
+    await this.closeOutsidePins(); // grants an interrupted repin left behind
     await this.retryRevokes();
     // Requests left by the approval flow before ceilings: a pending one lapses to denied, and a
     // waiting step-up is dropped.

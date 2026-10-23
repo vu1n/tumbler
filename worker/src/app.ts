@@ -253,14 +253,11 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       const pin = "projects" in b || !("scopes" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
       // One checked write for both, so a bad pin never lands a wider ceiling (or the reverse).
       const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
-      if ("scopes" in done) {
-        await grants?.closeOutsideCeiling(parts[1], done.scopes!, who);
-        await catalog.audit(who, "token-scopes", null, [parts[1], ...(done.scopes ?? ["reads-only"])]);
-      }
-      if ("projects" in done) {
-        await grants?.closeOutsidePin(parts[1], done.projects!, who);
-        await catalog.audit(who, "token-pin", null, [parts[1], ...(done.projects ?? ["global-only"])]);
-      }
+      // Both cleanups run before either audit; a cleanup cut short is finished by the sweep.
+      if ("projects" in done) await grants?.closeOutsidePin(parts[1], done.projects!, who);
+      if ("scopes" in done) await grants?.closeOutsideCeiling(parts[1], done.scopes!, who);
+      if ("projects" in done) await catalog.audit(who, "token-pin", null, [parts[1], ...(done.projects ?? ["global-only"])]);
+      if ("scopes" in done) await catalog.audit(who, "token-scopes", null, [parts[1], ...(done.scopes ?? ["reads-only"])]);
       return json({ ok: true });
     }
     if (m === "DELETE" && parts.length === 2) {

@@ -287,6 +287,14 @@ test("narrowing a token's pin ends the children it holds for projects it no long
   assert.equal((await s.call("GET", "/v1/env?project=dev&keys=CLOUDFLARE_API_TOKEN", s.dev)).status, 403);
 });
 
+test("a repin whose cleanup was cut short is finished by the sweep", async () => {
+  const s = await setup();
+  await s.env();
+  await s.catalog.setPin("dev", ["kypp"]); // closeOutsidePin never ran
+  await s.grants.sweep();
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
 test("a pin narrowed while a first mint runs: the child is deleted, never handed out", async () => {
   const s = await setup();
   const mint = s.fake.provider.mint;

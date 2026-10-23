@@ -273,11 +273,11 @@ test("migration 0007 carries over each token's live write approvals and active w
   approval("approved", ["workers:read", "workers:write"], "2999-01-01T00:00:00Z");
   approval("lapsed", ["workers:write"], "2000-01-01T00:00:00Z");
   approval("lapsed", ["d1:write"], "2999-01-01T00:00:00Z", "2026-01-02");
-  grant("granted", ["workers:read", "workers:write", "d1:write"], "active");
+  grant("granted", ["workers:read", "workers:write", "d1:write", "Audit:Read", "*"], "active");
   grant("granted", ["r2:write"], "revoked");
   grant("reader", ["workers:read"], "active");
   approval("gone", ["workers:write"], "2999-01-01T00:00:00Z");
   at(files.find((f) => f.startsWith("0007"))!);
   const scopes = Object.fromEntries((db.prepare("SELECT name, scopes FROM tokens").all() as any[]).map((r) => [r.name, r.scopes && JSON.parse(r.scopes)]));
-  assert.deepEqual(scopes, { approved: ["workers:write"], granted: ["d1:write", "workers:write"], reader: null, lapsed: null, gone: null });
+  assert.deepEqual(scopes, { approved: ["workers:write"], granted: ["Audit:Read", "d1:write", "workers:write"], reader: null, lapsed: null, gone: null });
 });
