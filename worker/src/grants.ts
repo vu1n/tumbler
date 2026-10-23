@@ -109,7 +109,11 @@ export class Grants {
     const config = this.config(row);
     this.checkStepUp(caller, row, scopes);
     let g = await this.current(caller, project, row);
-    if (!g) return this.open(caller, project, row, union((config.start ?? []).filter((s) => allowedBy(caller.scopes ?? null, s)), scopes));
+    if (!g) {
+      g = await this.open(caller, project, row, union((config.start ?? []).filter((s) => allowedBy(caller.scopes ?? null, s)), scopes));
+      // open() hands back a concurrent request's grant when it lost the race; that one may be narrower.
+      if (scopes.every((s) => g!.scopes.includes(s))) return g;
+    }
     if (g.state !== "active") throw new Refused(409, `${row.name} is being minted by another request; run again`);
     // A request left from before ceilings: drop it (the child stays), then mint what's asked now.
     if (g.requested) g = await this.apply(g, { type: "lapse", who: "system" }) ?? g;

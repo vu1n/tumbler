@@ -218,6 +218,17 @@ test("a step-up over several keys is checked whole: one key outside the token's 
   assert.deepEqual(s.fake.revoked, []);
 });
 
+test("a step-up that loses the first-grant race to a narrower request still widens it", async () => {
+  const s = await setup();
+  await s.env(); // the other request's read grant, already active
+  const current = s.grants.current.bind(s.grants);
+  let once = true;
+  s.grants.current = async (...a: Parameters<typeof current>) => once ? (once = false, null) : current(...a); // read before it landed
+  const r = await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  assert.equal(r.status, 200);
+  assert.deepEqual((await r.json()).grants[0].scopes, ["workers:read", "workers:write"]);
+});
+
 test("a request left waiting from before ceilings lapses in the sweep, or is dropped by the next step-up", async () => {
   const s = await setup();
   await s.env(); await s.env(s.other);
