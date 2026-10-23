@@ -263,6 +263,13 @@ export class Catalog {
     return null;
   }
 
+  // Deletes only while the row is still static, in the same statement: a caller token never deletes a
+  // parent credential, even one an admin made of this name a moment ago. False when nothing was deleted.
+  async removeStatic(scope: string, name: string) {
+    const r = await this.db.prepare("DELETE FROM keys WHERE scope = ? AND name = ? AND kind = 'static'").bind(scope, name).run();
+    return r.meta.changes > 0;
+  }
+
   async remove(scope: string, name: string) {
     const [, r] = await this.db.batch([this.retire(scope, name), this.db.prepare("DELETE FROM keys WHERE scope = ? AND name = ?").bind(scope, name)]);
     if (!r.meta.changes) throw new Refused(404, `no key ${scope}/${name}`);

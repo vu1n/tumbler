@@ -129,3 +129,29 @@ test("a scope move repoints the writes that named it", async () => {
   assert.deepEqual(writes.dev, ["huddles/dev"]);
   assert.deepEqual(writes.laptop, ["*", "global", "huddles/dev"]); // as a pin: * reached huddles-dev, so it keeps huddles/dev
 });
+
+test("a token deletes a static key within its writes, never a minted one or one outside them", async () => {
+  const { catalog, tokens, deps } = await setup();
+  const del = (name: string, token: string, scope?: string) => handle(new Request(`https://t.example/v1/keys/${name}${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`,
+    { method: "DELETE", headers: { authorization: `Bearer ${token}` } }), deps);
+  await catalog.put("huddles/dev", "A", "v");
+  await catalog.put("huddles", "A", "v");
+  await catalog.put("global", "CLOUDFLARE_API_TOKEN", "parent-fake", { kind: "mint:cloudflare" });
+  assert.equal((await del("A", tokens.dev, "huddles")).status, 403);
+  assert.equal((await del("A", tokens.reader, "huddles")).status, 403);
+  assert.equal((await del("CLOUDFLARE_API_TOKEN", tokens.laptop, "global")).status, 409);
+  assert.equal((await del("MISSING", tokens.dev, "huddles/dev")).status, 404);
+  assert.deepEqual(await (await del("A", tokens.dev, "huddles/dev")).json(), { scope: "huddles/dev", name: "A", action: "deleted" });
+  assert.equal(await catalog.keyRow("huddles/dev", "A"), null);
+  assert.ok(await catalog.keyRow("huddles", "A"));
+  assert.match(JSON.stringify(await catalog.recentAudit()), /"actor":"dev","action":"delete","project":"huddles\/dev","names":"A"/);
+});
+
+test("a key made minted between the check and the delete is not deleted", async () => {
+  const { catalog } = await setup();
+  await catalog.put("global", "RACED", "parent-fake", { kind: "mint:cloudflare" });
+  assert.equal(await catalog.removeStatic("global", "RACED"), false);
+  assert.ok(await catalog.keyRow("global", "RACED"));
+  await catalog.put("global", "PLAIN", "v");
+  assert.equal(await catalog.removeStatic("global", "PLAIN"), true);
+});

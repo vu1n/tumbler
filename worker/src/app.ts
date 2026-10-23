@@ -1,5 +1,5 @@
 // app.ts — routes, apart from index.ts so tests can drive them without Worker bindings.
-import { Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused, writeReaches } from "./catalog.ts";
+import { type Caller, Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused, writeReaches } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
@@ -107,13 +107,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     // Loose: JSON can spell one byte of value in up to six (\u0000); the exact limit is on the value below.
     if (Number(request.headers.get("content-length") ?? 0) > MAX_VALUE * 6 + 4096) return json({ error: "value too large" }, 413);
     const b = await request.json().catch(() => ({})) as Record<string, unknown>;
-    // No scope named: the one the token reads by default, never global by accident.
-    const scope = b.scope ? String(b.scope) : caller.projects ? catalog.scopeFor(caller, null) : null;
-    if (!scope) return json({ error: "name a scope to write: global, a project or project/env" }, 400);
-    checkScope(scope);
-    if (!writeReaches(caller.writes, scope)) {
-      return json({ error: `this token may not write ${scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}; an admin adds it under the token's writes in /admin` }, 403);
-    }
+    const scope = writeScope(catalog, caller, b.scope ? String(b.scope) : null);
     const value = typeof b.value === "string" ? b.value : "";
     if (!value) return json({ error: "empty value" }, 400);
     if (new TextEncoder().encode(value).length > MAX_VALUE) return json({ error: `a value is at most ${MAX_VALUE} bytes` }, 413);
@@ -130,6 +124,19 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     await catalog.put(scope, name, value, { kind: "static", config: cfg, checked: check.status === "ok", ...(typeof b.description === "string" ? { description: b.description } : {}) });
     await catalog.audit(caller.name, "put", scope === GLOBAL ? null : scope, [name]);
     return json({ scope, name, action: prev ? "rotated" : "created", checked: check.status === "ok" });
+  }
+  // Delete a static key: DELETE /v1/keys/NAME?scope=..., what `tumbler rm` sends. Within the token's writes.
+  if (url.pathname.startsWith("/v1/keys/") && request.method === "DELETE") {
+    const name = decodeURIComponent(url.pathname.slice("/v1/keys/".length));
+    checkName(name);
+    const scope = writeScope(catalog, caller, url.searchParams.get("scope"));
+    const prev = await catalog.keyRow(scope, name);
+    if (!prev) return json({ error: `no key ${scope}/${name}` }, 404);
+    // Why: deleting a parent ends every child it minted; that stays an admin's call.
+    if (prev.kind !== "static") return json({ error: `${scope}/${name} is a ${prev.kind} key; delete it in /admin` }, 409);
+    if (!await catalog.removeStatic(scope, name)) return json({ error: `${scope}/${name} changed while it was being deleted; nothing was deleted` }, 409);
+    await catalog.audit(caller.name, "delete", scope === GLOBAL ? null : scope, [name]);
+    return json({ scope, name, action: "deleted" });
   }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
   if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, writes: caller.writes ?? null, expires_at: caller.expires_at ?? null });
@@ -150,6 +157,18 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     return json(minted ? { env, max_age: MINTED_MAX_AGE_S } : { env });
   }
   return json({ error: "not found" }, 404);
+}
+
+// The scope a caller token writes: the one it names, else the one it reads by default (never global by
+// accident), refused unless the token's writes reach it.
+function writeScope(catalog: Catalog, caller: Caller, requested: string | null) {
+  const scope = requested ?? (caller.projects ? catalog.scopeFor(caller, null) : null);
+  if (!scope) throw new Refused(400, "name a scope to write: global, a project or project/env");
+  checkScope(scope);
+  if (!writeReaches(caller.writes, scope)) {
+    throw new Refused(403, `this token may not write ${scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}; an admin adds it under the token's writes in /admin`);
+  }
+  return scope;
 }
 
 async function adminRoute(request: Request, url: URL, deps: Deps) {

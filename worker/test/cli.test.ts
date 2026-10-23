@@ -324,3 +324,12 @@ test("ssh-keygen prints the public key before saving, so a failed save never los
   assert.match(r.stdout, /^ssh-ed25519 /);
   assert.match(r.stderr, /may not write kypp[\s\S]*may or may not have been saved/);
 });
+
+test("rm deletes a key the token may write, and the next run no longer gets it", async () => {
+  assert.equal((await cliIn(["put", "GONE_SOON", "-p", "dev"], "fake")).code, 0);
+  const r = await cliIn(["rm", "GONE_SOON", "-p", "dev"], "");
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /deleted GONE_SOON from dev/);
+  await assert.rejects(cli(["run", "-k", "GONE_SOON", "--", "true"], { TUMBLER_TTL: "0", TUMBLER_TOKEN: writer }), /unknown keys: GONE_SOON/);
+  assert.match((await cliIn(["rm", "AWS_REGION", "-p", "kypp"], "")).stderr, /may not write kypp/);
+});

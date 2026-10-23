@@ -28,6 +28,8 @@
 //                                    from an argument. A single-line value loses its trailing newline;
 //                                    a multi-line one (a private key) is kept exactly. Default scope:
 //                                    -p, TUMBLER_PROJECT or .tumbler, else the token's one project
+//   tumbler rm NAME [-p project | --global]
+//                                    delete a static key, within the token's writes; same default scope
 //   tumbler ssh-keygen NAME [-p project | --global] [-C comment] [-d description]
 //                                    make an ed25519 keypair in memory, save the private key as NAME
 //                                    (as put does) and print the public key; nothing touches disk
@@ -645,6 +647,16 @@ async function put(args) {
   await save(f, trimValue(value), "pipe it in, pass --from-file or --clipboard, or type it at the prompt");
 }
 
+async function rm(args) {
+  const f = writeFlags(args, "usage: tumbler rm NAME [-p project | --global]");
+  if (f.desc !== undefined) die("rm takes no description", 2);
+  let r;
+  try { r = await brokerCall("DELETE", `/v1/keys/${encodeURIComponent(f.name)}${f.scope ? `?scope=${encodeURIComponent(f.scope)}` : ""}`, null); }
+  catch (e) { die(e.message); }
+  try { await ask({ op: "reload" }); } catch {} // so the next run doesn't get it from the cache
+  say(`deleted ${r.name} from ${r.scope}`);
+}
+
 // An ed25519 keypair in OpenSSH's own formats (PROTOCOL.key), made here so the private key never
 // touches disk the way `ssh-keygen -f` would put it there.
 function sshEd25519(comment) {
@@ -695,8 +707,9 @@ switch (cmd) {
   }
   case "whoami": try { process.stdout.write(JSON.stringify(await brokerGet("/v1/whoami")) + "\n"); } catch (e) { die(e.message); } break;
   case "put": await put(args); break;
+  case "rm": await rm(args); break;
   case "ssh-keygen": await sshKeygen(args); break;
   case "reload": try { await ask({ op: "reload" }); } catch {} process.stdout.write("cache cleared\n"); break;
   case "shim": shim(args); break;
-  default: die("usage: tumbler run|auto|keys|whoami|put|ssh-keygen|reload|shim  (see the header of this file)", 2);
+  default: die("usage: tumbler run|auto|keys|whoami|put|rm|ssh-keygen|reload|shim  (see the header of this file)", 2);
 }
