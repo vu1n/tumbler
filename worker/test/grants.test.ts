@@ -160,6 +160,8 @@ test("narrowing a token's scopes ends the children holding what it no longer all
   const tokens = (await (await s.call("GET", "/admin/api/tokens", undefined, undefined, "vu@example.com")).json()).tokens;
   assert.deepEqual(tokens.map((t: any) => [t.name, t.scopes]), [["dev", null], ["other", null]]);
   assert.equal((await s.call("PATCH", "/admin/api/tokens/dev", undefined, { scopes: ["not a scope"] }, "vu@example.com")).status, 400);
+  // A key may name a scope without a namespace; the token can still be given exactly that one.
+  assert.equal((await s.call("PATCH", "/admin/api/tokens/other", undefined, { scopes: ["deploy"] }, "vu@example.com")).status, 200);
 });
 
 test("a live child wider than the token's scopes ends on the next request, even when the narrowing's cleanup never ran", async () => {

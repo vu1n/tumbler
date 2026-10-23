@@ -208,7 +208,7 @@ permissions, by name (as the dashboard shows them) or by id:
 the account refuses the save, and names are stored as ids, which don't change.
 
 **A token's scopes are its approval.** When you create a token in `/admin`, besides its pin you
-say what it may mint beyond reads: nothing (Read only), `workers:write` (Read + deploy), or `*` (any
+say what it may mint beyond reads: nothing (Read only), `workers:write` (Read + deploy: Workers, D1, KV and R2 writes), or `*` (any
 scope a key has, including ones added to a key later). You decide once, there. After that nothing waits for you:
 
 - Reads are minted on request, for every token.
