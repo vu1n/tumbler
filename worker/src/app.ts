@@ -4,6 +4,7 @@ import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
 import { errorClass, MINTED_MAX_AGE_S, scopeNames, type GrantRow, type Grants } from "./grants.ts";
+import { sha256hex } from "./crypto.ts";
 import { checkKey, type Verifiers } from "./verify.ts";
 
 export interface Deps {
@@ -23,7 +24,21 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 });
 const bearer = (r: Request) => /^Bearer\s+(\S+)$/i.exec(r.headers.get("authorization") ?? "")?.[1] ?? null;
 
+let served: { cli: string; version: string } | null = null;
+async function cliVersion(cli: string) {
+  if (served?.cli !== cli) served = { cli, version: (await sha256hex(cli)).slice(0, 12) };
+  return served.version;
+}
+
 export async function handle(request: Request, deps: Deps): Promise<Response> {
+  const r = await route(request, deps);
+  // The CLI this broker serves, as the CLI names its own version (the first 12 of its sha256), on
+  // every /v1 answer, errors included: a stale local copy then says `tumbler update` itself.
+  if (deps.cli && new URL(request.url).pathname.startsWith("/v1/")) r.headers.set("x-tumbler-cli", await cliVersion(deps.cli));
+  return r;
+}
+
+async function route(request: Request, deps: Deps): Promise<Response> {
   try {
     const url = new URL(request.url), path = url.pathname;
     // The CLI itself is public (it holds no secrets), so a setup script can fetch it before the

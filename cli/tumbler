@@ -45,8 +45,14 @@
 //                                    make an ed25519 keypair in memory, save the private key as NAME
 //                                    (as put does) and print the public key; nothing touches disk
 //   tumbler shim <tool>...           install wrappers so <tool> always runs under `tumbler run`
+//   tumbler url [URL]                print the broker's URL, or save it (~/.config/tumbler/url) so
+//                                    TUMBLER_URL needn't be exported; with neither, the first command
+//                                    at a terminal asks for it once and saves it
+//   tumbler update                   replace this CLI with the one the broker serves at /cli. Every
+//                                    broker answer names that version, and a CLI that differs says
+//                                    so once on stderr (TUMBLER_UPDATE_CHECK=off quiets it)
 //
-// Config (environment): TUMBLER_URL (required), TUMBLER_TOKEN (optional: leave unset when the
+// Config (environment): TUMBLER_URL (or `tumbler url`), TUMBLER_TOKEN (optional: leave unset when the
 // environment's network secret adds the Authorization header), TUMBLER_TTL seconds (default 300,
 // 0 disables the cache; an env with a minted key is cached at most 5 minutes), TUMBLER_PROJECT (default project), TUMBLER_WATCH seconds between --watch
 // polls (default 30), TUMBLER_DIAGNOSE=off to skip the failure report. A `.tumbler` file in the working
@@ -57,7 +63,7 @@
 // TUMBLER_AUTO=off skips auto and fetches every key the token can read.
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { constants, homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -91,7 +97,7 @@ function brokerCall(method, path, body, { url: base, token, headers = [] } = cal
   return new Promise((ok, fail) => {
     // Headers and body go in on stdin as a curl config, so neither a token (caller or Access) nor a
     // value `put` sends ever shows up in `ps`.
-    const args = ["-sS", "--max-time", "15", "-X", method, "-K", "-", "-w", "\n%{http_code}"];
+    const args = ["-sS", "--max-time", "15", "-X", method, "-K", "-", "-w", "\n%header{x-tumbler-cli}\n%{http_code}"];
     const child = spawn("curl", [...args, base.replace(/\/$/, "") + path], { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => { stdout += d; });
@@ -99,7 +105,9 @@ function brokerCall(method, path, body, { url: base, token, headers = [] } = cal
     child.on("error", fail);
     child.on("close", (code) => {
       if (code !== 0 && !/\n[1-9]\d\d$/.test(stdout)) return fail(new Error(stderr.trim() || `curl exited ${code}`)); // no HTTP status: say why
-      const i = stdout.lastIndexOf("\n"), status = Number(stdout.slice(i + 1)), text = stdout.slice(0, i);
+      const i = stdout.lastIndexOf("\n"), status = Number(stdout.slice(i + 1)), j = stdout.lastIndexOf("\n", i - 1);
+      const text = stdout.slice(0, Math.max(j, 0)), served = stdout.slice(j + 1, i);
+      noticeStale(served);
       let parsed; try { parsed = JSON.parse(text); } catch { parsed = { error: text.slice(0, 200) }; }
       status >= 200 && status < 300 ? ok(parsed) : fail(new Error(`broker ${status}: ${parsed.error ?? "error"}`));
     });
@@ -111,6 +119,38 @@ function brokerCall(method, path, body, { url: base, token, headers = [] } = cal
     if (body !== null) conf.push(`header = ${q("Content-Type: application/json")}`, `data-binary = ${q(JSON.stringify(body))}`);
     child.stdin.end(conf.join("\n") + "\n");
   });
+}
+
+// The broker names the CLI it serves on every /v1 answer; a different one here means this copy is
+// stale (a flag it doesn't know yet, a route it calls wrong). Said once per process, on stderr.
+let staleSaid = false;
+function noticeStale(served) {
+  if (staleSaid || !/^[0-9a-f]{12}$/.test(served) || served === VERSION || process.env.TUMBLER_UPDATE_CHECK === "off") return;
+  staleSaid = true;
+  process.stderr.write(`tumbler: this CLI (${VERSION}) differs from the broker's (${served}); run \`tumbler update\`\n`);
+}
+
+// Replaces this file with the CLI the broker serves at /cli, in place (through symlinks), after
+// checking it parses: a broken download never replaces a working CLI.
+async function update() {
+  const base = callerCfg().url ?? die("TUMBLER_URL is not set");
+  const target = realpathSync(SELF), tmp = join(dirname(target), `.tumbler-update-${process.pid}`);
+  try {
+    execFileSync("curl", ["-fsSL", "--max-time", "30", "-o", tmp, base.replace(/\/$/, "") + "/cli"], { stdio: ["ignore", "ignore", "pipe"] });
+  } catch (e) {
+    try { unlinkSync(tmp); } catch {}
+    die(e.code === "ENOENT" ? "curl isn't installed" : /Permission denied|Read-only/i.test(String(e.stderr)) ? `can't write ${dirname(target)}; run it with sudo` : `could not fetch ${base}/cli (${String(e.stderr).trim() || e.message})`);
+  }
+  const body = readFileSync(tmp);
+  try {
+    if (!body.toString("utf8", 0, 20).startsWith("#!/usr/bin/env node")) throw new Error("not the tumbler CLI");
+    execFileSync(process.execPath, ["--check", tmp], { stdio: "ignore" });
+  } catch (e) { unlinkSync(tmp); die(`the broker's /cli didn't check out (${e.message}); nothing was changed`); }
+  const next = createHash("sha256").update(body).digest("hex").slice(0, 12);
+  if (next === VERSION) { unlinkSync(tmp); return say(`already current (${VERSION})`); }
+  chmodSync(tmp, 0o755);
+  renameSync(tmp, target);
+  say(`updated ${target} from ${VERSION} to ${next}`);
 }
 
 const envPath = (project, keys) => {
@@ -901,8 +941,40 @@ function shim(tools) {
   process.stdout.write(`shims in ${SHIM_DIR}; put it first on PATH\n`);
 }
 
+// --- the broker's URL: TUMBLER_URL, else the one saved with `tumbler url`, else asked for once ------
+
+const URL_FILE = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "tumbler", "url");
+const savedUrl = () => { try { return readFileSync(URL_FILE, "utf8").trim() || null; } catch { return null; } };
+function saveUrl(raw) {
+  const url = withScheme(String(raw).trim()).replace(/\/+$/, "");
+  try { if (!/^https?:$/.test(new URL(url).protocol)) throw 0; } catch { die(`not a URL: ${raw}`, 2); }
+  mkdirSync(dirname(URL_FILE), { recursive: true });
+  writeFileSync(URL_FILE, url + "\n");
+  process.env.TUMBLER_URL = url;
+  say(`broker URL set to ${url} (${URL_FILE})`);
+}
+async function ensureUrl() {
+  // Set here, so the cache helper and the commands `run` starts inherit it like an exported variable.
+  if (!process.env.TUMBLER_URL && savedUrl()) process.env.TUMBLER_URL = savedUrl();
+  if (process.env.TUMBLER_URL) return;
+  if (!process.stdin.isTTY) die(`TUMBLER_URL is not set; run \`tumbler url https://<your broker>\` once, or export TUMBLER_URL`);
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const answer = await rl.question("tumbler: broker URL (e.g. https://tumbler.example.com): ");
+  rl.close();
+  if (!answer.trim()) die("no URL given; nothing was saved", 2);
+  saveUrl(answer);
+}
+
 const [cmd, ...args] = process.argv.slice(2);
+if (["run", "auto", "keys", "whoami", "put", "rm", "scope", "admin", "ssh-keygen", "update", "__daemon"].includes(cmd)) await ensureUrl();
 switch (cmd) {
+  case "url": {
+    if (args.length > 1) die("usage: tumbler url [URL]", 2);
+    if (args[0]) saveUrl(args[0]);
+    else process.stdout.write((process.env.TUMBLER_URL || savedUrl() || "") + "\n");
+    break;
+  }
   case "__daemon": daemon(); break;
   case "run": await run(args); break;
   case "auto": await auto(args); break;
@@ -917,8 +989,9 @@ switch (cmd) {
   case "rm": await rm(args); break;
   case "ssh-keygen": await sshKeygen(args); break;
   case "scope": await scope(args); break;
+  case "update": await update(); break;
   case "admin": await admin(args); break;
   case "reload": try { await ask({ op: "reload" }); } catch {} process.stdout.write("cache cleared\n"); break;
   case "shim": shim(args); break;
-  default: die("usage: tumbler run|auto|keys|whoami|put|rm|scope|admin|ssh-keygen|reload|shim  (see the header of this file)", 2);
+  default: die("usage: tumbler run|auto|keys|whoami|put|rm|scope|admin|ssh-keygen|reload|shim|update|url  (see the header of this file)", 2);
 }
