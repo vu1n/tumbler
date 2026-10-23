@@ -88,7 +88,7 @@ export class Grants {
     let g = await this.current(caller, project, row);
     if (!g) {
       const start = (this.config(row).start ?? []).filter((s) => allowedBy(caller.scopes ?? null, s));
-      if (!start.length) throw new Refused(403, `${row.name}: token ${caller.name} may hold none of its start scopes; add one to the token's scopes in /admin`);
+      if (!start.length) throw new Refused(403, `${row.name}: token ${caller.name} may hold none of its start scopes. Refused; retrying won't help: ask a human to add one to this token's scopes in /admin`);
       g = await this.open(caller, project, row, start);
     }
     if (g.state !== "active") throw new Refused(409, `${row.name} is being minted by another request; run again`);
@@ -100,7 +100,7 @@ export class Grants {
     const known = Object.keys(this.config(row).scopes ?? {});
     for (const s of scopes) if (!known.includes(s)) throw new Refused(400, `${row.name} has no scope ${s}`);
     const outside = scopes.filter((s) => !allowedBy(caller.scopes ?? null, s));
-    if (outside.length) throw new Refused(403, `${row.name}: token ${caller.name} may not hold ${outside.join(", ")}; add it to the token's scopes in /admin`);
+    if (outside.length) throw new Refused(403, `${row.name}: token ${caller.name} may not hold ${outside.join(", ")}. Refused; retrying won't help: ask a human to add it to this token's scopes in /admin`);
   }
 
   // More scopes on a mint key: minted at once (a wider child) when the token allows them all,

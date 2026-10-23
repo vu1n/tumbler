@@ -66,7 +66,7 @@ textarea.env{display:block;min-height:120px}
   <input name="projects" placeholder="huddles, huddles/prod, */dev (empty = global only)" title="A project reads its shared keys; project/env one environment (dev, staging, prod); * is every project, */env that environment of every project.">
   <span class="chips" title="Fill in a preset"><button type="button" data-pin="*, */dev, */staging, */prod">Everything</button><button type="button" data-pin="*, */dev">All projects, dev</button><button type="button" data-pin="">Global only</button></span>
   <input name="scopes" placeholder="may mint beyond reads: workers:write, or * (empty = reads only)" title="What this token's minted keys may carry beyond reads, without asking anyone. A scope outside this list is refused.">
-  <span class="chips" title="Fill in a preset"><button type="button" data-scopes="">Read only</button><button type="button" data-scopes="workers:write">Read + deploy</button><button type="button" data-scopes="*">Any scope</button></span>
+  <span class="chips" title="Fill in a preset"><button type="button" data-scopes="">Read only</button><button type="button" data-scopes="workers:write">Read + deploy</button><button type="button" data-scopes="*" title="Every scope any key has, including ones added later">Any scope</button></span>
   <input name="hours" type="number" min="1" step="1" placeholder="expires in hours (empty = never)" title="The token stops working then; grants it holds are ended by the next sweep.">
   <button>Create</button>
 </form>

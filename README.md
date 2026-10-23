@@ -111,7 +111,8 @@ only the keys the repo needs. Auto writes a `project =` line only when you name 
 `TUMBLER_PROJECT`), never the pin of the token that ran it: a token pinned to one project reads it
 without the line, and a line naming another project would make the broker refuse every other token. The file auto
 writes is listed in the repo's `.git/info/exclude`, so it never shows up in a change and nobody has to
-review or commit it; commit one only when you want a repo to pin its set. A failure never widens
+review or commit it, and a fresh checkout picks again on its first `run`. Commit one only when you
+want a repo to pin its set. A failure never widens
 the set: if auto can't reach the broker the command doesn't start, and if `.tumbler` can't be written
 (a read-only checkout) the command runs with just the picked keys. `TUMBLER_AUTO=off` skips auto and
 fetches every key the token can read.
@@ -208,14 +209,14 @@ the account refuses the save, and names are stored as ids, which don't change.
 
 **A token's scopes are its approval.** When you create a token in `/admin`, besides its pin you
 say what it may mint beyond reads: nothing (Read only), `workers:write` (Read + deploy), or `*` (any
-scope a key has). You decide once, there. After that nothing waits for you:
+scope a key has, including ones added to a key later). You decide once, there. After that nothing waits for you:
 
 - Reads are minted on request, for every token.
 - A scope the token's scopes allow is minted at once. `tumbler run --scope workers:write -- wrangler
   deploy` gets a wider child, and the narrower one is deleted at Cloudflare.
 - A scope outside them is refused, and the command doesn't start: `CLOUDFLARE_API_TOKEN: token dev
-  may not hold workers:write; add it to the token's scopes in /admin`. Click the token's scopes in
-  `/admin` to change them. Narrowing them ends the children holding what they no longer allow.
+  may not hold workers:write. Refused; retrying won't help: ask a human to add it to this token's
+  scopes in /admin`. An agent stops and asks you; you click the token's scopes in `/admin`. Narrowing them ends the children holding what they no longer allow.
 - Every mint is in the audit log (token, key, scopes, time), and Grants lists the live children.
 
 Each caller holds one **grant** per minted key, and its state decides what the env var holds:

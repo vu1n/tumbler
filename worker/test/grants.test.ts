@@ -91,7 +91,7 @@ test("a token's scopes are its approval: a write inside them mints at once, outs
   // other reads only: a write start scope leaves it nothing to start with, and nothing is minted.
   const r = await s.env(s.other);
   assert.equal(r.status, 403);
-  assert.match((await r.json()).error, /may hold none of its start scopes; add one to the token's scopes in \/admin/);
+  assert.match((await r.json()).error, /may hold none of its start scopes\. Refused; retrying won't help: ask a human to add one to this token's scopes in \/admin/);
   assert.equal(s.fake.minted.length, 1);
   assert.equal((await adminGrants(s)).length, 1); // and no grant waits anywhere
 });
@@ -629,7 +629,7 @@ test("cli: run gets a read child; --scope for a write the token can't hold stops
   await s.catalog.setScopes("dev", null);
   const err = await cli(["run", "--scope", "workers:write", "--", ...printToken]).then(() => null, (e) => e);
   assert.ok(err, "the command must not start without the scope");
-  assert.match(err.stderr, /may not hold workers:write; add it to the token's scopes in \/admin/);
+  assert.match(err.stderr, /may not hold workers:write\. Refused; retrying won't help: ask a human to add it to this token's scopes in \/admin/);
   assert.equal(err.stdout, "");
   await s.catalog.setScopes("dev", ["workers:write"]);
   assert.equal((await cli(["run", "--scope", "workers:write", "--", ...printToken])).stdout, "child-2");

@@ -257,3 +257,27 @@ test("keys in a deployment named before environments were fixed can still be mov
   assert.deepEqual((await catalog.tokens()).find((t) => t.name === "legacy")!.projects, ["other/qa", "huddles/dev"]);
   assert.equal((await admin(deps, "scopes/move", { method: "POST", as: "vu@example.com", body: JSON.stringify({ from: "huddles", to: "huddles/qa" }) })).status, 400);
 });
+
+test("migration 0007 carries over each token's live write approvals and active write grants as its scopes", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readdirSync } = await import("node:fs");
+  const dir = new URL("../migrations/", import.meta.url), files = readdirSync(dir).sort();
+  const db = new DatabaseSync(":memory:"), at = (f: string) => db.exec(readFileSync(new URL(f, dir), "utf8"));
+  for (const f of files.filter((f) => f < "0007")) at(f);
+  const ins = (sql: string, ...v: (string | null)[]) => db.prepare(sql).run(...v);
+  for (const n of ["approved", "granted", "reader", "lapsed", "gone"]) ins("INSERT INTO tokens (name, hash, created_at, revoked_at) VALUES (?, ?, '2026-01-01', ?)", n, `h-${n}`, n === "gone" ? "2026-01-02" : null);
+  const approval = (caller: string, scopes: string[], until: string, ended: string | null = null) =>
+    ins("INSERT INTO approvals (id, caller, key_scope, name, key_rev, scopes, approved_by, created_at, until, ended_at) VALUES (?, ?, 'dev', 'K', 'r', ?, 'vu', '2026-01-01', ?, ?)", `a-${caller}-${until}`, caller, JSON.stringify(scopes), until, ended);
+  const grant = (caller: string, scopes: string[], state: string) =>
+    ins("INSERT INTO grants (id, caller, key_scope, key_rev, name, state, scopes, expires_at, created_at, updated_at) VALUES (?, ?, 'dev', 'r', 'K', ?, ?, '2999-01-01T00:00:00Z', '2026-01-01', '2026-01-01')", `g-${caller}-${state}`, caller, state, JSON.stringify(scopes));
+  approval("approved", ["workers:read", "workers:write"], "2999-01-01T00:00:00Z");
+  approval("lapsed", ["workers:write"], "2000-01-01T00:00:00Z");
+  approval("lapsed", ["d1:write"], "2999-01-01T00:00:00Z", "2026-01-02");
+  grant("granted", ["workers:read", "workers:write", "d1:write"], "active");
+  grant("granted", ["r2:write"], "revoked");
+  grant("reader", ["workers:read"], "active");
+  approval("gone", ["workers:write"], "2999-01-01T00:00:00Z");
+  at(files.find((f) => f.startsWith("0007"))!);
+  const scopes = Object.fromEntries((db.prepare("SELECT name, scopes FROM tokens").all() as any[]).map((r) => [r.name, r.scopes && JSON.parse(r.scopes)]));
+  assert.deepEqual(scopes, { approved: ["workers:write"], granted: ["d1:write", "workers:write"], reader: null, lapsed: null, gone: null });
+});
