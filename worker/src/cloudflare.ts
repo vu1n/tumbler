@@ -15,9 +15,11 @@ const API = "https://api.cloudflare.com/client/v4";
 const ACCOUNT = /^[0-9a-f]{32}$/, GROUP = /^[0-9a-f]{32}$/;
 
 // Read is granted on request, write waits for an admin (machine.ts autoApproved).
+// Why Containers: `wrangler deploy` of a Worker with `containers` pushes its image through
+// /accounts/{id}/containers/*, which Workers Scripts Write doesn't reach (403 on the push).
 export const DEFAULT_SCOPES: Record<string, string[]> = {
-  "workers:read": ["Workers Scripts Read", "D1 Read", "Workers KV Storage Read", "Workers R2 Storage Read"],
-  "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write"],
+  "workers:read": ["Workers Scripts Read", "D1 Read", "Workers KV Storage Read", "Workers R2 Storage Read", "Containers Read"],
+  "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write", "Containers Write"],
 };
 
 export function cloudflare(fetcher: typeof fetch = fetch): Provider {

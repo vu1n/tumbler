@@ -243,9 +243,11 @@ Set one up in `/admin`:
 2. Create an **account-owned** Cloudflare token (Manage Account > Account API Tokens, not My
    Profile) with **Account API Tokens: Edit**: it can create other tokens and nothing else.
 3. Save it as `CLOUDFLARE_API_TOKEN` with kind `mint:cloudflare`. Just the token: with no config,
-   callers get `workers:read` (Workers Scripts, D1, KV and R2 read) and `workers:write` (the same
-   four, write; for tokens whose scopes allow it), children last 30 minutes, and
-   the token is used to look up each permission's id on your account as it's saved.
+   callers get `workers:read` (Workers Scripts, D1, KV, R2 and Containers read) and `workers:write`
+   (the same five, write, so `wrangler deploy` can push a Worker's container image; for tokens whose
+   scopes allow it), children last 30 minutes, and the token is used to look up each permission's id
+   on your account as it's saved. The ids are stored with the key, so a later change to these
+   defaults reaches a saved key only when you save it again with config `{}`.
 
 To choose other scopes, give a config. Scope names are yours; each lists Cloudflare account
 permissions, by name (as the dashboard shows them) or by id:
@@ -260,7 +262,7 @@ permissions, by name (as the dashboard shows them) or by id:
 the account refuses the save, and names are stored as ids, which don't change.
 
 **A token's scopes are its approval.** When you create a token in `/admin`, besides its pin you
-say what it may mint beyond reads: nothing (Read only), `workers:write` (Read + deploy: Workers, D1, KV and R2 writes), or `*` (any
+say what it may mint beyond reads: nothing (Read only), `workers:write` (Read + deploy: Workers, D1, KV, R2 and Containers writes), or `*` (any
 scope a key has, including ones added to a key later). You decide once, there. After that nothing waits for you:
 
 - Reads are minted on request, for every token.
