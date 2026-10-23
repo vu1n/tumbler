@@ -4,8 +4,12 @@
 // grant_events in the same transaction, so the log and the table never disagree.
 //
 //   (none) ──open──▶ pending ──mint──▶ active ──expire/revoke──▶ expired | revoked
-//                      │ └──deny/lapse──▶ denied      │ └─step_up─▶ active + requested
-//                      └──abandon──▶ expired           └─mint (approve)─▶ active, wider child
+//                      │ └──lapse──▶ denied           └─mint─▶ active, wider child
+//                      └──abandon──▶ expired
+//
+// A grant is pending only while its first child is being minted. Nothing waits for a person: a
+// token's scopes (its ceiling) are the approval, and a scope outside them is refused before any
+// event. deny, step_up and lapse remain for grants written before that, which the sweep lapses.
 //
 // No I/O, no clock: the time an event happens is part of the event.
 
@@ -16,7 +20,7 @@ export interface GrantState {
 
 export type GrantEvent =
   | { type: "open"; scopes: string[]; at: string; who: string }
-  // `approved`: what a live standing approval covers, for a mint with who "standing".
+  // `approved`: what the caller token's scopes (its ceiling) allow when the mint is made.
   | { type: "mint"; scopes: string[]; child_id: string; expires_at: string; who: string; approved?: string[] }
   | { type: "step_up"; scopes: string[]; at: string; who: string }
   | { type: "deny"; who: string }
@@ -25,12 +29,13 @@ export type GrantEvent =
   | { type: "expire"; who: string }
   | { type: "revoke"; who: string };
 
-// Why here and not in grants.ts: the approval line is part of the machine, so a mint the policy
-// makes on its own can never carry a scope an admin had to approve.
+// Why here and not in grants.ts: the line is part of the machine, so a mint can never carry a
+// scope beyond reads and what the caller's token allows.
 export const autoApproved = (scope: string) => scope.endsWith(":read");
 
-// Mints no admin made just now. Admins are emails, so neither name can be one.
-export const unattended = (who: string) => who === "policy" || who === "standing";
+// Whether a token's scopes allow `scope`: every read, and whatever the token names (`*`: any).
+export const allowedBy = (ceiling: string[] | null, scope: string) =>
+  autoApproved(scope) || !!ceiling && (ceiling.includes(scope) || ceiling.includes("*"));
 
 export const isLive = (state: string) => state === "pending" || state === "active";
 const sorted = (a: string[]) => [...new Set(a)].sort();
@@ -47,18 +52,14 @@ export function transition(g: GrantState | null, e: GrantEvent): GrantState | nu
   switch (e.type) {
     case "open": return null;
     case "mint": {
-      const scopes = sorted(e.scopes), held = new Set(g.scopes);
+      const scopes = sorted(e.scopes);
       if (!scopes.length) return null;
-      // A mint answers the request when there is one, exactly as it stands (approve passes what the
-      // admin saw; decide() refuses a mismatch first).
+      // A pending grant's first mint is for exactly what it was opened with.
       if (g.requested) { if (!same(scopes, g.requested)) return null; }
       else if (g.state === "pending") return null;
-      // Without an admin, nothing beyond held or read scopes, or what an admin's standing approval
-      // covers ("standing" only; "policy" never carries one).
-      if (unattended(e.who)) {
-        const approved = new Set(e.who === "standing" ? e.approved ?? [] : []);
-        if (!scopes.every((s) => held.has(s) || autoApproved(s) || approved.has(s))) return null;
-      }
+      // Nothing beyond reads and what the caller's token allowed when this was minted.
+      const approved = new Set(e.approved ?? []);
+      if (!scopes.every((s) => autoApproved(s) || approved.has(s))) return null;
       return { ...g, state: "active", scopes, requested: null, requested_at: null, child_id: e.child_id, expires_at: e.expires_at, decided_by: e.who };
     }
     case "step_up": {

@@ -144,7 +144,7 @@ const repo = (files: Record<string, string>) => {
   return dir;
 };
 
-test("auto picks keys by rule and by Clef, sends names only, and writes .tumbler", async () => {
+test("auto picks keys by rule and by Clef, sends names only, and writes .tumbler outside git", async () => {
   const dir = repo({ "worker/wrangler.jsonc": "{}", "package.json": JSON.stringify({ dependencies: { "mixpanel-lite": "1" } }), "src/secret.ts": "const k = 'do-not-send'" });
   const { stdout } = await cli(["auto"], {}, join(dir, "worker"));
   assert.match(stdout, /CLOUDFLARE_API_TOKEN\trule: Cloudflare/);
@@ -156,6 +156,8 @@ test("auto picks keys by rule and by Clef, sends names only, and writes .tumbler
   await assert.rejects(cli(["auto"], {}, dir), /exists; pass --force/);
   await cli(["auto", "--force", "-p", "dev"], {}, dir);
   assert.match(readFileSync(join(dir, ".tumbler"), "utf8"), /^project = dev$/m);
+  // Kept out of git, listed once however often it's rewritten.
+  assert.equal(readFileSync(join(dir, ".git", "info", "exclude"), "utf8"), "/.tumbler\n");
 });
 
 test("auto reads every dependency a pyproject.toml declares, extras included", async () => {

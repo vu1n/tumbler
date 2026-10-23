@@ -13,6 +13,7 @@ export interface Deps {
 
 const verifiers = ({ grants, fetcher }: Deps): Verifiers => ({ providers: grants?.providers ?? {}, fetcher });
 const MAX_CHECKS = 20, MAX_IMPORT = 100;
+const list = (v: unknown) => Array.isArray(v) ? v.map(String) : null;
 
 // What a caller learns about its grant: never the child credential or its provider id.
 const grantView = (g: GrantRow) => ({ id: g.id, name: g.name, state: g.state, scopes: g.scopes, requested: g.requested, expires_at: g.expires_at });
@@ -58,7 +59,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     return json({ project, keys: picks });
   }
   // Ask for more scopes on the minted keys in a set: {"keys": [...], "scopes": ["workers:write"]}.
-  // Reads are granted at once; anything else comes back with `requested` set, waiting in /admin.
+  // Minted at once when the token's scopes allow them; refused (403) otherwise.
   if (url.pathname === "/v1/step-up" && request.method === "POST") {
     if (!grants) return json({ error: "minting is off" }, 501);
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
@@ -70,14 +71,10 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       if (row.kind === "static") continue;
       const known = Object.keys(grants.config(row).scopes ?? {}), mine = scopes.filter((s) => known.includes(s));
       if (!mine.length) continue;
-      const g = await grants.stepUp(caller, project, row, mine);
-      // Nothing waiting, yet without a scope asked for: the request was denied (an active grant
-      // keeps its narrower child), so the caller must not run as if it had been granted.
-      const denied = !g.requested && !mine.every((s) => g.scopes.includes(s));
-      out.push({ ...grantView(g), ...(denied ? { denied } : {}) });
+      out.push(grantView(await grants.stepUp(caller, project, row, mine)));
     }
     if (!out.length) return json({ error: `no minted key in this set has scope ${scopes.join(", ")}` }, 400);
-    return json({ grants: out, approve_in: grants.approver?.where ?? "/admin" });
+    return json({ grants: out });
   }
   // Run each key's check on its current value: {"keys": [...]} (empty: every key the caller reads).
   // Statuses only, never a value; `tumbler run` calls this when a command fails.
@@ -99,7 +96,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     return json({ project, checks });
   }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
-  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, expires_at: caller.expires_at ?? null });
+  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, expires_at: caller.expires_at ?? null });
   // Names only: listing must not mint a child for every minted key.
   if (url.pathname === "/v1/keys") {
     const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
@@ -233,7 +230,6 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     // The moved mint keys' children and every grant read as `from` stop now. A rerun after a crash
     // repeats both; the sweep's closeStale() also catches moved keys a crash left behind.
     for (const k of moved) if (k.kind !== "static") await grants?.closeStale(from, k.name);
-    // "system": a migration must not block the next grant the way an admin's revoke does (blocked()).
     await grants?.closeProject(from, "system");
     await catalog.audit(who, "scope-move", to, [from, ...moved.map((k) => k.name)]);
     return json({ from, to, moved: moved.map((k) => k.name), repinned: repinned.map((t) => t.name) });
@@ -243,12 +239,20 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     if (m === "POST" && parts.length === 1) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
-      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at));
+      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes));
       await catalog.audit(who, "token-create", null, [String(b.name)]);
       return json({ name: b.name, token }); // shown once
     }
+    // {"projects": [...]} edits the pin, {"scopes": [...]} the ceiling; either or both.
     if (m === "PATCH" && parts.length === 2) {
       const b = await body();
+      if ("scopes" in b) {
+        const scopes = list(b.scopes);
+        await catalog.setScopes(parts[1], scopes);
+        await grants?.closeOutsideCeiling(parts[1], scopes?.length ? scopes : null, who);
+        await catalog.audit(who, "token-scopes", null, [parts[1], ...(scopes?.length ? scopes : ["reads-only"])]);
+        if (!("projects" in b)) return json({ ok: true });
+      }
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
       await catalog.setPin(parts[1], projects?.length ? projects : null);
       await grants?.closeOutsidePin(parts[1], projects?.length ? projects : null, who);
@@ -263,16 +267,10 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     }
   }
   if (parts[0] === "grants" && grants) {
-    if (m === "GET" && parts.length === 1) return json({ revoke_pending: await grants.pendingRevokes(), grants: (await grants.list()).map((g) => ({ ...grantView(g), caller: g.caller, project: g.project, decided_by: g.decided_by, updated_at: g.updated_at })), approvals: await grants.approvals() });
-    if (m === "POST" && parts.length === 3 && (parts[2] === "approve" || parts[2] === "deny")) {
-      const b = await body(), seen = Array.isArray(b.requested) ? b.requested.map(String) : undefined;
-      const forMinutes = Number(b.for_minutes) > 0 ? Number(b.for_minutes) : 0;
-      return json({ grant: grantView(await grants.decide(parts[1], parts[2] === "approve", who, seen, forMinutes)) });
-    }
+    if (m === "GET" && parts.length === 1) return json({ revoke_pending: await grants.pendingRevokes(), grants: (await grants.list()).map((g) => ({ ...grantView(g), caller: g.caller, project: g.project, decided_by: g.decided_by, updated_at: g.updated_at })) });
     if (m === "DELETE" && parts.length === 2) { await grants.revoke(parts[1], who); return json({ ok: true }); }
     if (m === "GET" && parts.length === 3 && parts[2] === "events") return json({ events: await grants.events(parts[1]) });
   }
-  if (parts[0] === "approvals" && grants && m === "DELETE" && parts.length === 2) { await grants.endApproval(parts[1], who); return json({ ok: true }); }
   if (parts[0] === "audit" && m === "GET") return json({ audit: await catalog.recentAudit() });
   return json({ error: "not found" }, 404);
 }

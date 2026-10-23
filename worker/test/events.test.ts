@@ -20,15 +20,20 @@ test("open makes a pending grant asking for the sorted scopes; nothing else star
   assert.equal(transition(pending, { type: "open", scopes: ["w:read"], at: AT, who: "dev" }), null);
 });
 
-test("a mint answers exactly the request, and the policy alone never grants a write", () => {
-  const mint = (scopes: string[], who: string) => ({ type: "mint" as const, scopes, child_id: "c2", expires_at: AT, who });
-  assert.equal(transition(pending, mint(["w:read", "w:write"], "policy")), null); // a write needs an admin
-  assert.equal(transition(pending, mint(["w:read"], "vu@example.com")), null);    // not what was asked
-  const ok = transition(pending, mint(["w:write", "w:read"], "vu@example.com"))!;
-  assert.deepEqual([ok.state, ok.scopes, ok.requested, ok.child_id, ok.decided_by], ["active", ["w:read", "w:write"], null, "c2", "vu@example.com"]);
-  // An active grant with no request may widen by reads on its own, never by a write.
-  assert.deepEqual(transition(active, mint(["w:read", "z:read"], "policy"))!.scopes, ["w:read", "z:read"]);
-  assert.equal(transition(active, mint(["w:read", "w:write"], "policy")), null);
+test("a mint answers exactly the opened request, and never carries a write the token didn't allow", () => {
+  const mint = (scopes: string[], approved?: string[]) => ({ type: "mint" as const, scopes, child_id: "c2", expires_at: AT, who: "policy", approved });
+  assert.equal(transition(pending, mint(["w:read", "w:write"])), null);              // a write the token didn't allow
+  assert.equal(transition(pending, mint(["w:read"], ["w:write"])), null);            // not what was opened
+  const ok = transition(pending, mint(["w:write", "w:read"], ["w:write"]))!;
+  assert.deepEqual([ok.state, ok.scopes, ok.requested, ok.child_id, ok.decided_by], ["active", ["w:read", "w:write"], null, "c2", "policy"]);
+  // An active grant widens by reads, and by a write only when the token allows it.
+  assert.deepEqual(transition(active, mint(["w:read", "z:read"]))!.scopes, ["w:read", "z:read"]);
+  assert.equal(transition(active, mint(["w:read", "w:write"])), null);
+  assert.equal(transition(active, mint(["w:read", "w:write"], ["d:edit"])), null);
+  assert.deepEqual(transition(active, mint(["w:read", "w:write"], ["w:write"]))!.scopes, ["w:read", "w:write"]);
+  // A write it already holds counts for nothing: a narrowed token re-mints without it.
+  const wrote = { ...active, scopes: ["w:read", "w:write"] };
+  assert.equal(transition(wrote, mint(["w:read", "w:write"])), null);
 });
 
 test("step-up keeps the first request time; deny and lapse keep an active grant's child", () => {
@@ -61,7 +66,7 @@ test("every grant change is logged in the same write, never with a credential, a
   const grants = new Grants(catalog, { cloudflare: provider });
   const config = { account_id: "a".repeat(32), start: ["w:read"], scopes: { "w:read": ["1".repeat(32)], "w:write": ["2".repeat(32)] } };
   await catalog.put("dev", "CF", "parent-secret", { kind: "mint:cloudflare", config });
-  const dev = await catalog.createToken("dev", ["dev"]);
+  const dev = await catalog.createToken("dev", ["dev"], null, ["w:write"]);
   const deps = { catalog, grants, admin: async () => "vu@example.com" };
   const call = (method: string, path: string, token?: string, body?: unknown) => handle(new Request(`https://t.example${path}`, {
     method, body: body === undefined ? undefined : JSON.stringify(body),
@@ -69,15 +74,14 @@ test("every grant change is logged in the same write, never with a credential, a
 
   await call("GET", "/v1/env?keys=CF", dev);
   const up = (await (await call("POST", "/v1/step-up", dev, { keys: ["CF"], scopes: ["w:write"] })).json()).grants[0];
-  await call("POST", `/admin/api/grants/${up.id}/approve`, undefined, { requested: up.requested });
   await call("DELETE", `/admin/api/grants/${up.id}`);
 
   const events = (await (await call("GET", `/admin/api/grants/${up.id}/events`)).json()).events;
   assert.deepEqual(events.map((e: any) => [e.type, e.actor, e.from_state, e.to_state]), [
-    ["open", "dev", null, "pending"], ["mint", "policy", "pending", "active"], ["step_up", "dev", "active", "active"],
-    ["mint", "vu@example.com", "active", "active"], ["revoke", "vu@example.com", "active", "revoked"],
+    ["open", "dev", null, "pending"], ["mint", "policy", "pending", "active"],
+    ["mint", "policy", "active", "active"], ["revoke", "vu@example.com", "active", "revoked"],
   ]);
-  assert.deepEqual(events[3].scopes, ["w:read", "w:write"]);
+  assert.deepEqual(events[2].scopes, ["w:read", "w:write"]);
   const log = JSON.stringify(db.raw.prepare("SELECT * FROM grant_events").all());
   assert.ok(!/secret|prov-id/.test(log), log);
   // The table and the log agree: each grant's state is its last event's.
@@ -91,13 +95,4 @@ test("every grant change is logged in the same write, never with a credential, a
   const before = events.length;
   assert.equal((await call("DELETE", `/admin/api/grants/${up.id}`)).status, 404);
   assert.equal((await (await call("GET", `/admin/api/grants/${up.id}/events`)).json()).events.length, before);
-});
-
-test("a standing mint carries only what the approval covers, and a policy mint can't borrow one", () => {
-  const wants = { ...active, requested: ["w:read", "w:write"] };
-  const mint = (who: string, approved?: string[]) => transition(wants, { type: "mint", scopes: ["w:read", "w:write"], child_id: "c2", expires_at: AT, who, approved });
-  assert.equal(mint("standing", ["w:write"])?.state, "active");
-  assert.equal(mint("standing", []), null);
-  assert.equal(mint("standing"), null);
-  assert.equal(mint("policy", ["w:write"]), null);
 });

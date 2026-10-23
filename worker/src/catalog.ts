@@ -55,19 +55,30 @@ function winners<T extends { scope: string; name: string }>(rows: T[], scopes: s
 
 // Whether a pin reaches a scope: the project (or all of them), or that environment of the project (or
 // of all of them). A grant on a scope it no longer reaches is ended.
+// A token's scopes: names as a mint key's config gives them (`workers:write`), or `*` for any.
+// Reads need no listing. Empty means reads only, stored as null.
+function checkCeiling(scopes: string[] | null): string[] | null {
+  const list = [...new Set((scopes ?? []).map((s) => String(s).trim()).filter(Boolean))].sort();
+  for (const s of list) if (s !== "*" && !/^[a-z0-9][a-z0-9_.-]*:[a-z0-9_.*-]+$/i.test(s)) throw new Refused(400, `invalid scope: ${s}`);
+  return list.length ? list : null;
+}
+const asJson = (v: string[] | null) => v === null ? null : JSON.stringify(v);
+
 export function pinReaches(projects: string[] | null, scope: string | null) {
   if (scope === null) return true;
   const env = scope.split("/")[1];
   return !!projects && (projects.includes(scope) || projects.includes(env ? `*/${env}` : "*"));
 }
 
-export interface Caller { name: string; projects: string[] | null; expires_at?: string | null }
+// `scopes`: the minted scopes the token may hold beyond reads (`*`: any), its ceiling. Inside it a
+// child is minted at once; outside it the request is refused. null: reads only.
+export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; expires_at?: string | null }
 export interface KeyRow {
   scope: string; name: string; kind: string; config: string; description: string; owner: string;
   created_at: string; rotated_at: string; expires_at: string | null; checked: number;
 }
 export interface MintRow { scope: string; name: string; kind: string; config: string; rev: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }
-export interface TokenRow { name: string; projects: string[] | null; created_at: string; revoked_at: string | null; expires_at: string | null }
+export interface TokenRow { name: string; projects: string[] | null; scopes: string[] | null; created_at: string; revoked_at: string | null; expires_at: string | null }
 
 const now = () => new Date().toISOString();
 // Children live at most 24h (MAX_TTL_MIN in grants.ts); a retired parent is kept a little longer.
@@ -89,16 +100,18 @@ export class Catalog {
   async caller(token: string): Promise<Caller | null> {
     // Why here and not only in the sweep: an expired token must stop at its expiry, not up to one
     // sweep later. The sweep then ends the grants it still holds.
-    const row = await this.db.prepare("SELECT name, projects, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
-      .bind(await sha256hex(token), this.clock().toISOString()).first<{ name: string; projects: string | null; expires_at: string | null }>();
-    return row ? { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects), expires_at: row.expires_at } : null;
+    const row = await this.db.prepare("SELECT name, projects, scopes, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
+      .bind(await sha256hex(token), this.clock().toISOString()).first<{ name: string; projects: string | null; scopes: string | null; expires_at: string | null }>();
+    return row ? { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects),
+      scopes: row.scopes === null ? null : JSON.parse(row.scopes), expires_at: row.expires_at } : null;
   }
 
   // Returns the token once; only its hash is stored. expiresAt (ISO time) is optional: without it the
   // token lives until revoked, as every token made before expiry existed does.
-  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null): Promise<string> {
+  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null): Promise<string> {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     checkPin(projects);
+    scopes = checkCeiling(scopes);
     let expires: string | null = null;
     if (expiresAt !== null) {
       const t = Date.parse(expiresAt);
@@ -107,8 +120,8 @@ export class Catalog {
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
     const token = randomToken();
-    await this.db.prepare("INSERT INTO tokens (name, hash, projects, created_at, expires_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), now(), expires).run()
+    await this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), now(), expires).run()
       .catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} exists`) : e; });
     return token;
   }
@@ -122,6 +135,14 @@ export class Catalog {
     if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
   }
 
+  // Changes which minted scopes a live token may hold. Narrowing ends the children it holds beyond
+  // the new scopes (Grants.closeOutsideCeiling); widening takes effect on its next request.
+  async setScopes(name: string, scopes: string[] | null) {
+    scopes = checkCeiling(scopes);
+    const r = await this.db.prepare("UPDATE tokens SET scopes = ? WHERE name = ? AND revoked_at IS NULL").bind(asJson(scopes), name).run();
+    if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
+  }
+
   // True when this call revoked it; false when it was already revoked, so a retry still reaches the
   // grant cleanup that an interrupted first attempt left undone.
   async revokeToken(name: string): Promise<boolean> {
@@ -132,8 +153,8 @@ export class Catalog {
   }
 
   async tokens(): Promise<TokenRow[]> {
-    const { results } = await this.db.prepare("SELECT name, projects, created_at, revoked_at, expires_at FROM tokens ORDER BY name").all<any>();
-    return results.map((r) => ({ ...r, projects: r.projects === null ? null : JSON.parse(r.projects) }));
+    const { results } = await this.db.prepare("SELECT name, projects, scopes, created_at, revoked_at, expires_at FROM tokens ORDER BY name").all<any>();
+    return results.map((r) => ({ ...r, projects: r.projects === null ? null : JSON.parse(r.projects), scopes: r.scopes === null ? null : JSON.parse(r.scopes) }));
   }
 
   // --- keys ---
