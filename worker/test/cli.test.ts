@@ -307,7 +307,9 @@ test("put at a terminal reads a hidden value; a bracketed paste keeps its newlin
       env: { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run"), TUMBLER_URL: url, TUMBLER_TOKEN: writer, TUMBLER_TTL: "0", SHELL: "/bin/sh" } }); // no profile in between
     // Typed once the prompt is up, so the terminal is already in raw mode.
     let out = "", sent = false;
-    child.stdout.on("data", (d) => { out += d; if (!sent && out.includes("\x1b[?2004h")) { sent = true; child.stdin.write(typed); } });
+    child.stdout.on("data", (d) => { out += d; if (!sent && out.includes("\x1b[?2004h")) { sent = true; send(); } });
+    // Split inside the paste marker, as a terminal's reads may be: the marker must still be seen whole.
+    const send = async () => { child.stdin.write(typed.slice(0, 3)); await new Promise((r) => setTimeout(r, 200)); child.stdin.write(typed.slice(3)); };
     child.on("close", (code) => ok({ code, out }));
   });
   assert.equal(r.code, 0, r.out);

@@ -586,13 +586,19 @@ function prompt(label) {
   tty.setRawMode(true); tty.setEncoding("utf8"); tty.resume(); // raw before the prompt shows, so nothing typed is echoed
   process.stderr.write(`${label} (hidden; paste works, Enter to finish): \x1b[?2004h`);
   return new Promise((ok) => {
-    let value = "", pasting = false;
+    let value = "", pasting = false, held = "";
     const end = (code) => {
       tty.setRawMode(false); tty.pause(); tty.off("data", onData);
       process.stderr.write("\x1b[?2004l\n");
       code === undefined ? ok(value) : process.exit(code);
     };
-    const onData = (s) => {
+    const onData = (chunk) => {
+      // A paste marker split across reads is held until the rest arrives, or its first byte would be
+      // dropped as an escape and a pasted newline would end the value early.
+      let s = held + chunk;
+      const esc = s.lastIndexOf("\x1b"), tail = esc < 0 ? "" : s.slice(esc);
+      held = tail && tail.length < PASTE_ON.length && (PASTE_ON.startsWith(tail) || PASTE_OFF.startsWith(tail)) ? tail : "";
+      if (held) s = s.slice(0, esc);
       for (let i = 0; i < s.length;) {
         if (s.startsWith(PASTE_ON, i)) { pasting = true; i += PASTE_ON.length; continue; }
         if (s.startsWith(PASTE_OFF, i)) { pasting = false; i += PASTE_OFF.length; continue; }
