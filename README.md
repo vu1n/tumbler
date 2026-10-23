@@ -107,9 +107,34 @@ tumbler put NAME [-p project | --global] [--from-file F | --clipboard] [-d desc]
                               save a static key (hidden prompt, pipe, file or clipboard)
 tumbler rm NAME [-p project | --global]
                               delete a static key
+tumbler admin <command>       what /admin does, signed in through Cloudflare Access
 tumbler ssh-keygen NAME [-p project | --global] [-C comment]
                               make an ed25519 keypair, save the private key, print the public one
 ```
+
+### Admin from the CLI
+
+Everything `/admin` does is also `tumbler admin <command>`, signed in as you through Cloudflare Access,
+never with a caller token: an admin can mint any token, so admin stays tied to an email in
+`TUMBLER_ADMINS`. `tumbler admin login` runs `cloudflared access login` against `/admin` once; later
+commands ask cloudflared for the session and pass it to curl on stdin, and Access checks it at the edge
+as it does for the page.
+
+```
+tumbler admin keys | tokens | grants | audit [--json]
+tumbler admin token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--expires-hours N]
+tumbler admin token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b]
+tumbler admin token revoke NAME
+tumbler admin put NAME --scope S [--kind mint:cloudflare] [--config JSON] [--from-file F | --clipboard] [--skip-check]
+tumbler admin rm NAME --scope S
+tumbler admin import FILE --scope S [--save]
+tumbler admin move FROM TO
+tumbler admin grant revoke ID
+```
+
+`token create` prints the token once on stdout, so `tumbler admin token create ci --pin kypp | gh secret
+set TUMBLER_TOKEN` never shows it. `admin put` takes its value the way `put` does, and is the CLI's way
+to set a minted key's parent.
 
 ### Writing keys from the CLI
 

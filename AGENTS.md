@@ -15,6 +15,8 @@
 - The project a caller reads comes from its token's pin, never from the request. Keep it that way.
 - A caller token writes (`PUT` or `DELETE /v1/keys/NAME`) only static keys, only in a scope its `writes` reach, and
   `global` only when named. It never sets or rotates a minted key's parent.
+- `tumbler admin` reaches `/admin/api` only through a Cloudflare Access session (cloudflared), never a
+  caller token: an admin can mint any token, so admin stays tied to a person.
 - `cli/tumbler` is bundled into the Worker as text (wrangler `rules`) and served at `/cli`; it must
   stay a single dependency-free file.
 - Run `cd worker && npm test && npm run typecheck` before committing.
