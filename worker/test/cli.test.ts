@@ -401,3 +401,41 @@ test("the Access session never appears in curl's arguments", async () => {
   assert.match(readFileSync(log, "utf8"), /\/admin\/api\/audit/);
   assert.ok(!readFileSync(log, "utf8").includes(FAKE_JWT));
 });
+
+test("a CLI that differs from the broker's says so once, and update replaces it in place after checking it parses", async () => {
+  const served = readFileSync(CLI, "utf8") + "\n// a newer build\n";
+  const broker = createServer(async (req, res) => {
+    const r = await handle(new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers: req.headers as any }),
+      { catalog, admin: async () => null, cli: req.headers["x-test-bad"] ? "not a cli" : served });
+    res.writeHead(r.status, Object.fromEntries(r.headers)); res.end(await r.text());
+  });
+  await new Promise<void>((ok) => broker.listen(0, "127.0.0.1", ok));
+  try {
+    const dir = mkdtempSync(join(tmpdir(), "tumbler-bin-")), copy = join(dir, "tumbler");
+    writeFileSync(copy, readFileSync(CLI), { mode: 0o755 });
+    const env = { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run"), TUMBLER_URL: `http://127.0.0.1:${(broker.address() as any).port}`, TUMBLER_TOKEN: devToken, TUMBLER_AUTO: "off" };
+    // A cached run fetches through the helper, whose stderr goes nowhere; the notice still reaches the caller.
+    const cachedRun = await exec(copy, ["run", "--", "true"], { env: { ...env, XDG_RUNTIME_DIR: mkdtempSync(join(tmpdir(), "tumbler-run-")) } });
+    assert.match(cachedRun.stderr, /differs from the broker's .*run `tumbler update`/);
+    const before = await exec(copy, ["whoami"], { env });
+    assert.equal(before.stderr.match(/run `tumbler update`/g)?.length, 1);
+    assert.equal(JSON.parse(before.stdout).name, "dev"); // the notice never gets in the way
+    assert.match((await exec(copy, ["update"], { env })).stderr, /updated .*tumbler from [0-9a-f]{12} to [0-9a-f]{12}/);
+    assert.equal(readFileSync(copy, "utf8"), served);
+    assert.match((await exec(copy, ["update"], { env })).stderr, /already current/);
+    assert.equal((await exec(copy, ["whoami"], { env })).stderr, "");
+    assert.equal((await exec(CLI, ["whoami"], { env: { ...env, TUMBLER_UPDATE_CHECK: "off" } })).stderr, "");
+  } finally { broker.close(); }
+});
+
+test("url saves the broker's URL so TUMBLER_URL needn't be exported; without either, a non-terminal run says how to set it", async () => {
+  const cfg = mkdtempSync(join(tmpdir(), "tumbler-cfg-"));
+  const { TUMBLER_URL: _x, ...noUrl } = { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run"), XDG_CONFIG_HOME: cfg, TUMBLER_TOKEN: devToken, TUMBLER_AUTO: "off", TUMBLER_UPDATE_CHECK: "off" } as Record<string, string>;
+  const err = await exec(CLI, ["whoami"], { env: noUrl }).then(() => null, (e) => e);
+  assert.match(err.stderr, /TUMBLER_URL is not set; run `tumbler url https:\/\/<your broker>` once/);
+  assert.match((await exec(CLI, ["url", url + "/"], { env: noUrl })).stderr, /broker URL set to http:\/\/127\.0\.0\.1:\d+ /);
+  assert.equal(readFileSync(join(cfg, "tumbler", "url"), "utf8"), url + "\n");
+  assert.equal((await exec(CLI, ["url"], { env: noUrl })).stdout, url + "\n");
+  assert.equal(JSON.parse((await exec(CLI, ["whoami"], { env: noUrl })).stdout).name, "dev");
+  assert.equal((await exec(CLI, ["url", "not a url"], { env: noUrl }).then(() => null, (e) => e)).code, 2);
+});

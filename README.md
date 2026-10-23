@@ -92,7 +92,11 @@ can't take back what was already handed out: a static value a command received s
 rotate it, and a CLI's cache can hold values it fetched before the expiry for up to its TTL. Tokens
 without an expiry live until revoked.
 
-Elsewhere (your laptop, CI), set `TUMBLER_URL` and `TUMBLER_TOKEN` instead of the network secret.
+Elsewhere (your laptop, CI), set `TUMBLER_TOKEN` instead of the network secret. The CLI asks for the
+broker's URL the first time it needs one and saves it (`~/.config/tumbler/url`); `tumbler url <URL>`
+sets it outright, and an exported `TUMBLER_URL` wins over both. When the broker serves a different
+CLI than the one you're running, the CLI says so once; `tumbler update` replaces it in place
+(`TUMBLER_UPDATE_CHECK=off` quiets the notice).
 
 ## CLI
 
@@ -110,6 +114,8 @@ tumbler rm NAME [-p project | --global]
 tumbler admin <command>       what /admin does, signed in through Cloudflare Access
 tumbler ssh-keygen NAME [-p project | --global] [-C comment]
                               make an ed25519 keypair, save the private key, print the public one
+tumbler url [URL]             print or save the broker's URL
+tumbler update                replace this CLI with the broker's current one
 ```
 
 ### Admin from the CLI
