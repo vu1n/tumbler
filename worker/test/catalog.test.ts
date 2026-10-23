@@ -265,11 +265,12 @@ test("migration 0007 carries over each token's live write approvals and active w
   const db = new DatabaseSync(":memory:"), at = (f: string) => db.exec(readFileSync(new URL(f, dir), "utf8"));
   for (const f of files.filter((f) => f < "0007")) at(f);
   const ins = (sql: string, ...v: (string | null)[]) => db.prepare(sql).run(...v);
-  for (const n of ["approved", "granted", "reader", "lapsed", "gone", "moved", "wild"])
-    ins("INSERT INTO tokens (name, hash, projects, created_at, revoked_at) VALUES (?, ?, ?, '2026-01-01', ?)", n, `h-${n}`, JSON.stringify(n === "moved" ? ["kypp"] : n === "wild" ? ["*/prod"] : ["dev"]), n === "gone" ? "2026-01-02" : null);
+  for (const n of ["approved", "granted", "reader", "lapsed", "gone", "moved", "wild", "lookalike"])
+    ins("INSERT INTO tokens (name, hash, projects, created_at, revoked_at) VALUES (?, ?, ?, '2026-01-01', ?)", n, `h-${n}`, JSON.stringify(n === "moved" ? ["kypp"] : n === "wild" ? ["*/prod"] : n === "lookalike" ? ["fooXbar/dev"] : ["dev"]), n === "gone" ? "2026-01-02" : null);
   ins("INSERT INTO keys (scope, name, kind, iv, ciphertext, created_at, rotated_at, rev) VALUES ('dev', 'K', 'mint:cloudflare', x'00', x'00', '2026-01-01', '2026-01-01', 'r')");
-  const approval = (caller: string, scopes: string[], until: string, ended: string | null = null, rev = "r") =>
-    ins("INSERT INTO approvals (id, caller, key_scope, name, key_rev, scopes, approved_by, created_at, until, ended_at) VALUES (?, ?, 'dev', 'K', ?, ?, 'vu', '2026-01-01', ?, ?)", `a-${caller}-${until}-${rev}`, caller, rev, JSON.stringify(scopes), until, ended);
+  ins("INSERT INTO keys (scope, name, kind, iv, ciphertext, created_at, rotated_at, rev) VALUES ('foo_bar', 'K', 'mint:cloudflare', x'00', x'00', '2026-01-01', '2026-01-01', 'r')");
+  const approval = (caller: string, scopes: string[], until: string, ended: string | null = null, rev = "r", scope = "dev") =>
+    ins("INSERT INTO approvals (id, caller, key_scope, name, key_rev, scopes, approved_by, created_at, until, ended_at) VALUES (?, ?, ?, 'K', ?, ?, 'vu', '2026-01-01', ?, ?)", `a-${caller}-${until}-${rev}`, caller, scope, rev, JSON.stringify(scopes), until, ended);
   const grant = (caller: string, scopes: string[], state: string, project: string | null = null) =>
     ins("INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, expires_at, created_at, updated_at) VALUES (?, ?, ?, 'dev', 'r', 'K', ?, ?, '2999-01-01T00:00:00Z', '2026-01-01', '2026-01-01')", `g-${caller}-${state}`, caller, project, state, JSON.stringify(scopes));
   approval("approved", ["workers:read", "workers:write"], "2999-01-01T00:00:00Z");
@@ -283,7 +284,8 @@ test("migration 0007 carries over each token's live write approvals and active w
   approval("moved", ["workers:write"], "2999-01-01T00:00:00Z"); // repinned away from dev: not carried
   grant("moved", ["d1:write"], "active", "dev");
   approval("wild", ["workers:write"], "2999-01-01T00:00:00Z"); // */prod reaches dev's project keys
+  approval("lookalike", ["workers:write"], "2999-01-01T00:00:00Z", null, "r", "foo_bar"); // `_` is no wildcard
   at(files.find((f) => f.startsWith("0007"))!);
   const scopes = Object.fromEntries((db.prepare("SELECT name, scopes FROM tokens").all() as any[]).map((r) => [r.name, r.scopes && JSON.parse(r.scopes)]));
-  assert.deepEqual(scopes, { approved: ["workers:write"], granted: ["Audit:Read", "d1:write", "workers:write"], reader: null, lapsed: null, gone: null, moved: null, wild: ["workers:write"] });
+  assert.deepEqual(scopes, { approved: ["workers:write"], granted: ["Audit:Read", "d1:write", "workers:write"], reader: null, lapsed: null, gone: null, moved: null, wild: ["workers:write"], lookalike: null });
 });

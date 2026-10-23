@@ -18,7 +18,8 @@ WITH carried (caller, v) AS (
       -- the token's pin still reaches the key: a global key, its project, or a deployment of it
       AND (a.key_scope = 'global' OR EXISTS (SELECT 1 FROM json_each(t.projects) p WHERE p.value IN (a.key_scope,
         CASE WHEN instr(a.key_scope, '/') > 0 THEN '*' || substr(a.key_scope, instr(a.key_scope, '/')) ELSE '*' END)
-        OR p.value LIKE a.key_scope || '/%' OR p.value LIKE '*/%' AND instr(a.key_scope, '/') = 0))
+        OR substr(p.value, 1, length(a.key_scope) + 1) = a.key_scope || '/'
+        OR substr(p.value, 1, 2) = '*/' AND instr(a.key_scope, '/') = 0))
   UNION
   SELECT g.caller, j.value FROM grants g
     JOIN keys k ON k.scope = g.key_scope AND k.name = g.name AND k.rev = g.key_rev
