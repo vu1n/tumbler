@@ -246,16 +246,17 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     // {"projects": [...]} edits the pin, {"scopes": [...]} the ceiling; either or both.
     if (m === "PATCH" && parts.length === 2) {
       const b = await body();
-      if ("scopes" in b) {
-        const scopes = await catalog.setScopes(parts[1], list(b.scopes));
-        await grants?.closeOutsideCeiling(parts[1], scopes, who);
-        await catalog.audit(who, "token-scopes", null, [parts[1], ...(scopes ?? ["reads-only"])]);
-        if (!("projects" in b)) return json({ ok: true });
+      const pin = "projects" in b || !("scopes" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
+      // One checked write for both, so a bad pin never lands a wider ceiling (or the reverse).
+      const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
+      if ("scopes" in done) {
+        await grants?.closeOutsideCeiling(parts[1], done.scopes!, who);
+        await catalog.audit(who, "token-scopes", null, [parts[1], ...(done.scopes ?? ["reads-only"])]);
       }
-      const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
-      await catalog.setPin(parts[1], projects?.length ? projects : null);
-      await grants?.closeOutsidePin(parts[1], projects?.length ? projects : null, who);
-      await catalog.audit(who, "token-pin", null, [parts[1], ...(projects ?? ["global-only"])]);
+      if ("projects" in done) {
+        await grants?.closeOutsidePin(parts[1], done.projects!, who);
+        await catalog.audit(who, "token-pin", null, [parts[1], ...(done.projects ?? ["global-only"])]);
+      }
       return json({ ok: true });
     }
     if (m === "DELETE" && parts.length === 2) {

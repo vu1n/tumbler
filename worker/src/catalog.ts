@@ -129,20 +129,26 @@ export class Catalog {
   // Changes which projects a live token reads, so widening one never means minting a new token and
   // re-entering the network secret that carries it. null = global keys only.
   async setPin(name: string, projects: string[] | null) {
-    checkPin(projects);
-    const r = await this.db.prepare("UPDATE tokens SET projects = ? WHERE name = ? AND revoked_at IS NULL")
-      .bind(projects === null ? null : JSON.stringify(projects), name).run();
-    if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
+    await this.updateToken(name, { projects });
   }
 
   // Changes which minted scopes a live token may hold. Narrowing ends the children it holds beyond
-  // the new scopes (Grants.closeOutsideCeiling); widening takes effect on its next request.
-  // Returns the ceiling as stored (trimmed, sorted, deduped; empty is null).
+  // the new scopes (Grants.closeOutsideCeiling, or the sweep if that is cut short); widening takes
+  // effect on its next request. Returns the ceiling as stored (trimmed, sorted, deduped; empty is null).
   async setScopes(name: string, scopes: string[] | null) {
-    scopes = checkCeiling(scopes);
-    const r = await this.db.prepare("UPDATE tokens SET scopes = ? WHERE name = ? AND revoked_at IS NULL").bind(asJson(scopes), name).run();
+    return (await this.updateToken(name, { scopes })).scopes ?? null;
+  }
+
+  // A live token's pin and/or ceiling in one write, both checked first, so a refused half never
+  // lands the other. Returns the fields as stored.
+  async updateToken(name: string, edit: { projects?: string[] | null; scopes?: string[] | null }) {
+    const done: { projects?: string[] | null; scopes?: string[] | null } = {}, sets: string[] = [], binds: (string | null)[] = [];
+    if ("projects" in edit) { checkPin(done.projects = edit.projects ?? null); sets.push("projects = ?"); binds.push(asJson(done.projects)); }
+    if ("scopes" in edit) { done.scopes = checkCeiling(edit.scopes ?? null); sets.push("scopes = ?"); binds.push(asJson(done.scopes)); }
+    if (!sets.length) return done;
+    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL`).bind(...binds, name).run();
     if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
-    return scopes;
+    return done;
   }
 
   // True when this call revoked it; false when it was already revoked, so a retry still reaches the

@@ -171,6 +171,25 @@ test("a live child wider than the token's scopes ends on the next request, even 
   assert.deepEqual(s.fake.minted.at(-1)!.scopes, ["workers:read"]);
 });
 
+test("a narrowing whose cleanup was cut short is finished by the sweep, for children nobody asks for again", async () => {
+  const s = await setup();
+  await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  await s.env(s.other);
+  await s.catalog.setScopes("dev", null); // closeOutsideCeiling never ran
+  await s.grants.sweep();
+  assert.deepEqual(s.fake.revoked, ["id-1"]); // dev's write child; other's read child stays
+});
+
+test("a PATCH of scopes and pin together is one write: a bad pin lands neither", async () => {
+  const s = await setup();
+  const r = await s.call("PATCH", "/admin/api/tokens/other", undefined, { scopes: ["workers:write"], projects: ["global"] }, "vu@example.com");
+  assert.equal(r.status, 400);
+  const tokens = (await (await s.call("GET", "/admin/api/tokens", undefined, undefined, "vu@example.com")).json()).tokens;
+  assert.deepEqual(tokens.find((t: any) => t.name === "other").scopes, null);
+  assert.equal((await s.call("PATCH", "/admin/api/tokens/other", undefined, { scopes: ["workers:write"], projects: ["dev"] }, "vu@example.com")).status, 200);
+  assert.equal((await s.call("POST", "/v1/step-up", s.other, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).status, 200);
+});
+
 test("scopes narrowed while a write mints: the child is deleted, never handed out", async () => {
   const s = await setup();
   await s.env();

@@ -143,6 +143,16 @@ export class Grants {
     }
   }
 
+  // Live grants holding a scope their caller's token no longer allows: a narrowing whose cleanup was
+  // cut short, or grants from before ceilings. The sweep re-reads every time, so none is missed.
+  async closeOutsideCeilings() {
+    const { results } = await this.db.prepare(`SELECT g.*, t.scopes AS ceiling FROM grants g JOIN tokens t ON t.name = g.caller WHERE g.${LIVE}`).all<any>();
+    for (const { ceiling, ...r } of results) {
+      const g = parse(r), allows: string[] | null = ceiling ? JSON.parse(ceiling) : null;
+      if (!g.scopes.every((s) => allowedBy(allows, s))) await this.close(g, "revoked", "system");
+    }
+  }
+
   // After a scope move: no token reads as `project` any more, so every grant read as it ends. By
   // project, not by the tokens a move repinned, so a retry of a move cut short still finds them.
   async closeProject(project: string, who: string) {
@@ -181,6 +191,7 @@ export class Grants {
     for (const r of results) await this.close(parse(r), "expired", "system");
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
     await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
+    await this.closeOutsideCeilings(); // grants an interrupted narrowing left behind
     await this.retryRevokes();
     // Requests left by the approval flow before ceilings: a pending one lapses to denied, and a
     // waiting step-up is dropped.
