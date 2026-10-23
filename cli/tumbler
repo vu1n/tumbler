@@ -21,6 +21,16 @@
 //   tumbler auto [-p project] [--dry-run] [--force]
 //                                    work out which keys this repo needs and write .tumbler
 //   tumbler reload                   drop the cache so the next run fetches fresh values
+//   tumbler put NAME [-p project | --global] [--from-file PATH | --clipboard] [-d description]
+//                                    save a static key, within the token's writes (set in /admin).
+//                                    The value comes from the file, the clipboard, piped stdin, or a
+//                                    hidden prompt (pasting works there, newlines included); never
+//                                    from an argument. A single-line value loses its trailing newline;
+//                                    a multi-line one (a private key) is kept exactly. Default scope:
+//                                    -p, TUMBLER_PROJECT or .tumbler, else the token's one project
+//   tumbler ssh-keygen NAME [-p project | --global] [-C comment] [-d description]
+//                                    make an ed25519 keypair in memory, save the private key as NAME
+//                                    (as put does) and print the public key; nothing touches disk
 //   tumbler shim <tool>...           install wrappers so <tool> always runs under `tumbler run`
 //
 // Config (environment): TUMBLER_URL (required), TUMBLER_TOKEN (optional: leave unset when the
@@ -33,7 +43,7 @@
 // git (.git/info/exclude), so nobody has to review or commit it; commit one only to pin a set.
 // TUMBLER_AUTO=off skips auto and fetches every key the token can read.
 import { execFileSync, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { constants, homedir } from "node:os";
@@ -66,23 +76,26 @@ function brokerGet(path, cfg = callerCfg()) { return brokerCall("GET", path, nul
 function brokerCall(method, path, body, { url: base, token } = callerCfg()) {
   if (!base) return Promise.reject(new Error("TUMBLER_URL is not set"));
   return new Promise((ok, fail) => {
-    // Headers go in on stdin, so the token never shows up in `ps`. A body (file and dependency
-    // names for /v1/auto, never a secret) goes in argv.
-    const args = ["-sS", "--max-time", "15", "-X", method, "-H", "@-", "-w", "\n%{http_code}"];
-    if (body !== null) args.push("--data-raw", JSON.stringify(body));
+    // Headers and body go in on stdin as a curl config, so neither the token nor a value `put` sends
+    // ever shows up in `ps`.
+    const args = ["-sS", "--max-time", "15", "-X", method, "-K", "-", "-w", "\n%{http_code}"];
     const child = spawn("curl", [...args, base.replace(/\/$/, "") + path], { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
     child.on("error", fail);
     child.on("close", (code) => {
-      if (code !== 0 && !stdout) return fail(new Error(stderr.trim() || `curl exited ${code}`));
+      if (code !== 0 && !/\n[1-9]\d\d$/.test(stdout)) return fail(new Error(stderr.trim() || `curl exited ${code}`)); // no HTTP status: say why
       const i = stdout.lastIndexOf("\n"), status = Number(stdout.slice(i + 1)), text = stdout.slice(0, i);
       let parsed; try { parsed = JSON.parse(text); } catch { parsed = { error: text.slice(0, 200) }; }
       status >= 200 && status < 300 ? ok(parsed) : fail(new Error(`broker ${status}: ${parsed.error ?? "error"}`));
     });
     child.stdin.on("error", () => {}); // curl can exit before reading; its status reports why
-    child.stdin.end((token ? `Authorization: Bearer ${token}\n` : "") + (body !== null ? "Content-Type: application/json\n" : ""));
+    // A quoted config string: curl unescapes \\ and \" (and \n, so JSON's own escapes are doubled).
+    const q = (v) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`, conf = [];
+    if (token) conf.push(`header = ${q(`Authorization: Bearer ${token}`)}`);
+    if (body !== null) conf.push(`header = ${q("Content-Type: application/json")}`, `data-binary = ${q(JSON.stringify(body))}`);
+    child.stdin.end(conf.join("\n") + "\n");
   });
 }
 
@@ -525,6 +538,139 @@ async function watching(state, path, known, load, cmd, argv) {
   }
 }
 
+// --- writing keys ------------------------------------------------------------------------------
+
+// Where put writes: -p (or TUMBLER_PROJECT, or .tumbler's project), --global, or neither (the broker
+// then uses the token's one project, or refuses). -p and --global together is a mistake, not a choice.
+function writeFlags(args, usage, extra = {}) {
+  let name = null, scope = null, global = false, desc, file = null, clip = false, comment = null;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i], val = () => args[++i] ?? die(`${a} needs a value\n${usage}`, 2);
+    if (a === "-p" || a === "--project") scope = val();
+    else if (a === "--global") global = true;
+    else if (a === "-d" || a === "--description") desc = val();
+    else if (extra.input && a === "--from-file") file = val();
+    else if (extra.input && a === "--clipboard") clip = true;
+    else if (extra.comment && a === "-C") comment = val();
+    else if (!a.startsWith("-") && name === null) name = a;
+    else die(`unexpected ${a}\n${usage}`, 2);
+  }
+  if (!name) die(usage, 2);
+  if (!/^[A-Z_][A-Z0-9_]{0,127}$/.test(name)) die(`invalid key name ${name}; names are UPPER_SNAKE_CASE`, 2);
+  if (global && scope) die("pass -p or --global, not both", 2);
+  if (file && clip) die("pass --from-file or --clipboard, not both", 2);
+  if (global) scope = "global";
+  else if (!scope) scope = process.env.TUMBLER_PROJECT || manifest().project || null;
+  return { name, scope, desc, file, clip, comment };
+}
+
+// The clipboard, from the first paste tool this machine has.
+function clipboard() {
+  for (const [cmd, ...argv] of [["pbpaste"], ["wl-paste", "-n"], ["xclip", "-selection", "clipboard", "-o"], ["xsel", "-b", "-o"]]) {
+    try { return execFileSync(cmd, argv, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 1 << 20 }); }
+    catch (e) { if (e.code !== "ENOENT") die(`${cmd} failed; copy the value again, or pipe it in`); }
+  }
+  die("no clipboard tool found (pbpaste, wl-paste, xclip, xsel); pipe the value in or pass --from-file");
+}
+
+async function readStdin() {
+  let v = "";
+  for await (const c of process.stdin) v += c;
+  return v;
+}
+
+// A hidden prompt. Bracketed paste lets a multi-line paste (a private key) through whole; outside a
+// paste, Enter finishes. Nothing is echoed.
+function prompt(label) {
+  const PASTE_ON = "\x1b[200~", PASTE_OFF = "\x1b[201~", tty = process.stdin;
+  tty.setRawMode(true); tty.setEncoding("utf8"); tty.resume(); // raw before the prompt shows, so nothing typed is echoed
+  process.stderr.write(`${label} (hidden; paste works, Enter to finish): \x1b[?2004h`);
+  return new Promise((ok) => {
+    let value = "", pasting = false, held = "";
+    const end = (code) => {
+      tty.setRawMode(false); tty.pause(); tty.off("data", onData);
+      process.stderr.write("\x1b[?2004l\n");
+      code === undefined ? ok(value) : process.exit(code);
+    };
+    const onData = (chunk) => {
+      // A paste marker split across reads is held until the rest arrives, or its first byte would be
+      // dropped as an escape and a pasted newline would end the value early.
+      let s = held + chunk;
+      const esc = s.lastIndexOf("\x1b"), tail = esc < 0 ? "" : s.slice(esc);
+      held = tail && tail.length < PASTE_ON.length && (PASTE_ON.startsWith(tail) || PASTE_OFF.startsWith(tail)) ? tail : "";
+      if (held) s = s.slice(0, esc);
+      for (let i = 0; i < s.length;) {
+        if (s.startsWith(PASTE_ON, i)) { pasting = true; i += PASTE_ON.length; continue; }
+        if (s.startsWith(PASTE_OFF, i)) { pasting = false; i += PASTE_OFF.length; continue; }
+        const c = s[i++];
+        if (pasting) { if (c !== "\r" || s[i] !== "\n") value += c === "\r" ? "\n" : c; continue; }
+        if (c === "\r" || c === "\n") return end();
+        if (c === "\x03") return end(130);
+        if (c === "\x04" && !value) return end(1);
+        if (c === "\x7f" || c === "\b") value = [...value].slice(0, -1).join("");
+        else if (c === "\x1b") { // an arrow or other key's escape sequence, not input
+          if (s[i] === "[" || s[i] === "O") { i++; while (/[0-9;?]/.test(s[i] ?? "")) i++; i++; }
+        }
+        else if (c >= " ") value += c;
+      }
+    };
+    tty.on("data", onData);
+  });
+}
+
+// A token pasted or echoed carries a trailing newline that isn't part of it; a private key's last
+// newline is part of the file, so a multi-line value is kept exactly.
+function trimValue(v) {
+  const one = v.replace(/\r?\n$/, "");
+  return one.includes("\n") ? v : one;
+}
+
+async function save({ name, scope, desc }, value, how, failNote = "") {
+  if (!value) die(`empty value; ${how}`);
+  let r;
+  try { r = await brokerCall("PUT", `/v1/keys/${encodeURIComponent(name)}`, { value, ...(scope ? { scope } : {}), ...(desc !== undefined ? { description: desc } : {}) }); }
+  catch (e) { die(e.message + failNote); }
+  try { await ask({ op: "reload" }); } catch {} // so the next run sees it, not a cached older value
+  say(`${r.action} ${r.name} in ${r.scope}${r.checked ? "; it passes its check" : ""}`);
+}
+
+const PUT_USAGE = "usage: tumbler put NAME [-p project | --global] [--from-file PATH | --clipboard] [-d description]";
+async function put(args) {
+  const f = writeFlags(args, PUT_USAGE, { input: true });
+  let value;
+  if (f.file) { try { value = readFileSync(f.file, "utf8"); } catch (e) { die(`could not read ${f.file} (${e.code ?? e.message})`); } }
+  else if (f.clip) value = clipboard();
+  else if (!process.stdin.isTTY) value = await readStdin();
+  else value = await prompt(`value for ${f.name}`);
+  await save(f, trimValue(value), "pipe it in, pass --from-file or --clipboard, or type it at the prompt");
+}
+
+// An ed25519 keypair in OpenSSH's own formats (PROTOCOL.key), made here so the private key never
+// touches disk the way `ssh-keygen -f` would put it there.
+function sshEd25519(comment) {
+  const { d, x } = generateKeyPairSync("ed25519").privateKey.export({ format: "jwk" });
+  const pub = Buffer.from(x, "base64url"), seed = Buffer.from(d, "base64url");
+  const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+  const str = (v) => { const b = Buffer.from(v); return Buffer.concat([u32(b.length), b]); };
+  const blob = Buffer.concat([str("ssh-ed25519"), str(pub)]), check = randomBytes(4);
+  const priv = Buffer.concat([check, check, str("ssh-ed25519"), str(pub), str(Buffer.concat([seed, pub])), str(comment)]);
+  const pad = Buffer.from(Array.from({ length: (8 - priv.length % 8) % 8 }, (_, i) => i + 1));
+  const body = Buffer.concat([Buffer.from("openssh-key-v1\0"), str("none"), str("none"), str(""), u32(1), str(blob), str(Buffer.concat([priv, pad]))]);
+  return {
+    private: `-----BEGIN OPENSSH PRIVATE KEY-----\n${body.toString("base64").replace(/.{1,70}/g, "$&\n")}-----END OPENSSH PRIVATE KEY-----\n`,
+    public: `ssh-ed25519 ${blob.toString("base64")} ${comment}`,
+  };
+}
+
+async function sshKeygen(args) {
+  const f = writeFlags(args, "usage: tumbler ssh-keygen NAME [-p project | --global] [-C comment] [-d description]", { comment: true });
+  const key = sshEd25519(f.comment ?? `tumbler:${f.name}`);
+  // The public half first: a save that fails after the broker stored the key (a dropped response)
+  // must not lose the only copy of the public key that matches it.
+  process.stdout.write(key.public + "\n");
+  await save(f, key.private, "", `\ntumbler: ${f.name} may or may not have been saved; the public key above matches it only if it was. Run this again before installing it anywhere.`);
+}
+
 function shim(tools) {
   if (!tools.length) die("usage: tumbler shim <tool>...", 2);
   mkdirSync(SHIM_DIR, { recursive: true });
@@ -548,7 +694,9 @@ switch (cmd) {
     break;
   }
   case "whoami": try { process.stdout.write(JSON.stringify(await brokerGet("/v1/whoami")) + "\n"); } catch (e) { die(e.message); } break;
+  case "put": await put(args); break;
+  case "ssh-keygen": await sshKeygen(args); break;
   case "reload": try { await ask({ op: "reload" }); } catch {} process.stdout.write("cache cleared\n"); break;
   case "shim": shim(args); break;
-  default: die("usage: tumbler run|auto|keys|whoami|reload|shim  (see the header of this file)", 2);
+  default: die("usage: tumbler run|auto|keys|whoami|put|ssh-keygen|reload|shim  (see the header of this file)", 2);
 }

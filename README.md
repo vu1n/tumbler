@@ -103,7 +103,32 @@ tumbler whoami                the token's name and pin
 tumbler auto [--dry-run]      work out which keys this repo needs; write .tumbler
 tumbler reload                drop the cache
 tumbler shim <tool>...        wrappers so <tool> always runs under tumbler
+tumbler put NAME [-p project | --global] [--from-file F | --clipboard] [-d desc]
+                              save a static key (hidden prompt, pipe, file or clipboard)
+tumbler ssh-keygen NAME [-p project | --global] [-C comment]
+                              make an ed25519 keypair, save the private key, print the public one
 ```
+
+### Writing keys from the CLI
+
+A token writes nothing until an admin gives it **writes** in `/admin` (the token list's "May write"
+column, or `writes` on `POST`/`PATCH /admin/api/tokens`): `global`, a project, `project/env`, `*` or
+`*/env`, as in a pin. `global` is never implied by `*`, since a global key reaches every token, and an
+environment is named, as in a pin. Writes are separate from the pin: a laptop token can write `global`
+while reading nothing beyond it.
+
+`tumbler put NAME` saves a static key within them, like `wrangler secret put`. The value comes from
+`--from-file`, `--clipboard` (pbpaste, wl-paste, xclip or xsel), piped stdin (`op read ... | tumbler put
+NAME`), or a hidden prompt at a terminal, where a multi-line paste such as a private key comes through
+whole. It is never an argument, and it travels to curl on stdin, so it never shows in `ps`. A
+single-line value loses its trailing newline; a multi-line one is kept exactly. The scope is `-p`, then
+`TUMBLER_PROJECT` or `.tumbler`'s project, then the token's one project; `--global` names global. A key
+that has a check keeps it, so a value that fails saves nothing, and a minted key's parent is changed in
+`/admin` only.
+
+`tumbler ssh-keygen NETCUP_VPS_SSH_KEY --global` makes an ed25519 keypair in memory, saves the private
+key in OpenSSH format and prints the public key, so nothing private touches disk:
+`tumbler ssh-keygen NAME --global > key.pub && ssh-copy-id -f -i key.pub root@host`.
 
 A `.tumbler` file in a repo lists the key names it needs (one per line) and optionally
 `project = <name>`. Without one, `run` calls `tumbler auto` first and writes it, so the command gets

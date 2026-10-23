@@ -41,5 +41,7 @@ API keys come from tumbler, not from env vars or .env files. wrangler (and aws a
 installed) already run through it. For anything else that needs a key, run it as `tumbler run -- <cmd>`. `tumbler keys`
 lists the names you can use; never print a value. In a repo without a .tumbler file, the first
 run writes one (`tumbler auto`) and keeps it out of git; no need to commit it. If a key looks stale, run `tumbler reload`.
+To store a key, pipe it in (`<cmd that prints it> | tumbler put NAME -p <project>` or `--global`), never as an
+argument; `tumbler ssh-keygen NAME` makes an SSH key and prints its public half.
 MD
 exit 0
