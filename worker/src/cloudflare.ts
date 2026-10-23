@@ -24,6 +24,13 @@ export const DEFAULT_SCOPES: Record<string, string[]> = {
   "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write", "Containers Write"],
 };
 
+// DEFAULT_SCOPES before Containers, which keys saved then hold as ids: a key whose scopes resolve to
+// exactly these follows the live defaults too, so it needs no re-save.
+const LEGACY_DEFAULTS: Record<string, string[]> = {
+  "workers:read": ["Workers Scripts Read", "D1 Read", "Workers KV Storage Read", "Workers R2 Storage Read"],
+  "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write"],
+};
+
 export function cloudflare(fetcher: typeof fetch = fetch): Provider {
   const call = async (method: string, path: string, parent: string, body?: unknown) => {
     // Why the catch: a fetch error message can quote a header, and the parent is one.
@@ -69,12 +76,12 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
         if (!c.account_id) throw new Refused(400, "no account id: save CLOUDFLARE_ACCOUNT_ID as a static key, or set config.account_id");
       }
       if (!ACCOUNT.test(String(c.account_id))) throw new Refused(400, "config.account_id must be a 32-hex account id");
-      if (!c.scopes || !Object.keys(c.scopes).length) {
+      // A rotation passes the stored config back in, marker and all: it stays on the defaults.
+      if (!c.scopes || !Object.keys(c.scopes).length || c.defaults === true) {
         // Names, not ids: mint() looks DEFAULT_SCOPES up again each time. Checked here so a save fails loud.
         unknownNames(await groupIds(parent, c.account_id), Object.values(DEFAULT_SCOPES).flat());
         return { ...c, defaults: true, scopes: DEFAULT_SCOPES, start: c.start ?? ["workers:read"] };
       }
-      delete c.defaults; // a config that names its scopes keeps them
       const scopes = c.scopes as Record<string, unknown[]>;
       const named = Object.values(scopes).flat().some((g) => !GROUP.test(String(g)));
       if (!named) return c;
@@ -96,11 +103,25 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       }
     },
     async mint(parent, config, scopes, expiresAt, label) {
-      let groups = [...new Set(scopes.flatMap((s) => ((config.defaults === true ? DEFAULT_SCOPES : config.scopes) as Record<string, string[]>)[s] ?? []))];
-      if (config.defaults === true && groups.length) {
-        const byName = await groupIds(parent, config.account_id);
-        unknownNames(byName, groups);
-        groups = groups.map((n) => byName.get(n.toLowerCase())!);
+      const stored = (config.scopes ?? {}) as Record<string, string[]>;
+      let byName: Map<string, string> | undefined;
+      const lookup = async () => byName ??= await groupIds(parent, config.account_id);
+      const legacy = async () => {
+        const keys = Object.keys(stored).sort();
+        if (keys.join() !== Object.keys(LEGACY_DEFAULTS).sort().join()) return false;
+        if (!keys.every((k) => Array.isArray(stored[k]) && stored[k].length === LEGACY_DEFAULTS[k].length)) return false;
+        // Why the catch: this only widens a key to the defaults; if the lookup fails it keeps its stored ids.
+        const m = await lookup().catch(() => undefined);
+        if (!m) return false;
+        const same = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
+        return keys.every((k) => Array.isArray(stored[k]) && same(stored[k], LEGACY_DEFAULTS[k].map((n) => m.get(n.toLowerCase()) ?? "")));
+      };
+      const onDefaults = config.defaults === true || await legacy();
+      let groups = [...new Set(scopes.flatMap((s) => (onDefaults ? DEFAULT_SCOPES : stored)[s] ?? []))];
+      if (onDefaults && groups.length) {
+        const m = await lookup();
+        unknownNames(m, groups);
+        groups = groups.map((n) => m.get(n.toLowerCase())!);
       }
       if (!groups.length) throw new Refused(400, "no permission groups for these scopes");
       const result = await call("POST", `/accounts/${config.account_id}/tokens`, parent, {

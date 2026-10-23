@@ -152,8 +152,19 @@ test("a defaults key mints from DEFAULT_SCOPES as they are now, so workers:write
   assert.deepEqual(posted[0].policies[0].permission_groups, DEFAULT_SCOPES["workers:write"].map((n) => ({ id: id(n) })));
   await cf.mint("good-parent", { account_id: ACCT, scopes: stale }, ["workers:write"], at, "t");
   assert.deepEqual(posted[1].policies[0].permission_groups, [{ id: id("Workers Scripts Write") }]);
-  // A config that names its scopes drops the marker.
-  const named = await cf.prepare!("good-parent", { account_id: ACCT, defaults: true, scopes: { "x:write": ["Containers Write"] } }, async () => undefined);
+  // A key saved on the old defaults holds their ids and no marker: it follows the live defaults too.
+  const old = (names: string[]) => names.map(id), legacy = { "workers:read": old(["Workers Scripts Read", "D1 Read", "Workers KV Storage Read", "Workers R2 Storage Read"]),
+    "workers:write": old(["Workers R2 Storage Write", "Workers Scripts Write", "D1 Write", "Workers KV Storage Write"]) };
+  await cf.mint("good-parent", { account_id: ACCT, scopes: legacy }, ["workers:write"], at, "t");
+  assert.deepEqual(posted[2].policies[0].permission_groups, DEFAULT_SCOPES["workers:write"].map((n) => ({ id: id(n) })));
+  // The same scope names with other ids are a custom config: its ids are kept exactly.
+  const custom = { ...legacy, "workers:write": legacy["workers:write"].slice(1).concat(id("Workers Scripts Read")) };
+  await cf.mint("good-parent", { account_id: ACCT, scopes: custom }, ["workers:write"], at, "t");
+  assert.deepEqual(posted[3].policies[0].permission_groups, custom["workers:write"].map((i) => ({ id: i })));
+  // A rotation passes the stored config back in: it stays on the defaults. A named config gets ids and no marker.
+  const kept = await cf.prepare!("good-parent", { account_id: ACCT, defaults: true, scopes: DEFAULT_SCOPES }, async () => undefined);
+  assert.deepEqual([kept.defaults, kept.scopes], [true, DEFAULT_SCOPES]);
+  const named = await cf.prepare!("good-parent", { account_id: ACCT, scopes: { "x:write": ["Containers Write"] } }, async () => undefined);
   assert.deepEqual([named.defaults, named.scopes], [undefined, { "x:write": [id("Containers Write")] }]);
 });
 
