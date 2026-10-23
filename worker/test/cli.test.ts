@@ -317,3 +317,10 @@ test("put at a terminal reads a hidden value; a bracketed paste keeps its newlin
   assert.doesNotMatch(r.out, /line-one/);
   assert.equal(await stored("global", "TYPED_KEY"), "line-one\nline-two\n");
 });
+
+test("ssh-keygen prints the public key before saving, so a failed save never loses it", async () => {
+  const r = await cliIn(["ssh-keygen", "REFUSED_SSH_KEY", "-p", "kypp"], "");
+  assert.equal(r.code, 1);
+  assert.match(r.stdout, /^ssh-ed25519 /);
+  assert.match(r.stderr, /may not write kypp[\s\S]*may or may not have been saved/);
+});

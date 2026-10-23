@@ -625,11 +625,11 @@ function trimValue(v) {
   return one.includes("\n") ? v : one;
 }
 
-async function save({ name, scope, desc }, value, how) {
+async function save({ name, scope, desc }, value, how, failNote = "") {
   if (!value) die(`empty value; ${how}`);
   let r;
   try { r = await brokerCall("PUT", `/v1/keys/${encodeURIComponent(name)}`, { value, ...(scope ? { scope } : {}), ...(desc !== undefined ? { description: desc } : {}) }); }
-  catch (e) { die(e.message); }
+  catch (e) { die(e.message + failNote); }
   try { await ask({ op: "reload" }); } catch {} // so the next run sees it, not a cached older value
   say(`${r.action} ${r.name} in ${r.scope}${r.checked ? "; it passes its check" : ""}`);
 }
@@ -665,8 +665,10 @@ function sshEd25519(comment) {
 async function sshKeygen(args) {
   const f = writeFlags(args, "usage: tumbler ssh-keygen NAME [-p project | --global] [-C comment] [-d description]", { comment: true });
   const key = sshEd25519(f.comment ?? `tumbler:${f.name}`);
-  await save(f, key.private, "");
-  process.stdout.write(key.public + "\n"); // the public half only: install it with ssh-copy-id -f -i <file> or authorized_keys
+  // The public half first: a save that fails after the broker stored the key (a dropped response)
+  // must not lose the only copy of the public key that matches it.
+  process.stdout.write(key.public + "\n");
+  await save(f, key.private, "", `\ntumbler: ${f.name} may or may not have been saved; the public key above matches it only if it was. Run this again before installing it anywhere.`);
 }
 
 function shim(tools) {
