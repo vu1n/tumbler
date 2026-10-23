@@ -230,7 +230,11 @@ export class Catalog {
   // A mint key's new config under a new revision, only if it is still at `rev`: the old revision is
   // retired in the same batch (its parent revokes the children it minted), as a rotation does.
   async setConfig(scope: string, name: string, rev: string, config: Record<string, unknown>): Promise<boolean> {
-    const [, r] = await this.db.batch([this.retire(scope, name), this.db.prepare(
+    // Why retire by rev: a change that lost a race must not retire the winner's revision early.
+    const [, r] = await this.db.batch([this.db.prepare(
+      `INSERT OR IGNORE INTO retired_keys (scope, name, rev, kind, config, iv, ciphertext, retire_until)
+       SELECT scope, name, rev, kind, config, iv, ciphertext, ? FROM keys WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'`,
+    ).bind(new Date(Date.now() + RETIRE_MS).toISOString(), scope, name, rev), this.db.prepare(
       "UPDATE keys SET config = ?, rev = ?, rotated_at = ? WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'",
     ).bind(JSON.stringify(config), crypto.randomUUID(), now(), scope, name, rev)]);
     return !!r.meta.changes;

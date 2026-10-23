@@ -755,6 +755,13 @@ test("an operator token adds and removes groups on the minted key it reads; the 
   const audit = await (await s.call("GET", "/admin/api/audit", undefined, undefined, "vu@example.com")).json();
   assert.ok(audit.audit.some((a: any) => a.actor === "dev" && a.action === "mint-scope" && a.names === "CLOUDFLARE_API_TOKEN,workers:write,+Containers Write"));
 
+  // A change that lost a race to another saves nothing and retires nothing of the winner's.
+  const stale = (await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev;
+  assert.equal(await s.catalog.setConfig("dev", "CLOUDFLARE_API_TOKEN", stale, { ...CONFIG }), true);
+  const now = (await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev;
+  assert.equal(await s.catalog.setConfig("dev", "CLOUDFLARE_API_TOKEN", stale, { ...CONFIG }), false);
+  assert.equal(await s.db.prepare("SELECT 1 FROM retired_keys WHERE rev = ?").bind(now).first(), null);
+  await scope(s.dev, "PATCH", { scope: "workers:write", add: ["containers write"] });
   // Only additions come off; the admin's config isn't the CLI's to change, and unknown groups save nothing.
   assert.equal((await scope(s.dev, "PATCH", { scope: "workers:write", remove: [WRITE] })).status, 400);
   assert.equal((await scope(s.dev, "PATCH", { scope: "workers:write", add: ["Nope Write"] })).status, 400);
