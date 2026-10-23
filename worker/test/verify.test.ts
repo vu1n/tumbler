@@ -117,7 +117,7 @@ test("a mint parent is verified with Cloudflare before saving; a rejected or dis
   assert.equal((await s.catalog.keyRow("global", "CF_TOKEN"))!.rev, rev); // the old parent stays
 });
 
-test("pasting only a Cloudflare parent fills the account from CLOUDFLARE_ACCOUNT_ID and the default scopes by id", async () => {
+test("pasting only a Cloudflare parent fills the account from CLOUDFLARE_ACCOUNT_ID and marks the key as on the defaults", async () => {
   const s = await setup();
   const none = await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare" });
   assert.equal(none.status, 400);
@@ -127,27 +127,34 @@ test("pasting only a Cloudflare parent fills the account from CLOUDFLARE_ACCOUNT
   await s.save("CLOUDFLARE_ACCOUNT_ID", { value: ACCT });
   assert.equal((await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare" })).status, 200);
   const cfg = JSON.parse((await s.catalog.keyRow("global", "CLOUDFLARE_API_TOKEN"))!.config);
-  const id = (name: string) => GROUPS.find((g) => g.name === name)!.id;
   assert.equal(cfg.account_id, ACCT);
   assert.deepEqual(cfg.start, ["workers:read"]);
-  for (const [scope, names] of Object.entries(DEFAULT_SCOPES)) assert.deepEqual(cfg.scopes[scope], names.map(id));
+  assert.equal(cfg.defaults, true);
+  assert.deepEqual(cfg.scopes, DEFAULT_SCOPES); // names: mint() looks them up again each time
   const lookup = s.net.seen.find((r) => r.url.endsWith("/tokens/permission_groups"))!;
   assert.deepEqual(lookup, { url: `https://api.cloudflare.com/client/v4/accounts/${ACCT}/tokens/permission_groups`, headers: { authorization: "Bearer good-parent", "content-type": "application/json" } });
 });
 
-test("workers:write carries Containers Write, and a re-save with config {} brings a saved key up to the defaults", async () => {
+test("a defaults key mints from DEFAULT_SCOPES as they are now, so workers:write carries Containers Write", async () => {
   // Why: `wrangler deploy` of a Worker with a container pushes its image under /containers, a 403 without it.
   assert.ok(DEFAULT_SCOPES["workers:write"].includes("Containers Write"));
-  const s = await setup();
-  await s.save("CLOUDFLARE_ACCOUNT_ID", { value: ACCT });
+  const posted: any[] = [];
+  const fetcher = (async (url: string, init: RequestInit = {}) => {
+    if (url.endsWith("/tokens/permission_groups")) return new Response(JSON.stringify({ success: true, result: GROUPS }));
+    posted.push(JSON.parse(String(init.body)));
+    return new Response(JSON.stringify({ success: true, result: { id: "c1", value: "child" } }));
+  }) as unknown as typeof fetch;
   const id = (name: string) => GROUPS.find((g) => g.name === name)!.id;
-  const old = { "workers:write": [id("Workers Scripts Write")] };
-  assert.equal((await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare", config: { scopes: old } })).status, 200);
-  const saved = async () => JSON.parse((await s.catalog.keyRow("global", "CLOUDFLARE_API_TOKEN"))!.config).scopes;
-  assert.equal((await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare" })).status, 200);
-  assert.deepEqual(await saved(), old); // no config: the stored ids stay
-  assert.equal((await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare", config: {} })).status, 200);
-  assert.deepEqual((await saved())["workers:write"], DEFAULT_SCOPES["workers:write"].map(id));
+  // Stored ids from an older default set are ignored on a defaults key; a named config keeps its own.
+  const stale = { "workers:read": [id("Workers Scripts Read")], "workers:write": [id("Workers Scripts Write")] };
+  const cf = cloudflare(fetcher), at = new Date("2026-10-23T12:00:00Z");
+  await cf.mint("good-parent", { account_id: ACCT, defaults: true, scopes: stale }, ["workers:write"], at, "t");
+  assert.deepEqual(posted[0].policies[0].permission_groups, DEFAULT_SCOPES["workers:write"].map((n) => ({ id: id(n) })));
+  await cf.mint("good-parent", { account_id: ACCT, scopes: stale }, ["workers:write"], at, "t");
+  assert.deepEqual(posted[1].policies[0].permission_groups, [{ id: id("Workers Scripts Write") }]);
+  // A config that names its scopes drops the marker.
+  const named = await cf.prepare!("good-parent", { account_id: ACCT, defaults: true, scopes: { "x:write": ["Containers Write"] } }, async () => undefined);
+  assert.deepEqual([named.defaults, named.scopes], [undefined, { "x:write": [id("Containers Write")] }]);
 });
 
 test("permission names Cloudflare doesn't list, or zone ones, are refused; so is a parent it won't list them for", async () => {

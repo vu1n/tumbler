@@ -289,3 +289,26 @@ test("migration 0007 carries over each token's live write approvals and active w
   const scopes = Object.fromEntries((db.prepare("SELECT name, scopes FROM tokens").all() as any[]).map((r) => [r.name, r.scopes && JSON.parse(r.scopes)]));
   assert.deepEqual(scopes, { approved: ["workers:write"], granted: ["Audit:Read", "d1:write", "workers:write"], reader: null, lapsed: null, gone: null, moved: null, wild: ["workers:write"], lookalike: null });
 });
+
+test("migration 0009 puts mint:cloudflare keys saved with the old defaults on the live defaults, and nothing else", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readdirSync } = await import("node:fs");
+  const dir = new URL("../migrations/", import.meta.url), files = readdirSync(dir).sort();
+  const db = new DatabaseSync(":memory:"), at = (f: string) => db.exec(readFileSync(new URL(f, dir), "utf8"));
+  for (const f of files.filter((f) => f < "0009")) at(f);
+  const four = (c: string) => [1, 2, 3, 4].map((i) => c.repeat(31) + i);
+  const configs: Record<string, unknown> = {
+    old: { account_id: "a", start: ["workers:read"], scopes: { "workers:read": four("1"), "workers:write": four("2") } },
+    custom: { account_id: "a", scopes: { "workers:read": four("1"), "workers:write": four("2").slice(1) } },
+    other: { account_id: "a", scopes: { "pages:write": four("3") } },
+  };
+  for (const [name, config] of Object.entries(configs))
+    db.prepare("INSERT INTO keys (scope, name, kind, config, iv, ciphertext, created_at, rotated_at, rev) VALUES ('global', ?, 'mint:cloudflare', ?, x'00', x'00', '2026-01-01', '2026-01-01', 'r')").run(name, JSON.stringify(config));
+  db.prepare("INSERT INTO keys (scope, name, kind, config, iv, ciphertext, created_at, rotated_at, rev) VALUES ('global', 'S', 'static', '{}', x'00', x'00', '2026-01-01', '2026-01-01', 'r')").run();
+  at("0009_cloudflare_defaults.sql");
+  const cfg = (n: string) => JSON.parse((db.prepare("SELECT config FROM keys WHERE name = ?").get(n) as any).config);
+  assert.deepEqual(cfg("old"), { ...configs.old as object, defaults: true });
+  assert.deepEqual(cfg("custom"), configs.custom);
+  assert.deepEqual(cfg("other"), configs.other);
+  assert.deepEqual(cfg("S"), {});
+});

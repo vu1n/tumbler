@@ -246,8 +246,8 @@ Set one up in `/admin`:
    callers get `workers:read` (Workers Scripts, D1, KV, R2 and Containers read) and `workers:write`
    (the same five, write, so `wrangler deploy` can push a Worker's container image; for tokens whose
    scopes allow it), children last 30 minutes, and the token is used to look up each permission's id
-   on your account as it's saved. The ids are stored with the key, so a later change to these
-   defaults reaches a saved key only when you save it again with config `{}`.
+   on your account as it's saved. A key saved this way follows the defaults: each mint looks them up
+   by name again, so a later change to them reaches it with nothing to re-save.
 
 To choose other scopes, give a config. Scope names are yours; each lists Cloudflare account
 permissions, by name (as the dashboard shows them) or by id:
