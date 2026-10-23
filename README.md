@@ -105,6 +105,8 @@ tumbler reload                drop the cache
 tumbler shim <tool>...        wrappers so <tool> always runs under tumbler
 tumbler put NAME [-p project | --global] [--from-file F | --clipboard] [-d desc]
                               save a static key (hidden prompt, pipe, file or clipboard)
+tumbler rm NAME [-p project | --global]
+                              delete a static key
 tumbler ssh-keygen NAME [-p project | --global] [-C comment]
                               make an ed25519 keypair, save the private key, print the public one
 ```
@@ -124,7 +126,7 @@ whole. It is never an argument, and it travels to curl on stdin, so it never sho
 single-line value loses its trailing newline; a multi-line one is kept exactly. The scope is `-p`, then
 `TUMBLER_PROJECT` or `.tumbler`'s project, then the token's one project; `--global` names global. A key
 that has a check keeps it, so a value that fails saves nothing, and a minted key's parent is changed in
-`/admin` only.
+`/admin` only. `tumbler rm NAME` deletes a static key under the same writes and default scope.
 
 `tumbler ssh-keygen NETCUP_VPS_SSH_KEY --global` makes an ed25519 keypair in memory, saves the private
 key in OpenSSH format and prints the public key, so nothing private touches disk:
