@@ -30,6 +30,9 @@
 //                                    -p, TUMBLER_PROJECT or .tumbler, else the token's one project
 //   tumbler rm NAME [-p project | --global]
 //                                    delete a static key, within the token's writes; same default scope
+//   tumbler admin <command>          what /admin does (keys, tokens, pins, scopes, moves, grants,
+//                                    audit), signed in through Cloudflare Access: `tumbler admin
+//                                    login` runs cloudflared. `tumbler admin` lists the commands
 //   tumbler ssh-keygen NAME [-p project | --global] [-C comment] [-d description]
 //                                    make an ed25519 keypair in memory, save the private key as NAME
 //                                    (as put does) and print the public key; nothing touches disk
@@ -75,11 +78,11 @@ const callerCfg = () => ({ url: withScheme(process.env.TUMBLER_URL), token: proc
 
 function brokerGet(path, cfg = callerCfg()) { return brokerCall("GET", path, null, cfg); }
 
-function brokerCall(method, path, body, { url: base, token } = callerCfg()) {
+function brokerCall(method, path, body, { url: base, token, headers = [] } = callerCfg()) {
   if (!base) return Promise.reject(new Error("TUMBLER_URL is not set"));
   return new Promise((ok, fail) => {
-    // Headers and body go in on stdin as a curl config, so neither the token nor a value `put` sends
-    // ever shows up in `ps`.
+    // Headers and body go in on stdin as a curl config, so neither a token (caller or Access) nor a
+    // value `put` sends ever shows up in `ps`.
     const args = ["-sS", "--max-time", "15", "-X", method, "-K", "-", "-w", "\n%{http_code}"];
     const child = spawn("curl", [...args, base.replace(/\/$/, "") + path], { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "";
@@ -96,6 +99,7 @@ function brokerCall(method, path, body, { url: base, token } = callerCfg()) {
     // A quoted config string: curl unescapes \\ and \" (and \n, so JSON's own escapes are doubled).
     const q = (v) => `"${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`, conf = [];
     if (token) conf.push(`header = ${q(`Authorization: Bearer ${token}`)}`);
+    for (const h of headers) conf.push(`header = ${q(h)}`);
     if (body !== null) conf.push(`header = ${q("Content-Type: application/json")}`, `data-binary = ${q(JSON.stringify(body))}`);
     child.stdin.end(conf.join("\n") + "\n");
   });
@@ -637,14 +641,20 @@ async function save({ name, scope, desc }, value, how, failNote = "") {
 }
 
 const PUT_USAGE = "usage: tumbler put NAME [-p project | --global] [--from-file PATH | --clipboard] [-d description]";
+// A value from the file, the clipboard, piped stdin or a hidden prompt, in that order. Never argv.
+async function readValue({ name, file, clip }) {
+  let value;
+  if (file) { try { value = readFileSync(file, "utf8"); } catch (e) { die(`could not read ${file} (${e.code ?? e.message})`); } }
+  else if (clip) value = clipboard();
+  else if (!process.stdin.isTTY) value = await readStdin();
+  else value = await prompt(`value for ${name}`);
+  return trimValue(value);
+}
+const VALUE_HOW = "pipe it in, pass --from-file or --clipboard, or type it at the prompt";
+
 async function put(args) {
   const f = writeFlags(args, PUT_USAGE, { input: true });
-  let value;
-  if (f.file) { try { value = readFileSync(f.file, "utf8"); } catch (e) { die(`could not read ${f.file} (${e.code ?? e.message})`); } }
-  else if (f.clip) value = clipboard();
-  else if (!process.stdin.isTTY) value = await readStdin();
-  else value = await prompt(`value for ${f.name}`);
-  await save(f, trimValue(value), "pipe it in, pass --from-file or --clipboard, or type it at the prompt");
+  await save(f, await readValue(f), VALUE_HOW);
 }
 
 async function rm(args) {
@@ -683,6 +693,159 @@ async function sshKeygen(args) {
   await save(f, key.private, "", `\ntumbler: ${f.name} may or may not have been saved; the public key above matches it only if it was. Run this again before installing it anywhere.`);
 }
 
+// --- admin: what /admin does, signed in through Cloudflare Access ---------------------------------
+
+const ADMIN_USAGE = `usage: tumbler admin <command>
+  login                                   sign in through Cloudflare Access (cloudflared)
+  keys | tokens | grants | audit [--json] list them (names and metadata, never values)
+  token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--expires-hours N]
+                                          prints the new token once, on stdout
+  token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b]   (an empty list clears it)
+  token revoke NAME
+  put NAME --scope S [--kind static|mint:<provider>] [--config JSON] [--from-file F | --clipboard]
+      [-d description] [--skip-check]     any key, minted ones included; the value as for put
+  rm NAME --scope S                       any key, minted ones included
+  import FILE --scope S [--save]          a .env file; previews what it would do unless --save
+  move FROM TO                            move a scope's keys and pins (huddles-dev to huddles/dev)
+  grant revoke ID`;
+const ACCESS_HINT = "sign in with `tumbler admin login`";
+
+const adminApp = () => {
+  const base = callerCfg().url;
+  if (!base) die("TUMBLER_URL is not set");
+  return base.replace(/\/$/, "") + "/admin";
+};
+
+// Why Access and not a token: an admin can mint any token, so admin stays tied to a person's Access
+// sign-in (an email in TUMBLER_ADMINS), never to a bearer an agent could hold. cloudflared keeps the
+// session; its JWT goes to curl on stdin, Access checks it at the edge and the Worker checks the
+// assertion Access forwards (access.ts).
+function accessJwt() {
+  let jwt = "";
+  try { jwt = execFileSync("cloudflared", ["access", "token", `-app=${adminApp()}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+  catch (e) { die(e.code === "ENOENT" ? "admin commands sign in through Cloudflare Access with cloudflared, which isn't installed" : `no Access session; ${ACCESS_HINT}`); }
+  if (!/^[\w-]+\.[\w-]+\.[\w-]+$/.test(jwt)) die(`no Access session; ${ACCESS_HINT}`);
+  return jwt;
+}
+
+async function adminCall(method, path, body = null) {
+  try { return await brokerCall(method, `/admin/api/${path}`, body, { url: callerCfg().url, token: "", headers: [`cf-access-token: ${accessJwt()}`, "x-tumbler-admin: 1"] }); }
+  catch (e) { die(/broker (302|401|403)\b/.test(e.message) ? `${e.message}; ${ACCESS_HINT}` : e.message); }
+}
+
+// Flags as {name: "value" | "bool"}; positionals in `_`. An unknown flag is a mistake, not ignored.
+function adminFlags(args, spec) {
+  const out = { _: [] };
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith("-")) { out._.push(a); continue; }
+    const kind = spec[a] ?? die(`unexpected ${a}\n${ADMIN_USAGE}`, 2);
+    out[a] = kind === "bool" ? true : args[++i] ?? die(`${a} needs a value`, 2);
+  }
+  return out;
+}
+const names = (v) => String(v).split(",").map((s) => s.trim()).filter(Boolean);
+
+// A table on stdout, or the broker's JSON with --json, for an agent to parse.
+function table(rows, cols, json) {
+  if (json) return void process.stdout.write(JSON.stringify(rows) + "\n");
+  const cell = (v) => v === null || v === undefined ? "-" : Array.isArray(v) ? v.join(",") || "-" : String(v);
+  process.stdout.write([cols.join("\t"), ...rows.map((r) => cols.map((c) => cell(r[c])).join("\t"))].join("\n") + "\n");
+}
+
+const ADMIN_LISTS = {
+  keys: ["scope", "name", "kind", "checked", "rotated_at"], tokens: ["name", "projects", "scopes", "writes", "expires_at", "revoked_at"],
+  grants: ["id", "name", "caller", "project", "state", "scopes", "expires_at"], audit: ["at", "actor", "action", "project", "names"],
+};
+
+async function admin(args) {
+  const [sub, ...rest] = args;
+  if (Object.hasOwn(ADMIN_LISTS, sub ?? "")) {
+    const f = adminFlags(rest, { "--json": "bool" });
+    return table((await adminCall("GET", sub))[sub], ADMIN_LISTS[sub], f["--json"]);
+  }
+  switch (sub) {
+    case "login": {
+      const r = spawn("cloudflared", ["access", "login", adminApp()], { stdio: "inherit" });
+      r.on("error", (e) => die(e.code === "ENOENT" ? "cloudflared isn't installed; see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/" : e.message));
+      r.on("exit", (code) => process.exit(code ?? 1));
+      return;
+    }
+    case "token": {
+      const [verb, ...more] = rest;
+      const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--expires-hours": "value" });
+      const [name] = f._;
+      if (!name || f._.length > 1) die(ADMIN_USAGE, 2);
+      if (verb === "create") {
+        const hours = f["--expires-hours"] === undefined ? null : Number(f["--expires-hours"]);
+        if (hours !== null && !(hours > 0)) die("--expires-hours takes a number of hours", 2);
+        const r = await adminCall("POST", "tokens", { name, projects: names(f["--pin"] ?? ""), scopes: names(f["--scopes"] ?? ""), writes: names(f["--writes"] ?? ""),
+          expires_at: hours === null ? null : new Date(Date.now() + hours * 3600_000).toISOString() });
+        process.stdout.write(r.token + "\n");
+        return say(`created token ${name}; it is shown once, so store it now (as a network secret, or TUMBLER_TOKEN)`);
+      }
+      if (verb === "edit") {
+        const edit = {};
+        for (const [flag, field] of [["--pin", "projects"], ["--scopes", "scopes"], ["--writes", "writes"]]) if (f[flag] !== undefined) edit[field] = names(f[flag]);
+        if (!Object.keys(edit).length) die("name what to change: --pin, --scopes or --writes", 2);
+        await adminCall("PATCH", `tokens/${encodeURIComponent(name)}`, edit);
+        return say(`updated token ${name}`);
+      }
+      if (verb === "revoke") { await adminCall("DELETE", `tokens/${encodeURIComponent(name)}`); return say(`revoked token ${name}; the children it held are ended`); }
+      return die(ADMIN_USAGE, 2);
+    }
+    case "put": {
+      const f = adminFlags(rest, { "--scope": "value", "--kind": "value", "--config": "value", "--from-file": "value", "--clipboard": "bool", "-d": "value", "--description": "value", "--skip-check": "bool" });
+      const [name] = f._;
+      if (!name || f._.length > 1 || !f["--scope"]) die(ADMIN_USAGE, 2);
+      if (f["--from-file"] && f["--clipboard"]) die("pass --from-file or --clipboard, not both", 2);
+      let config;
+      if (f["--config"] !== undefined) { try { config = JSON.parse(f["--config"]); } catch { die("--config takes JSON", 2); } }
+      const value = await readValue({ name, file: f["--from-file"], clip: f["--clipboard"] });
+      if (!value) die(`empty value; ${VALUE_HOW}`);
+      const desc = f["-d"] ?? f["--description"];
+      await adminCall("PUT", `keys/${encodeURIComponent(f["--scope"])}/${encodeURIComponent(name)}`, { value, ...(f["--kind"] ? { kind: f["--kind"] } : {}),
+        ...(config !== undefined ? { config } : {}), ...(desc !== undefined ? { description: desc } : {}), ...(f["--skip-check"] ? { skip_check: true } : {}) });
+      try { await ask({ op: "reload" }); } catch {}
+      return say(`saved ${name} in ${f["--scope"]}`);
+    }
+    case "rm": {
+      const f = adminFlags(rest, { "--scope": "value" });
+      const [name] = f._;
+      if (!name || f._.length > 1 || !f["--scope"]) die(ADMIN_USAGE, 2);
+      await adminCall("DELETE", `keys/${encodeURIComponent(f["--scope"])}/${encodeURIComponent(name)}`);
+      try { await ask({ op: "reload" }); } catch {}
+      return say(`deleted ${name} from ${f["--scope"]}`);
+    }
+    case "import": {
+      const f = adminFlags(rest, { "--scope": "value", "--save": "bool" });
+      const [file] = f._;
+      if (!file || f._.length > 1 || !f["--scope"]) die(ADMIN_USAGE, 2);
+      let text; try { text = readFileSync(file, "utf8"); } catch (e) { die(`could not read ${file} (${e.code ?? e.message})`); }
+      const r = await adminCall("POST", "import", { scope: f["--scope"], text, save: !!f["--save"] });
+      for (const e of r.errors) say(`line ${e.line}: ${e.error}`);
+      for (const k of r.keys) process.stdout.write(`${k.name}\t${k.action}${k.reason ? `\t${k.reason}` : ""}\n`);
+      if (!f["--save"]) say("a preview; pass --save to save it");
+      else if (r.saved.length) try { await ask({ op: "reload" }); } catch {}
+      return;
+    }
+    case "move": {
+      const f = adminFlags(rest, {});
+      const [from, to] = f._;
+      if (!from || !to || f._.length > 2) die(ADMIN_USAGE, 2);
+      const r = await adminCall("POST", "scopes/move", { from, to });
+      return say(`moved ${r.moved.length} key(s) from ${from} to ${to}; repinned ${r.repinned.join(", ") || "no tokens"}. Change project = ${from} in any .tumbler that names it`);
+    }
+    case "grant": {
+      const f = adminFlags(rest.slice(1), {});
+      if (rest[0] !== "revoke" || f._.length !== 1) die(ADMIN_USAGE, 2);
+      await adminCall("DELETE", `grants/${encodeURIComponent(f._[0])}`);
+      return say(`revoked grant ${f._[0]}`);
+    }
+    default: die(ADMIN_USAGE, 2);
+  }
+}
+
 function shim(tools) {
   if (!tools.length) die("usage: tumbler shim <tool>...", 2);
   mkdirSync(SHIM_DIR, { recursive: true });
@@ -709,7 +872,8 @@ switch (cmd) {
   case "put": await put(args); break;
   case "rm": await rm(args); break;
   case "ssh-keygen": await sshKeygen(args); break;
+  case "admin": await admin(args); break;
   case "reload": try { await ask({ op: "reload" }); } catch {} process.stdout.write("cache cleared\n"); break;
   case "shim": shim(args); break;
-  default: die("usage: tumbler run|auto|keys|whoami|put|rm|ssh-keygen|reload|shim  (see the header of this file)", 2);
+  default: die("usage: tumbler run|auto|keys|whoami|put|rm|admin|ssh-keygen|reload|shim  (see the header of this file)", 2);
 }

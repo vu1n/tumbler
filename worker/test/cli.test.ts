@@ -22,6 +22,7 @@ await catalog.put("dev", "PYTH_API_KEY", "dev-pyth");
 await catalog.put("global", "CLOUDFLARE_API_TOKEN", "cf", { description: "Cloudflare API, Workers deploys" });
 await catalog.put("global", "POSTHOG_API_KEY", "ph", { description: "PostHog product analytics" });
 const devToken = await catalog.createToken("dev", ["dev"]);
+const FAKE_JWT = "aGVhZGVy.cGF5bG9hZA.c2ln";
 let hits = 0, seen: unknown = null;
 // A stand-in for Clef: says PostHog is needed when the repo depends on anything analytics-like.
 const clef: S1Client = { systemOne: async ({ state, questions }) => {
@@ -34,7 +35,8 @@ const server = createServer(async (req, res) => {
   hits++;
   let body = ""; for await (const c of req) body += c;
   const r = await handle(new Request(`http://127.0.0.1${req.url}`, { method: req.method, headers: req.headers as any, body: body || undefined }),
-    { catalog, admin: async () => null, s1: clef });
+    // Stands in for Access at the edge: a request carrying the session cloudflared hands out is the admin.
+    { catalog, admin: async (r) => r.headers.get("cf-access-token") === FAKE_JWT ? "vu@example.com" : null, s1: clef });
   res.writeHead(r.status, Object.fromEntries(r.headers)); res.end(await r.text());
 });
 await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
@@ -332,4 +334,70 @@ test("rm deletes a key the token may write, and the next run no longer gets it",
   assert.match(r.stderr, /deleted GONE_SOON from dev/);
   await assert.rejects(cli(["run", "-k", "GONE_SOON", "--", "true"], { TUMBLER_TTL: "0", TUMBLER_TOKEN: writer }), /unknown keys: GONE_SOON/);
   assert.match((await cliIn(["rm", "AWS_REGION", "-p", "kypp"], "")).stderr, /may not write kypp/);
+});
+
+// --- admin, through a stand-in cloudflared ---
+
+const fakeCloudflared = (script: string) => {
+  const dir = mkdtempSync(join(home, "cfd-"));
+  writeFileSync(join(dir, "cloudflared"), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+  return `${dir}:${process.env.PATH}`;
+};
+const signedIn = fakeCloudflared(`[ "$1 $2" = "access token" ] && echo ${FAKE_JWT} || exit 1`);
+const adminCli = (args: string[], input = "", env: Record<string, string> = {}) => cliIn(["admin", ...args], input, { PATH: signedIn, TUMBLER_TOKEN: "", ...env });
+
+test("admin creates a token with writes, edits it, lists it and revokes it", async () => {
+  const made = await adminCli(["token", "create", "ci-bot", "--pin", "dev", "--writes", "dev"]);
+  assert.equal(made.code, 0, made.stderr);
+  const token = made.stdout.trim();
+  assert.match(token, /^\S+$/);
+  assert.match(made.stderr, /shown once/);
+  assert.equal((await cliIn(["put", "CI_MADE", "-p", "dev"], "fake", { TUMBLER_TOKEN: token })).code, 0);
+  assert.equal((await adminCli(["token", "edit", "ci-bot", "--writes", ""])).code, 0);
+  assert.match((await cliIn(["put", "CI_MADE", "-p", "dev"], "fake", { TUMBLER_TOKEN: token })).stderr, /writes nothing/);
+  const listed = JSON.parse((await adminCli(["tokens", "--json"])).stdout).find((t: any) => t.name === "ci-bot");
+  assert.deepEqual([listed.projects, listed.writes], [["dev"], null]);
+  assert.match((await adminCli(["tokens"])).stdout, /^name\tprojects\tscopes\twrites/);
+  assert.equal((await adminCli(["token", "revoke", "ci-bot"])).code, 0);
+  assert.match((await cliIn(["keys"], "", { TUMBLER_TOKEN: token })).stderr, /broker 401/);
+});
+
+test("admin saves and deletes any key, imports a .env, and lists keys without values", async () => {
+  assert.equal((await adminCli(["put", "ADMIN_SET", "--scope", "global", "-d", "set by admin"], "admin-fake\n")).code, 0);
+  assert.equal(await stored("global", "ADMIN_SET"), "admin-fake");
+  const keys = await adminCli(["keys"]);
+  assert.match(keys.stdout, /global\tADMIN_SET\tstatic/);
+  assert.doesNotMatch(keys.stdout, /admin-fake/);
+  assert.equal((await adminCli(["rm", "ADMIN_SET", "--scope", "global"])).code, 0);
+  assert.equal(await catalog.keyRow("global", "ADMIN_SET"), null);
+  const env = join(mkdtempSync(join(home, "env-")), ".env");
+  writeFileSync(env, "IMPORTED_A=one\nlower=x\n");
+  const preview = await adminCli(["import", env, "--scope", "dev"]);
+  assert.match(preview.stdout, /IMPORTED_A\tcreate/);
+  assert.match(preview.stderr, /line 2: invalid key name[\s\S]*a preview/);
+  assert.equal(await catalog.keyRow("dev", "IMPORTED_A"), null);
+  writeFileSync(env, "IMPORTED_A=one\n");
+  assert.match((await adminCli(["import", env, "--scope", "dev", "--save"])).stdout, /IMPORTED_A\tcreated/);
+  assert.equal(await stored("dev", "IMPORTED_A"), "one");
+});
+
+test("admin without an Access session, or without cloudflared, says how to sign in and sends nothing", async () => {
+  const before = hits;
+  const out = await adminCli(["keys"], "", { PATH: fakeCloudflared("exit 1") });
+  assert.equal(out.code, 1);
+  assert.match(out.stderr, /no Access session; sign in with `tumbler admin login`/);
+  const emptyPath = mkdtempSync(join(home, "nopath-"));
+  for (const t of ["curl", "sh", "node"]) symlinkSync(execFileSync("sh", ["-c", `command -v ${t}`], { encoding: "utf8" }).trim(), join(emptyPath, t));
+  assert.match((await adminCli(["keys"], "", { PATH: emptyPath })).stderr, /cloudflared, which isn't installed/);
+  assert.equal(hits, before);
+  assert.equal((await adminCli(["frobnicate"])).code, 2);
+});
+
+test("the Access session never appears in curl's arguments", async () => {
+  const dir = mkdtempSync(join(home, "argv-")), log = join(dir, "argv");
+  const real = execFileSync("sh", ["-c", "command -v curl"], { encoding: "utf8" }).trim();
+  writeFileSync(join(dir, "curl"), `#!/bin/sh\necho "$@" >> ${log}\nexec ${real} "$@"\n`, { mode: 0o755 });
+  assert.equal((await adminCli(["audit"], "", { PATH: `${dir}:${signedIn}` })).code, 0);
+  assert.match(readFileSync(log, "utf8"), /\/admin\/api\/audit/);
+  assert.ok(!readFileSync(log, "utf8").includes(FAKE_JWT));
 });
