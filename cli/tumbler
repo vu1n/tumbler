@@ -353,14 +353,17 @@ function realBinary(tool) {
 // Ask the broker for more scopes on the minted keys in the set. A refusal (a scope outside the
 // token's scopes) stops the run: the command never starts with a narrower token than it asked for.
 async function stepUp(project, keys, scopes) {
-  let names = keys;
+  let names = keys, failed = null;
   try {
     if (!names) names = (await brokerGet("/v1/keys" + (project ? `?project=${encodeURIComponent(project)}` : ""))).keys;
     const r = await brokerCall("POST", "/v1/step-up" + (project ? `?project=${encodeURIComponent(project)}` : ""), { keys: names, scopes });
     const short = r.grants.filter((g) => g.state !== "active");
-    if (short.length) die(short.map((g) => `${g.name}: not active yet (grant ${g.id}); run again`).join("\n          "));
-  } catch (e) { die(e.message); }
-  try { await ask({ op: "reload" }); } catch {} // the cached env holds the narrower child
+    if (short.length) failed = short.map((g) => `${g.name}: not active yet (grant ${g.id}); run again`).join("\n          ");
+  } catch (e) { failed = e.message; }
+  // Reload even on a failure: the cached env holds the narrower child, which a step-up that failed
+  // partway (a later key's mint) may already have deleted.
+  try { await ask({ op: "reload" }); } catch {}
+  if (failed) die(failed);
 }
 
 async function run(args) {

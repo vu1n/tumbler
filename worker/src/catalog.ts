@@ -59,9 +59,9 @@ function winners<T extends { scope: string; name: string }>(rows: T[], scopes: s
 // Reads need no listing. Empty means reads only, stored as null.
 function checkCeiling(scopes: string[] | null): string[] | null {
   const list = [...new Set((scopes ?? []).map((s) => String(s).trim()).filter(Boolean))].sort();
-  // Any name a mint key's config may give a scope (`deploy`, `workers:write`), so a refused scope can
-  // always be added exactly; `*` alone is the wildcard.
-  for (const s of list) if (s !== "*" && !/^[a-z0-9][a-z0-9_.:*-]*$/i.test(s)) throw new Refused(400, `invalid scope: ${s}`);
+  // Any name a mint key's config may give a scope (`deploy`, `release/candidate`), so a refused scope
+  // can always be added exactly; `*` alone is the wildcard.
+  for (const s of list) if (s.length > 128 || /[\s\x00-\x1f]/.test(s)) throw new Refused(400, `invalid scope: ${s}`);
   return list.length ? list : null;
 }
 const asJson = (v: string[] | null) => v === null ? null : JSON.stringify(v);
