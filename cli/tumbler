@@ -4,8 +4,8 @@
 //
 //   tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] [--clean [--pass A,B]] -- <cmd> [args...]
 //                                    --scope asks for more scopes on the set's minted keys
-//                                    (e.g. workers:write); reads are granted at once, the rest
-//                                    wait for approval in /admin and the command doesn't start
+//                                    (e.g. workers:write); granted at once within the token's
+//                                    scopes, refused outside them (the command doesn't start)
 //                                    When the command fails, run refetches its keys and reports
 //                                    which changed and which fail their check (names, never values)
 //                                    --retry reruns it once with the new values, only if a key changed
@@ -29,9 +29,10 @@
 // polls (default 30), TUMBLER_DIAGNOSE=off to skip the failure report. A `.tumbler` file in the working
 // directory or any parent lists the key names a project wants, one per line, plus an optional
 // `project = <name>` line. With no `.tumbler`, `run` writes one with `tumbler auto` first and passes
-// only those keys; if auto fails the command doesn't start. TUMBLER_AUTO=off skips auto and fetches
-// every key the token can read.
-import { spawn } from "node:child_process";
+// only those keys; if auto fails the command doesn't start. A `.tumbler` auto writes is kept out of
+// git (.git/info/exclude), so nobody has to review or commit it; commit one only to pin a set.
+// TUMBLER_AUTO=off skips auto and fetches every key the token can read.
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
@@ -266,10 +267,25 @@ async function autoPick(project) {
 // token ran auto, and a committed `project =` line made from it 403s for every other token (a
 // global-only one, or one pinned elsewhere). A single-pin token gets its pin without the line.
 function writeManifest(path, r, project) {
-  const lines = ["# Written by `tumbler auto` from this repo's file and dependency names. Edit it; commit it."];
+  const lines = ["# Written by `tumbler auto` from this repo's file and dependency names. Edit it if you like; git ignores it."];
   if (project) lines.push(`project = ${project}`);
   for (const k of r.keys) lines.push(`${k.name}  # ${k.why}`);
   writeFileSync(path, lines.join("\n") + "\n");
+  keepOutOfGit(path);
+}
+
+// A written .tumbler is the CLI's working note, not part of the change: list it in the repo's own
+// info/exclude (asked of git, so a worktree or submodule finds its real one) so it never shows up
+// as untracked. Best effort: no git, no exclude.
+function keepOutOfGit(path) {
+  try {
+    const cwd = dirname(path);
+    const exclude = resolve(cwd, execFileSync("git", ["rev-parse", "--git-path", "info/exclude"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
+    const have = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
+    if (have.split("\n").some((l) => l.trim() === "/.tumbler")) return;
+    mkdirSync(dirname(exclude), { recursive: true });
+    writeFileSync(exclude, have + (have && !have.endsWith("\n") ? "\n" : "") + "/.tumbler\n");
+  } catch {}
 }
 
 async function auto(args) {
@@ -334,20 +350,20 @@ function realBinary(tool) {
   return null;
 }
 
-// Ask the broker for more scopes on the minted keys in the set. Anything still waiting for approval
-// stops the run: the command never starts with a narrower token than it asked for, or a wider one.
+// Ask the broker for more scopes on the minted keys in the set. A refusal (a scope outside the
+// token's scopes) stops the run: the command never starts with a narrower token than it asked for.
 async function stepUp(project, keys, scopes) {
-  let names = keys;
+  let names = keys, failed = null;
   try {
     if (!names) names = (await brokerGet("/v1/keys" + (project ? `?project=${encodeURIComponent(project)}` : ""))).keys;
     const r = await brokerCall("POST", "/v1/step-up" + (project ? `?project=${encodeURIComponent(project)}` : ""), { keys: names, scopes });
-    const waiting = r.grants.filter((g) => g.state !== "active" || g.requested || g.denied);
-    if (waiting.length) {
-      die(waiting.map((g) => g.state === "denied" || g.denied ? `${g.name}: the request was denied (grant ${g.id})`
-        : `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in ${r.approve_in ?? "/admin"} (grant ${g.id})`).join("\n          ") + "\n          run again once approved");
-    }
-  } catch (e) { die(e.message); }
-  try { await ask({ op: "reload" }); } catch {} // the cached env holds the narrower child
+    const short = r.grants.filter((g) => g.state !== "active");
+    if (short.length) failed = short.map((g) => `${g.name}: not active yet (grant ${g.id}); run again`).join("\n          ");
+  } catch (e) { failed = e.message; }
+  // Reload even on a failure: the cached env holds the narrower child, which a step-up that failed
+  // partway (a later key's mint) may already have deleted.
+  try { await ask({ op: "reload" }); } catch {}
+  if (failed) die(failed);
 }
 
 async function run(args) {

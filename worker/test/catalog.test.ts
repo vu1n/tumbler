@@ -257,3 +257,35 @@ test("keys in a deployment named before environments were fixed can still be mov
   assert.deepEqual((await catalog.tokens()).find((t) => t.name === "legacy")!.projects, ["other/qa", "huddles/dev"]);
   assert.equal((await admin(deps, "scopes/move", { method: "POST", as: "vu@example.com", body: JSON.stringify({ from: "huddles", to: "huddles/qa" }) })).status, 400);
 });
+
+test("migration 0007 carries over each token's live write approvals and active write grants as its scopes", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readdirSync } = await import("node:fs");
+  const dir = new URL("../migrations/", import.meta.url), files = readdirSync(dir).sort();
+  const db = new DatabaseSync(":memory:"), at = (f: string) => db.exec(readFileSync(new URL(f, dir), "utf8"));
+  for (const f of files.filter((f) => f < "0007")) at(f);
+  const ins = (sql: string, ...v: (string | null)[]) => db.prepare(sql).run(...v);
+  for (const n of ["approved", "granted", "reader", "lapsed", "gone", "moved", "wild", "lookalike"])
+    ins("INSERT INTO tokens (name, hash, projects, created_at, revoked_at) VALUES (?, ?, ?, '2026-01-01', ?)", n, `h-${n}`, JSON.stringify(n === "moved" ? ["kypp"] : n === "wild" ? ["*/prod"] : n === "lookalike" ? ["fooXbar/dev"] : ["dev"]), n === "gone" ? "2026-01-02" : null);
+  ins("INSERT INTO keys (scope, name, kind, iv, ciphertext, created_at, rotated_at, rev) VALUES ('dev', 'K', 'mint:cloudflare', x'00', x'00', '2026-01-01', '2026-01-01', 'r')");
+  ins("INSERT INTO keys (scope, name, kind, iv, ciphertext, created_at, rotated_at, rev) VALUES ('foo_bar', 'K', 'mint:cloudflare', x'00', x'00', '2026-01-01', '2026-01-01', 'r')");
+  const approval = (caller: string, scopes: string[], until: string, ended: string | null = null, rev = "r", scope = "dev") =>
+    ins("INSERT INTO approvals (id, caller, key_scope, name, key_rev, scopes, approved_by, created_at, until, ended_at) VALUES (?, ?, ?, 'K', ?, ?, 'vu', '2026-01-01', ?, ?)", `a-${caller}-${until}-${rev}`, caller, scope, rev, JSON.stringify(scopes), until, ended);
+  const grant = (caller: string, scopes: string[], state: string, project: string | null = null) =>
+    ins("INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, expires_at, created_at, updated_at) VALUES (?, ?, ?, 'dev', 'r', 'K', ?, ?, '2999-01-01T00:00:00Z', '2026-01-01', '2026-01-01')", `g-${caller}-${state}`, caller, project, state, JSON.stringify(scopes));
+  approval("approved", ["workers:read", "workers:write"], "2999-01-01T00:00:00Z");
+  approval("lapsed", ["workers:write"], "2000-01-01T00:00:00Z");
+  approval("lapsed", ["d1:write"], "2999-01-01T00:00:00Z", "2026-01-02");
+  approval("lapsed", ["r2:write"], "2999-01-01T00:00:00Z", null, "rotated-away");
+  grant("granted", ["workers:read", "workers:write", "d1:write", "Audit:Read", "*"], "active");
+  grant("granted", ["r2:write"], "revoked");
+  grant("reader", ["workers:read"], "active");
+  approval("gone", ["workers:write"], "2999-01-01T00:00:00Z");
+  approval("moved", ["workers:write"], "2999-01-01T00:00:00Z"); // repinned away from dev: not carried
+  grant("moved", ["d1:write"], "active", "dev");
+  approval("wild", ["workers:write"], "2999-01-01T00:00:00Z"); // */prod reaches dev's project keys
+  approval("lookalike", ["workers:write"], "2999-01-01T00:00:00Z", null, "r", "foo_bar"); // `_` is no wildcard
+  at(files.find((f) => f.startsWith("0007"))!);
+  const scopes = Object.fromEntries((db.prepare("SELECT name, scopes FROM tokens").all() as any[]).map((r) => [r.name, r.scopes && JSON.parse(r.scopes)]));
+  assert.deepEqual(scopes, { approved: ["workers:write"], granted: ["Audit:Read", "d1:write", "workers:write"], reader: null, lapsed: null, gone: null, moved: null, wild: ["workers:write"], lookalike: null });
+});

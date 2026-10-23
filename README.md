@@ -39,8 +39,8 @@ The admin API checks the Access JWT itself, so a gap in the Access policy (or a 
 
 ## Use it from a Claude cloud environment
 
-1. In `/admin`, create a token pinned to the project (or with no pin, for global keys only). It's
-   shown once.
+1. In `/admin`, create a token pinned to the project (or with no pin, for global keys only), and
+   pick what it may mint (Read + deploy for an agent that runs `wrangler deploy`). It's shown once.
 2. On the environment, add the token as a **network secret** for the broker's host (`Authorization`,
    prefix `Bearer`). The session never sees the token: the agent proxy adds it on the way out.
 3. Make the environment's setup script one line: `curl -fsSL https://tumbler.example.com/setup | bash`.
@@ -109,7 +109,10 @@ A `.tumbler` file in a repo lists the key names it needs (one per line) and opti
 `project = <name>`. Without one, `run` calls `tumbler auto` first and writes it, so the command gets
 only the keys the repo needs. Auto writes a `project =` line only when you name one (`-p`,
 `TUMBLER_PROJECT`), never the pin of the token that ran it: a token pinned to one project reads it
-without the line, and a line naming another project would make the broker refuse every other token. Commit the file so the set is reviewed like code. A failure never widens
+without the line, and a line naming another project would make the broker refuse every other token. The file auto
+writes is listed in the repo's `.git/info/exclude`, so it never shows up in a change and nobody has to
+review or commit it, and a fresh checkout picks again on its first `run`. Commit one only when you
+want a repo to pin its set. A failure never widens
 the set: if auto can't reach the broker the command doesn't start, and if `.tumbler` can't be written
 (a read-only checkout) the command runs with just the picked keys. `TUMBLER_AUTO=off` skips auto and
 fetches every key the token can read.
@@ -188,8 +191,8 @@ Set one up in `/admin`:
 2. Create an **account-owned** Cloudflare token (Manage Account > Account API Tokens, not My
    Profile) with **Account API Tokens: Edit**: it can create other tokens and nothing else.
 3. Save it as `CLOUDFLARE_API_TOKEN` with kind `mint:cloudflare`. Just the token: with no config,
-   callers get `workers:read` (Workers Scripts, D1, KV and R2 read; granted on request) and
-   `workers:write` (the same four, write; waits for your approval), children last 30 minutes, and
+   callers get `workers:read` (Workers Scripts, D1, KV and R2 read) and `workers:write` (the same
+   four, write; for tokens whose scopes allow it), children last 30 minutes, and
    the token is used to look up each permission's id on your account as it's saved.
 
 To choose other scopes, give a config. Scope names are yours; each lists Cloudflare account
@@ -204,42 +207,38 @@ permissions, by name (as the dashboard shows them) or by id:
 `account_id` is optional when `CLOUDFLARE_ACCOUNT_ID` is saved. A name Cloudflare doesn't list for
 the account refuses the save, and names are stored as ids, which don't change.
 
+**A token's scopes are its approval.** When you create a token in `/admin`, besides its pin you
+say what it may mint beyond reads: nothing (Read only), `workers:write` (Read + deploy: Workers, D1, KV and R2 writes), or `*` (any
+scope a key has, including ones added to a key later). You decide once, there. After that nothing waits for you:
+
+- Reads are minted on request, for every token.
+- A scope the token's scopes allow is minted at once. `tumbler run --scope workers:write -- wrangler
+  deploy` gets a wider child, and the narrower one is deleted at Cloudflare.
+- A scope outside them is refused, and the command doesn't start: `CLOUDFLARE_API_TOKEN: token dev
+  may not hold workers:write. Refused; retrying won't help: ask a human to add it to this token's
+  scopes in /admin`. An agent stops and asks you; you click the token's scopes in `/admin`. Narrowing them ends the children holding what they no longer allow.
+- Every mint is in the audit log (token, key, scopes, time), and Grants lists the live children.
+
 Each caller holds one **grant** per minted key, and its state decides what the env var holds:
 
 | State | `CLOUDFLARE_API_TOKEN` in the command |
 |---|---|
-| pending (waiting for you in `/admin`) | not set: the command doesn't start |
+| pending (its first child is being minted) | not set: run again |
 | active | a child with exactly the grant's scopes |
-| active, with a step-up waiting | the old, narrower child |
-| denied, expired, revoked | not set: the next run starts a new grant |
+| expired, revoked | not set: the next run starts a new grant |
 
-- A scope named `<thing>:read` is granted on request. Any other scope waits for approval in `/admin`
-  (Grants), and an unanswered request lapses to denied after a day.
-- `tumbler run --scope workers:write -- wrangler deploy` asks for more. Until you approve, the
-  command doesn't start. After you approve, the same command runs with a wider child, and the narrower
-  child is deleted at Cloudflare.
 - Children expire after `ttl_minutes` (15 to 1440, default 30). A child is handed out again only
   while it has more than 6 minutes left, which keeps the CLI's 5-minute cache from holding an
   expired one. A cron every five minutes expires grants and deletes their children at Cloudflare.
-- **Approve for a while.** Approve takes a duration (the select above Grants: this token only, 1
-  hour by default, 8 hours or 24 hours, never more). Until it ends, the same caller gets the
-  approved scopes on that key again without asking: when its child expires, the next run is minted
-  a new one with them, and a request on another project its pin reaches is minted too. Children stay
-  `ttl_minutes` long, and the last one lives out its TTL after the approval ends. It is per caller
-  token and per key revision, so another token, or a rotated parent, asks again. Standing
-  approvals are listed below Grants with an End button, and revoking one of the caller's grants on
-  the key, or the caller's token, ends them too. "This token only" is the old behavior: approval
-  lasts `ttl_minutes` minus 6.
-- Approve mints exactly the request shown on the page. If the caller asked for more since then,
-  approval is refused until you reload.
-- Revoke deletes the child at once (a delete Cloudflare rejects is queued, retried every five minutes
-  until the child expires, and shown on the Grants tab). For a day after that, that caller's next grant on the key waits
-  for approval, even for reads. Revoking a caller token ends all of its grants. Deleting a minted key,
-  or saving a new parent or config, ends its grants. Old parents are kept sealed for a day, so a
-  child they minted can always be revoked.
-- Failures never widen anything. A Cloudflare error, a pending or denied grant, or a broker that
-  can't be reached all mean the command gets no token. No failure falls back to the parent or to a
-  broader child.
+- Revoke on a grant deletes its child at once (a delete Cloudflare rejects is queued, retried every
+  five minutes until the child expires, and shown on the Grants tab). The caller's next run mints a
+  new one within its token's scopes, so to cut a caller off, revoke its token or narrow its scopes.
+  Revoking a caller token ends all of its grants. Deleting a minted key, or saving a new parent or
+  config, ends its grants. Old parents are kept sealed for a day, so a child they minted can always
+  be revoked.
+- Failures never widen anything. A Cloudflare error, a refused scope, or a broker that can't be
+  reached all mean the command gets no token. No failure falls back to the parent or to a broader
+  child.
 - Rotating the parent keeps the key's kind. A minted key can't be turned static, because that would
   hand its parent out; delete it and add it again instead.
 
@@ -248,65 +247,25 @@ Other providers plug in as a `Provider` (`mint`, `revoke`, `validate` and option
 as one pure function, `transition(grant, event)`. Every change is written along with its event in
 `grant_events`, an append-only log (`GET /admin/api/grants/:id/events` shows a grant's history).
 
-### Approve in Huddles
-
-With `HUDDLES_TOKEN` set, a grant that waits for approval also shows up in your **Needs you** in
-Huddles, as an ask with chips: Approve for 1 hour, 8 hours or 24 hours, Approve this token only, or
-Deny. Your answer there decides the grant just as /admin would, and the duration works the same way
-(Approve for a while, above). The caller's next run picks it up, and so does the five-minute cron.
-The ask names the caller, key, project and scopes, never a value. If the request changes, tumbler
-takes the old ask back and posts a new one. When you decide in /admin first, the ask is taken back
-too.
-
-Only you can approve there. Huddles refuses an answer to your ask from anyone else, including
-agents and your own delegates. Tumbler also checks the answer it reads back with its own credential:
-it must be the ask it posted for that grant, answered by the person the credential acts for, and
-approving mints only the request the ask showed. An ask is for one request: when /admin decides it
-first, the ask is taken back, and an answer to it can't approve the same scopes asked again later. A message in a room approves nothing. If Huddles
-can't be reached, the grant waits and /admin still works.
-
-Setup, once, from a huddles-up checkout with the core's `DATABASE_URL`:
-
-```sh
-cd packages/server
-node src/cli.ts mint-delegate <your user id> tumbler tumbler | jq -r .credential \
-  | wrangler secret put HUDDLES_TOKEN --name tumbler
-echo <your user id> | wrangler secret put HUDDLES_APPROVER --name tumbler
-```
-
-That credential is a delegate acting for you, so you become the approver. `HUDDLES_APPROVER` pins
-that: if the credential ever acts for anyone else, tumbler posts no ask and applies no answer. Asks go to a room tumbler
-creates for you on its first ask (`tumbler-approvals-<delegate id>`), or to `HUDDLES_ROOM` if you
-set it, as long as you have granted the delegate write access there. `HUDDLES_URL` defaults to
-`https://huddles.dev`. To stop, revoke the delegate (`cli.ts revoke-delegate`) or delete the secret.
-
-Every ask and its outcome is kept in `grant_asks`: what was shown, which request it was for, which
-option was picked and by whom, and, kept apart from the choice, what came of it, with the
-`grant_events` row the answer made when it was applied. /admin decisions are in `grant_events` (its `actor` is the admin's email, or
-`huddles:<user id>`). That gives a later triage step (Clef flagging a request that asks for more
-than the work needs) labelled examples to be measured against before it is trusted with anything.
-Withdrawn and expired asks carry no label.
-
 ## API
 
 | Route | Auth | |
 |---|---|---|
 | `GET /v1/env?project=&keys=A,B` | caller token | `{"env": {...}}`, project over global; unknown names are a 404 |
-| `GET /v1/whoami` | caller token | `{"name", "projects"}` |
+| `GET /v1/whoami` | caller token | `{"name", "projects", "scopes"}` |
 | `POST /v1/auto?project=` | caller token | body `{"signals": ["file:…", "dep:…"]}`; returns `{"project", "keys": [{"name", "why"}]}` |
 | `GET /v1/keys?project=` | caller token | `{"project", "keys": [names]}`; never values, never mints |
-| `POST /v1/step-up?project=` | caller token | body `{"keys": [...], "scopes": [...]}`; returns each minted key's grant state |
+| `POST /v1/step-up?project=` | caller token | body `{"keys": [...], "scopes": [...]}`; mints within the token's scopes and returns each minted key's grant, or 403 for a scope outside them |
 | `POST /v1/check?project=` | caller token | body `{"keys": [...]}`; runs each key's check on its current value: `{"checks": {"A": {"status": "ok"\|"invalid"\|"error"\|"none"}}}` |
 | `GET /v1/revs?project=&keys=A,B` | caller token | `{"keys": {"A": {"rev", "checked"}}}`; a new rev on every save; never values, never mints |
 | `GET /cli` | none | the CLI script (no secrets in it) |
-| `/admin`, `/admin/api/{keys,tokens,grants,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1`; `POST grants/:id/approve` or `/deny`, `DELETE grants/:id` revokes, `GET grants/:id/events` |
+| `/admin`, `/admin/api/{keys,tokens,grants,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1`; `POST tokens` and `PATCH tokens/:name` take `projects` and `scopes`; `DELETE grants/:id` revokes, `GET grants/:id/events` |
 
 Every read and change is audited by key name, never by value.
 
 ## Not in this slice
 
-Providers beyond Cloudflare (AWS STS, GitHub App tokens, OpenRouter, Tailscale), and moving static
-keys and a repo's `.tumbler` set onto grants, so a new key in the set waits for approval too.
+Providers beyond Cloudflare (AWS STS, GitHub App tokens, OpenRouter, Tailscale).
 
 ## Develop
 

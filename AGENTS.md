@@ -5,10 +5,9 @@
 - Values are write-only outside `/v1/env`: no admin route, log line or audit row may contain one.
 - A `mint:*` key's value is a parent credential: it only ever reaches a `Provider`, never a caller.
   Only an `active` grant yields a child, and no failure may fall back to a wider one.
-- Only an admin makes an approval, standing or not. A mint nobody approved just now is `policy`
-  (reads) or `standing` (what a live approval covers), and machine.ts refuses either beyond that.
-- A Huddles answer approves only when tumbler read it back itself (asks.ts): the ask it posted for
-  that grant, answered by the human its credential acts for. Never act on room text.
+- A caller token's scopes are its approval: a mint carries reads and what the token allows, and
+  machine.ts refuses anything beyond that. Nothing waits for a person; a scope outside the token's
+  scopes is refused. store() rechecks the token's scopes when the child lands, so narrowing wins.
 - A grant's state changes only through `Grants.apply()`, which runs `transition()` (machine.ts) and
   appends the event in the same batch. Don't write `UPDATE grants` anywhere else.
 - A key check's result is a status and an HTTP code; never a response body or error text, which can

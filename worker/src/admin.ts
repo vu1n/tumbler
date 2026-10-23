@@ -38,7 +38,7 @@ textarea.env{display:block;min-height:120px}
   <input name="description" placeholder="what it's for">
   <input name="expires_at" type="date" title="expires">
   <button>Save</button>
-  <textarea name="config" placeholder='Optional. Left empty: workers:read (Workers, D1, KV, R2 read; granted on request) and workers:write (the same, write; waits for you here), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.'></textarea>
+  <textarea name="config" placeholder='Optional. Left empty: workers:read (Workers, D1, KV, R2 read; granted on request) and workers:write (the same, write; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.'></textarea>
 </form>
 
 <form id="importEnv" method="post">
@@ -54,21 +54,19 @@ textarea.env{display:block;min-height:120px}
 </form>
 
 <h2>Grants</h2>
-<p class="muted">Minted keys. Read scopes are granted on request; anything else waits here for you.</p>
+<p class="muted">Short-lived children of minted keys. Each is minted at once within its token's scopes; nothing waits for you here.</p>
 <p id="revokePending" class="warn"></p>
-<p>Approve for <select id="approveFor" title="After approving, the same caller gets these scopes on this key again without asking until then, on any project its pin reaches. Children stay short-lived.">
-  <option value="0">this token only</option><option value="60" selected>1 hour</option><option value="480">8 hours</option><option value="1440">24 hours</option></select></p>
-<div class="wrap"><table><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Wants</th><th>Expires</th><th></th></tr></thead><tbody id="grants"></tbody></table></div>
-<h3>Standing approvals</h3>
-<div class="wrap"><table><thead><tr><th>Key</th><th>Caller</th><th>Scopes</th><th>By</th><th>Until</th><th></th></tr></thead><tbody id="approvals"></tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Expires</th><th></th></tr></thead><tbody id="grants"></tbody></table></div>
 
 <h2>Tokens</h2>
 <div id="once"></div>
-<div class="wrap"><table><thead><tr><th>Name</th><th>Reads</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Name</th><th>Reads</th><th>May mint</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
 <form id="newToken" method="post">
   <input name="name" placeholder="token name" required>
   <input name="projects" placeholder="huddles, huddles/prod, */dev (empty = global only)" title="A project reads its shared keys; project/env one environment (dev, staging, prod); * is every project, */env that environment of every project.">
   <span class="chips" title="Fill in a preset"><button type="button" data-pin="*, */dev, */staging, */prod">Everything</button><button type="button" data-pin="*, */dev">All projects, dev</button><button type="button" data-pin="">Global only</button></span>
+  <input name="scopes" placeholder="may mint beyond reads: workers:write, or * (empty = reads only)" title="What this token's minted keys may carry beyond reads, without asking anyone. A scope outside this list is refused.">
+  <span class="chips" title="Fill in a preset"><button type="button" data-scopes="">Read only</button><button type="button" data-scopes="workers:write" title="workers:write: Workers, D1, KV and R2 writes, not just deploys">Read + deploy</button><button type="button" data-scopes="*" title="Every scope any key has, including ones added later">Any scope</button></span>
   <input name="hours" type="number" min="1" step="1" placeholder="expires in hours (empty = never)" title="The token stops working then; grants it holds are ended by the next sweep.">
   <button>Create</button>
 </form>
@@ -87,25 +85,17 @@ const reach = t => { if (!t.projects) return 'global only'; const by = new Map()
 const day = s => s ? s.slice(0, 10) : '';
 const stale = s => s && Date.parse(s) < Date.now() + 7 * 864e5;
 async function load() {
-  const [{ keys }, { tokens }, { audit }, { grants, approvals = [], revoke_pending }] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(() => ({ grants: [], approvals: [] }))]);
+  const [{ keys }, { tokens }, { audit }, { grants, revoke_pending }] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(() => ({ grants: [] }))]);
   document.getElementById('revokePending').textContent = revoke_pending
     ? revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
   document.getElementById('keys').replaceChildren(...keys.map(k => { const tr = document.createElement('tr');
     tr.append(td(k.name), td(k.scope), td(k.kind), td(k.checked ? 'yes' : 'no', k.checked ? '' : 'muted'), td(k.description, 'muted'), td(day(k.rotated_at)), td(day(k.expires_at), stale(k.expires_at) ? 'warn' : ''),
       btn('Delete', async () => { if (confirm('Delete ' + k.scope + '/' + k.name + '?')) { await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }); load(); } }));
     return tr; }));
-  // body may be a function, read on click (the duration select can change after load).
-  const act = (label, path, method, body) => async () => { const b = typeof body === 'function' ? body() : body; try { await api('grants/' + path, { method, body: b && JSON.stringify(b) }); } catch (err) { alert(err.message); } load(); };
-  document.getElementById('grants').replaceChildren(...grants.map(g => { const tr = document.createElement('tr'), live = g.state === 'active' || g.state === 'pending', c = document.createElement('td');
-    tr.append(td(g.name), td(g.caller), td(g.project ?? 'global'), td(g.state, g.requested ? 'warn' : ''), td(g.scopes.join(', ')),
-      td((g.requested ?? []).join(', '), 'warn'), td((g.expires_at ?? '').replace('T', ' ').slice(0, 16)), c);
-    const b = (label, fn) => { const e = document.createElement('button'); e.textContent = label; e.onclick = fn; c.append(e, ' '); };
-    if (g.requested) { b('Approve', act('approve', g.id + '/approve', 'POST', () => ({ requested: g.requested, for_minutes: Number(document.getElementById('approveFor').value) }))); b('Deny', act('deny', g.id + '/deny', 'POST')); }
-    if (live) b('Revoke', async () => { if (confirm('Revoke ' + g.name + ' for ' + g.caller + '? Its token stops working now, and its next request waits for your approval for a day.')) act('', g.id, 'DELETE')(); });
-    return tr; }));
-  document.getElementById('approvals').replaceChildren(...approvals.map(a => { const tr = document.createElement('tr');
-    tr.append(td(a.name), td(a.caller), td(a.scopes.join(', ')), td(a.approved_by, 'muted'), td(a.until.replace('T', ' ').slice(0, 16) + ' UTC'),
-      btn('End', async () => { try { await api('approvals/' + a.id, { method: 'DELETE' }); } catch (err) { alert(err.message); } load(); }));
+  document.getElementById('grants').replaceChildren(...grants.map(g => { const tr = document.createElement('tr'), live = g.state === 'active' || g.state === 'pending';
+    tr.append(td(g.name), td(g.caller), td(g.project ?? 'global'), td(g.state), td(g.scopes.join(', ')), td((g.expires_at ?? '').replace('T', ' ').slice(0, 16)),
+      live ? btn('Revoke', async () => { if (!confirm('Revoke ' + g.name + ' for ' + g.caller + '? This child stops working now; the next run by its caller mints a new one within the scopes of that token. To cut the caller off, revoke its token or narrow its scopes.')) return;
+        try { await api('grants/' + g.id, { method: 'DELETE' }); } catch (err) { alert(err.message); } load(); }) : td(''));
     return tr; }));
   document.getElementById('tokens').replaceChildren(...tokens.map(t => { const tr = document.createElement('tr');
     const expired = t.expires_at && Date.parse(t.expires_at) <= Date.now();
@@ -116,7 +106,14 @@ async function load() {
       try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ projects: next.split(',').map(s => s.trim()).filter(Boolean) }) }); } catch (err) { alert(err.message); }
       load(); });
     pin.firstChild.title = 'Edit pin';
-    tr.append(td(t.name), t.revoked_at ? td(reach(t)) : pin, td(day(t.created_at)),
+    // Scopes are edited in place too; narrowing them ends the children holding what they no longer allow.
+    const mints = btn(t.scopes ? t.scopes.join(', ') : 'reads only', async () => {
+      const next = prompt('What ' + t.name + ' may mint beyond reads, comma-separated: scope names such as workers:write, or * for any (empty = reads only).', (t.scopes ?? []).join(', '));
+      if (next === null) return;
+      try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ scopes: next.split(',').map(s => s.trim()).filter(Boolean) }) }); } catch (err) { alert(err.message); }
+      load(); });
+    mints.firstChild.title = 'Edit scopes';
+    tr.append(td(t.name), t.revoked_at ? td(reach(t)) : pin, t.revoked_at ? td(t.scopes ? t.scopes.join(', ') : 'reads only') : mints, td(day(t.created_at)),
       td(t.expires_at ? (expired ? 'expired ' : '') + t.expires_at.slice(0, 16).replace('T', ' ') + ' UTC' : 'never', expired ? 'muted' : ''),
       t.revoked_at ? td('revoked ' + day(t.revoked_at), 'muted') : btn('Revoke', async () => { if (confirm('Revoke ' + t.name + '?')) { await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }); load(); } }));
     return tr; }));
@@ -161,10 +158,12 @@ document.getElementById('moveScope').onsubmit = async e => { e.preventDefault();
   load(); };
 // Presets fill the field, which stays editable.
 for (const b of document.querySelectorAll('#newToken [data-pin]')) b.onclick = () => { document.getElementById('newToken').projects.value = b.dataset.pin; };
+for (const b of document.querySelectorAll('#newToken [data-scopes]')) b.onclick = () => { document.getElementById('newToken').scopes.value = b.dataset.scopes; };
 document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
   const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);
+  const scopes = String(f.get('scopes')).split(',').map(s => s.trim()).filter(Boolean);
   const hours = Number(f.get('hours')), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
-  try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects, expires_at }) });
+  try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects, scopes, expires_at }) });
     const once = document.getElementById('once'); once.style.display = 'block';
     const copy = (label, text) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
       b.onclick = () => navigator.clipboard.writeText(text).then(() => { b.textContent = 'Copied'; setTimeout(() => b.textContent = label, 1500); }, () => alert('Copy failed; select the token and copy it by hand.')); return b; };

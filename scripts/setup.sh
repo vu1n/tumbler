@@ -40,6 +40,6 @@ grep -q "(tumbler)" "$HOME/.claude/CLAUDE.md" 2>/dev/null || cat >> "$HOME/.clau
 API keys come from tumbler, not from env vars or .env files. wrangler (and aws and tailscale, when
 installed) already run through it. For anything else that needs a key, run it as `tumbler run -- <cmd>`. `tumbler keys`
 lists the names you can use; never print a value. In a repo without a .tumbler file, the first
-run writes one (`tumbler auto`); review it and commit it with your change. If a key looks stale, run `tumbler reload`.
+run writes one (`tumbler auto`) and keeps it out of git; no need to commit it. If a key looks stale, run `tumbler reload`.
 MD
 exit 0
