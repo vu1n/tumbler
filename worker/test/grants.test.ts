@@ -160,6 +160,9 @@ test("narrowing a token's scopes ends the children holding what it no longer all
   const tokens = (await (await s.call("GET", "/admin/api/tokens", undefined, undefined, "vu@example.com")).json()).tokens;
   assert.deepEqual(tokens.map((t: any) => [t.name, t.scopes]), [["dev", null], ["other", null]]);
   assert.equal((await s.call("PATCH", "/admin/api/tokens/dev", undefined, { scopes: ["not a scope"] }, "vu@example.com")).status, 400);
+  // A key's scope names follow the same rule, so every scope a key has can be given exactly.
+  for (const bad of ["has space", "", "*", "x".repeat(129)])
+    assert.throws(() => s.grants.validate("mint:cloudflare", { ...CONFIG, scopes: { ...CONFIG.scopes, [bad]: [WRITE] } }), /invalid scope name/);
   // A key may name a scope without a namespace; the token can still be given exactly that one.
   assert.equal((await s.call("PATCH", "/admin/api/tokens/other", undefined, { scopes: ["deploy", "release/candidate"] }, "vu@example.com")).status, 200);
 });

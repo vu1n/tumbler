@@ -6,7 +6,7 @@
 // Only `active` ever yields a credential. Every other state, and every failure, yields none.
 // Nothing waits for a person: the caller token's scopes are its ceiling. A request inside them is
 // minted at once and audited; one outside them is refused, and widening the token is how to allow it.
-import { type Caller, type Catalog, pinReaches, Refused } from "./catalog.ts";
+import { type Caller, type Catalog, pinReaches, Refused, scopeName } from "./catalog.ts";
 import { open, seal } from "./crypto.ts";
 import { allowedBy, autoApproved, type GrantEvent, type GrantState, isLive, transition } from "./machine.ts";
 import type { Outcome } from "./verify.ts";
@@ -76,6 +76,7 @@ export class Grants {
     const p = this.provider(kind);
     const scopes = Object.keys(config.scopes ?? {});
     if (!scopes.length) throw new Refused(400, "config.scopes names no scopes");
+    for (const s of scopes) if (!scopeName(s) || s === "*") throw new Refused(400, `config.scopes: invalid scope name ${JSON.stringify(s)}; no whitespace or bare *, at most 128 characters`);
     for (const s of config.start ?? []) if (!scopes.includes(s)) throw new Refused(400, `start scope ${s} is not in config.scopes`);
     const ttl = config.ttl_minutes ?? DEFAULT_TTL_MIN;
     if (!(ttl >= MIN_TTL_MIN && ttl <= MAX_TTL_MIN)) throw new Refused(400, `ttl_minutes must be ${MIN_TTL_MIN}..${MAX_TTL_MIN}`);
