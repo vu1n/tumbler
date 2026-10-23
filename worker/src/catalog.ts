@@ -95,13 +95,14 @@ export function writeReaches(writes: string[] | null | undefined, scope: string)
 // `scopes`: the minted scopes the token may hold beyond reads (`*`: any), its ceiling. Inside it a
 // child is minted at once; outside it the request is refused. null: reads only.
 // `writes`: the scopes `tumbler put` may save static keys in (checkWrites). null: writes nothing.
-export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; expires_at?: string | null }
+// `operator`: may add or remove permission groups on the minted keys it reads (`tumbler scope`).
+export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; expires_at?: string | null }
 export interface KeyRow {
   scope: string; name: string; kind: string; config: string; description: string; owner: string;
   created_at: string; rotated_at: string; expires_at: string | null; checked: number;
 }
 export interface MintRow { scope: string; name: string; kind: string; config: string; rev: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }
-export interface TokenRow { name: string; projects: string[] | null; scopes: string[] | null; writes: string[] | null; created_at: string; revoked_at: string | null; expires_at: string | null }
+export interface TokenRow { name: string; projects: string[] | null; scopes: string[] | null; writes: string[] | null; operator: boolean; created_at: string; revoked_at: string | null; expires_at: string | null }
 
 const now = () => new Date().toISOString();
 // Children live at most 24h (MAX_TTL_MIN in grants.ts); a retired parent is kept a little longer.
@@ -123,15 +124,15 @@ export class Catalog {
   async caller(token: string): Promise<Caller | null> {
     // Why here and not only in the sweep: an expired token must stop at its expiry, not up to one
     // sweep later. The sweep then ends the grants it still holds.
-    const row = await this.db.prepare("SELECT name, projects, scopes, writes, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
-      .bind(await sha256hex(token), this.clock().toISOString()).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; expires_at: string | null }>();
+    const row = await this.db.prepare("SELECT name, projects, scopes, writes, operator, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
+      .bind(await sha256hex(token), this.clock().toISOString()).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; expires_at: string | null }>();
     return row ? { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects),
-      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), expires_at: row.expires_at } : null;
+      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, expires_at: row.expires_at } : null;
   }
 
   // Returns the token once; only its hash is stored. expiresAt (ISO time) is optional: without it the
   // token lives until revoked, as every token made before expiry existed does.
-  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null): Promise<string> {
+  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false): Promise<string> {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     checkPin(projects);
     scopes = checkCeiling(scopes);
@@ -144,8 +145,8 @@ export class Catalog {
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
     const token = randomToken();
-    await this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, writes, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), now(), expires).run()
+    await this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires).run()
       .catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} exists`) : e; });
     return token;
   }
@@ -163,13 +164,14 @@ export class Catalog {
     return (await this.updateToken(name, { scopes })).scopes ?? null;
   }
 
-  // A live token's pin, ceiling and/or writes in one write, all checked first, so a refused part never
-  // lands the others. Returns the fields as stored.
-  async updateToken(name: string, edit: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null }) {
-    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null } = {}, sets: string[] = [], binds: (string | null)[] = [];
+  // A live token's pin, ceiling, writes and/or operator flag in one write, all checked first, so a
+  // refused part never lands the others. Returns the fields as stored.
+  async updateToken(name: string, edit: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean }) {
+    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean } = {}, sets: string[] = [], binds: (string | number | null)[] = [];
     if ("projects" in edit) { checkPin(done.projects = edit.projects ?? null); sets.push("projects = ?"); binds.push(asJson(done.projects)); }
     if ("scopes" in edit) { done.scopes = checkCeiling(edit.scopes ?? null); sets.push("scopes = ?"); binds.push(asJson(done.scopes)); }
     if ("writes" in edit) { done.writes = checkWrites(edit.writes ?? null); sets.push("writes = ?"); binds.push(asJson(done.writes)); }
+    if ("operator" in edit) { done.operator = edit.operator === true; sets.push("operator = ?"); binds.push(done.operator ? 1 : 0); }
     if (!sets.length) return done;
     const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL`).bind(...binds, name).run();
     if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
@@ -186,9 +188,9 @@ export class Catalog {
   }
 
   async tokens(): Promise<TokenRow[]> {
-    const { results } = await this.db.prepare("SELECT name, projects, scopes, writes, created_at, revoked_at, expires_at FROM tokens ORDER BY name").all<any>();
+    const { results } = await this.db.prepare("SELECT name, projects, scopes, writes, operator, created_at, revoked_at, expires_at FROM tokens ORDER BY name").all<any>();
     const parse = (v: string | null) => v === null ? null : JSON.parse(v);
-    return results.map((r) => ({ ...r, projects: parse(r.projects), scopes: parse(r.scopes), writes: parse(r.writes) }));
+    return results.map((r) => ({ ...r, projects: parse(r.projects), scopes: parse(r.scopes), writes: parse(r.writes), operator: !!r.operator }));
   }
 
   // --- keys ---
@@ -223,6 +225,19 @@ export class Catalog {
          description = CASE WHEN excluded.description = '' THEN keys.description ELSE excluded.description END,
          owner = CASE WHEN excluded.owner = '' THEN keys.owner ELSE excluded.owner END`,
     ).bind(scope, name, kind, config, crypto.randomUUID(), meta.checked ? 1 : 0, meta.description ?? "", meta.owner ?? "", iv, ciphertext, t, t, meta.expires_at ?? null)]);
+  }
+
+  // A mint key's new config under a new revision, only if it is still at `rev`: the old revision is
+  // retired in the same batch (its parent revokes the children it minted), as a rotation does.
+  async setConfig(scope: string, name: string, rev: string, config: Record<string, unknown>): Promise<boolean> {
+    // Why retire by rev: a change that lost a race must not retire the winner's revision early.
+    const [, r] = await this.db.batch([this.db.prepare(
+      `INSERT OR IGNORE INTO retired_keys (scope, name, rev, kind, config, iv, ciphertext, retire_until)
+       SELECT scope, name, rev, kind, config, iv, ciphertext, ? FROM keys WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'`,
+    ).bind(new Date(Date.now() + RETIRE_MS).toISOString(), scope, name, rev), this.db.prepare(
+      "UPDATE keys SET config = ?, rev = ?, rotated_at = ? WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'",
+    ).bind(JSON.stringify(config), crypto.randomUUID(), now(), scope, name, rev)]);
+    return !!r.meta.changes;
   }
 
   retire(scope: string, name: string) {

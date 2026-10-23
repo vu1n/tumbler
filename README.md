@@ -296,6 +296,27 @@ Each caller holds one **grant** per minted key, and its state decides what the e
 - Rotating the parent keeps the key's kind. A minted key can't be turned static, because that would
   hand its parent out; delete it and add it again instead.
 
+### Changing a key's permissions from the CLI (operator tokens)
+
+When a scope is missing a permission (a container Worker's deploy needs Containers Write), an agent
+fixes it from the CLI on your word in chat, instead of you going to `/admin` or Cloudflare:
+
+```sh
+tumbler scope CLOUDFLARE_API_TOKEN                                   # its scopes and groups
+tumbler scope add CLOUDFLARE_API_TOKEN workers:write "Containers Write"
+tumbler scope rm  CLOUDFLARE_API_TOKEN workers:write "Containers Write"
+```
+
+That needs an **operator** token, which you turn on once per token (`/admin`, or
+`tumbler admin token edit NAME --operator on`). An operator only adds or removes permission groups
+on the minted keys its token reads. Additions sit on top of the key's config, so your config stays
+the base and only additions can be removed this way. It can't add API token, member, account
+settings or billing groups (a child holding one could make its own tokens), can't add a write to a
+`:read` scope (every token gets reads), and never creates tokens or changes a token's scopes, pin,
+writes or a key's parent. A change ends the children holding the old groups, so the next run mints
+with the new ones, and it's audited (`mint-scope`). A new scope name makes a new scope, which a
+token can hold only if its own scopes allow it.
+
 Other providers plug in as a `Provider` (`mint`, `revoke`, `validate` and optionally `verify` in
 `worker/src/grants.ts`). The state machine is the same for each. It lives in `worker/src/machine.ts`
 as one pure function, `transition(grant, event)`. Every change is written along with its event in
@@ -312,8 +333,9 @@ as one pure function, `transition(grant, event)`. Every change is written along 
 | `POST /v1/step-up?project=` | caller token | body `{"keys": [...], "scopes": [...]}`; mints within the token's scopes and returns each minted key's grant, or 403 for a scope outside them |
 | `POST /v1/check?project=` | caller token | body `{"keys": [...]}`; runs each key's check on its current value: `{"checks": {"A": {"status": "ok"\|"invalid"\|"error"\|"none"}}}` |
 | `GET /v1/revs?project=&keys=A,B` | caller token | `{"keys": {"A": {"rev", "checked"}}}`; a new rev on every save; never values, never mints |
+| `GET`, `PATCH /v1/mint/NAME?project=` | operator token | the key the token reads: `{"scope", "name", "scopes": {"s": {"base", "extra"}}}`; `PATCH` body `{"scope", "add": [...]}` or `{"scope", "remove": [...]}` |
 | `GET /cli` | none | the CLI script (no secrets in it) |
-| `/admin`, `/admin/api/{keys,tokens,grants,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1`; `POST tokens` and `PATCH tokens/:name` take `projects` and `scopes`; `DELETE grants/:id` revokes, `GET grants/:id/events` |
+| `/admin`, `/admin/api/{keys,tokens,grants,audit}` | Cloudflare Access | writes also need `x-tumbler-admin: 1`; `POST tokens` and `PATCH tokens/:name` take `projects`, `scopes`, `writes` and `operator`; `DELETE grants/:id` revokes, `GET grants/:id/events` |
 
 Every read and change is audited by key name, never by value.
 

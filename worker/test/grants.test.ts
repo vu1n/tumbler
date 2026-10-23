@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { promisify } from "node:util";
 import { handle } from "../src/app.ts";
-import { Catalog } from "../src/catalog.ts";
+import { Catalog, Refused } from "../src/catalog.ts";
 import { cloudflare } from "../src/cloudflare.ts";
 import { masterKey } from "../src/crypto.ts";
 import { Grants, type Provider } from "../src/grants.ts";
@@ -20,15 +20,20 @@ const CONFIG = { account_id: ACCT, ttl_minutes: 30, start: ["workers:read"], sco
 
 // A provider that mints "child-N" and remembers what it was asked; `fail` makes the next mint throw.
 function fakeProvider() {
-  const p = { minted: [] as { scopes: string[]; parent: string }[], revoked: [] as string[], fail: false, n: 0 } as any;
+  const p = { minted: [] as { scopes: string[]; parent: string }[], configs: [] as any[], revoked: [] as string[], fail: false, n: 0 } as any;
   const provider: Provider = {
     validate() {},
-    async mint(parent, _c, scopes) {
+    async mint(parent, c, scopes) {
       if (p.fail) throw new Error("provider down");
-      p.minted.push({ parent, scopes }); p.n++;
+      p.minted.push({ parent, scopes }); p.configs.push(c); p.n++;
       return { id: `id-${p.n}`, value: `child-${p.n}` };
     },
     async revoke(_parent, _c, id) { p.revoked.push(id); },
+    async groups(parent, _c, names) {
+      if (parent !== PARENT) throw new Error("groups got the wrong parent");
+      const known: Record<string, string> = { "containers write": "Containers Write", "pages write": "Pages Write" };
+      return names.map((n) => known[n.toLowerCase()] ?? (() => { throw new Refused(400, `no group ${n}`); })());
+    },
   };
   return Object.assign(p, { provider });
 }
@@ -725,4 +730,60 @@ test("*/env dropped while a first mint runs: the child is deleted, never handed 
   const r = await s.call("GET", "/v1/env?project=huddles/prod&keys=CLOUDFLARE_API_TOKEN", s.dev);
   assert.equal(r.status, 409);
   assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
+test("an operator token adds and removes groups on the minted key it reads; the old children end, the next run mints with them", async () => {
+  const s = await setup();
+  const scope = (token: string, method = "GET", body?: unknown, q = "") => s.call(method, `/v1/mint/CLOUDFLARE_API_TOKEN${q}`, token, body);
+  const off = await scope(s.dev);
+  assert.equal(off.status, 403);
+  assert.match((await off.json()).error, /not an operator.*tumbler admin token edit dev --operator on/);
+
+  assert.equal((await s.call("PATCH", "/admin/api/tokens/dev", undefined, { operator: true }, "vu@example.com")).status, 200);
+  const toks = await (await s.call("GET", "/admin/api/tokens", undefined, undefined, "vu@example.com")).json();
+  assert.deepEqual(toks.tokens.map((t: any) => [t.name, t.operator, t.projects]), [["dev", true, ["dev"]], ["other", false, ["dev"]]]); // the pin stays
+  assert.equal((await (await s.call("GET", "/v1/whoami", s.dev)).json()).operator, true);
+
+  await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  const before = (await adminGrants(s))[0];
+  const added = await scope(s.dev, "PATCH", { scope: "workers:write", add: ["containers write"] });
+  assert.equal(added.status, 200);
+  assert.deepEqual((await added.json()).scopes["workers:write"], { base: [READ, WRITE], extra: ["Containers Write"] });
+  assert.equal((await s.grants.get(before.id))!.state, "revoked"); // its child held the old groups
+  await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  assert.deepEqual(s.fake.configs.at(-1).extra, { "workers:write": ["Containers Write"] });
+  const audit = await (await s.call("GET", "/admin/api/audit", undefined, undefined, "vu@example.com")).json();
+  assert.ok(audit.audit.some((a: any) => a.actor === "dev" && a.action === "mint-scope" && a.names === "CLOUDFLARE_API_TOKEN,workers:write,+Containers Write"));
+
+  // A change that lost a race to another saves nothing and retires nothing of the winner's.
+  const stale = (await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev;
+  assert.equal(await s.catalog.setConfig("dev", "CLOUDFLARE_API_TOKEN", stale, { ...CONFIG }), true);
+  const now = (await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev;
+  assert.equal(await s.catalog.setConfig("dev", "CLOUDFLARE_API_TOKEN", stale, { ...CONFIG }), false);
+  assert.equal(await s.db.prepare("SELECT 1 FROM retired_keys WHERE rev = ?").bind(now).first(), null);
+  await scope(s.dev, "PATCH", { scope: "workers:write", add: ["containers write"] });
+  // Only additions come off; the admin's config isn't the CLI's to change, and unknown groups save nothing.
+  assert.equal((await scope(s.dev, "PATCH", { scope: "workers:write", remove: [WRITE] })).status, 400);
+  assert.equal((await scope(s.dev, "PATCH", { scope: "workers:write", add: ["Nope Write"] })).status, 400);
+  assert.equal((await scope(s.dev, "PATCH", { scope: "workers:write", remove: ["containers write"] })).status, 200);
+  assert.equal(JSON.parse((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.config).extra, undefined);
+  // The parent is untouched by a scope change, and never in a response.
+  const row = (await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!;
+  assert.equal(await s.catalog.value(row), PARENT);
+  assert.ok(!JSON.stringify(await (await scope(s.dev)).json()).includes(PARENT));
+  // Another project's key is out of reach: the token reads only its pin.
+  assert.equal((await scope(s.dev, "GET", undefined, "?project=kypp")).status, 403);
+});
+
+test("cli: scope add/rm change a minted key's groups for an operator token; others are told who turns it on", async () => {
+  const err = await cli(["scope", "add", "CLOUDFLARE_API_TOKEN", "workers:write", "Containers Write"]).then(() => null, (e) => e);
+  assert.match(err.stderr, /not an operator; an admin turns that on for it in \/admin or with `tumbler admin token edit dev --operator on`/);
+  await s.catalog.updateToken("dev", { operator: true });
+  const add = await cli(["scope", "add", "CLOUDFLARE_API_TOKEN", "workers:write", "Containers Write"]);
+  assert.match(add.stderr, /added Containers Write to CLOUDFLARE_API_TOKEN workers:write \(dev\)/);
+  assert.match(add.stdout, /workers:write\t.*\+Containers Write/);
+  assert.deepEqual(JSON.parse((await cli(["scope", "CLOUDFLARE_API_TOKEN", "--json"])).stdout).scopes["workers:write"].extra, ["Containers Write"]);
+  await cli(["scope", "rm", "CLOUDFLARE_API_TOKEN", "workers:write", "Containers Write"]);
+  assert.deepEqual(JSON.parse((await cli(["scope", "CLOUDFLARE_API_TOKEN", "--json"])).stdout).scopes["workers:write"].extra, []);
+  await s.catalog.updateToken("dev", { operator: false });
 });

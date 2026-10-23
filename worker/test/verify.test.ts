@@ -230,3 +230,22 @@ test("when a check can't run, the admin may save unchecked; a rejected value nev
   const scoped = (async () => new Response("", { status: 403 })) as unknown as typeof fetch;
   assert.equal((await runCheck(PRESETS.stripe, "rk-scoped", scoped)).status, "error");
 });
+
+test("cloudflare: an operator can't add token, member or billing groups, nor writes to a read scope; added names resolve at mint", async () => {
+  const posted: any[] = [];
+  const fetcher = (async (url: string, init: RequestInit = {}) => {
+    if (url.endsWith("/tokens/permission_groups")) return new Response(JSON.stringify({ success: true, result: [...GROUPS, { id: "e".repeat(32), name: "Account API Tokens Write", scopes: ["com.cloudflare.api.account"] }] }));
+    posted.push(JSON.parse(String(init.body)));
+    return new Response(JSON.stringify({ success: true, result: { id: "c1", value: "child" } }));
+  }) as unknown as typeof fetch;
+  const cf = cloudflare(fetcher), cfg = { account_id: ACCT, scopes: { "workers:read": [READ], "workers:write": [READ] } };
+  await assert.rejects(cf.groups!("good-parent", cfg, ["account api tokens write"]), (e: any) => e.status === 403);
+  await assert.rejects(cf.groups!("good-parent", cfg, ["Nope Write"]), /no account permission named "Nope Write"/);
+  assert.deepEqual(await cf.groups!("good-parent", cfg, ["containers write"]), ["Containers Write"]);
+  assert.throws(() => cf.validate({ ...cfg, extra: { "workers:read": ["Containers Write"] } }), /isn't a read/);
+  assert.throws(() => cf.validate({ ...cfg, extra: { "x:write": ["Billing Write"] } }), /can't be added from the CLI/);
+  cf.validate({ ...cfg, extra: { "workers:read": ["Containers Read"], "pages:write": ["Containers Write"] } });
+  const id = (name: string) => GROUPS.find((g) => g.name === name)!.id;
+  await cf.mint("good-parent", { ...cfg, extra: { "workers:write": ["Containers Write"] } }, ["workers:write"], new Date("2026-10-23T12:00:00Z"), "t");
+  assert.deepEqual(posted[0].policies[0].permission_groups, [{ id: READ }, { id: id("Containers Write") }]);
+});
