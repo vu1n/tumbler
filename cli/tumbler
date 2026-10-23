@@ -107,6 +107,7 @@ function brokerCall(method, path, body, { url: base, token, headers = [] } = cal
       if (code !== 0 && !/\n[1-9]\d\d$/.test(stdout)) return fail(new Error(stderr.trim() || `curl exited ${code}`)); // no HTTP status: say why
       const i = stdout.lastIndexOf("\n"), status = Number(stdout.slice(i + 1)), j = stdout.lastIndexOf("\n", i - 1);
       const text = stdout.slice(0, Math.max(j, 0)), served = stdout.slice(j + 1, i);
+      lastServed = served;
       noticeStale(served);
       let parsed; try { parsed = JSON.parse(text); } catch { parsed = { error: text.slice(0, 200) }; }
       status >= 200 && status < 300 ? ok(parsed) : fail(new Error(`broker ${status}: ${parsed.error ?? "error"}`));
@@ -122,8 +123,9 @@ function brokerCall(method, path, body, { url: base, token, headers = [] } = cal
 }
 
 // The broker names the CLI it serves on every /v1 answer; a different one here means this copy is
-// stale (a flag it doesn't know yet, a route it calls wrong). Said once per process, on stderr.
-let staleSaid = false;
+// stale (a flag it doesn't know yet, a route it calls wrong). Said once per process, on stderr; the
+// cache helper's stderr goes nowhere, so it hands the version back with the env for the caller to say.
+let staleSaid = false, lastServed = "";
 function noticeStale(served) {
   if (staleSaid || !/^[0-9a-f]{12}$/.test(served) || served === VERSION || process.env.TUMBLER_UPDATE_CHECK === "off") return;
   staleSaid = true;
@@ -184,10 +186,10 @@ function daemon() {
         const hit = cache.get(slot);
         // Why: the caller's TTL, not the one the helper started with, so lowering it takes effect. An
         // env with a minted child also carries the broker's max_age, so it never outlives the child.
-        if (hit && !req.fresh && Date.now() - hit.at < Math.min(req.ttl, hit.maxAge)) return reply({ env: hit.env });
+        if (hit && !req.fresh && Date.now() - hit.at < Math.min(req.ttl, hit.maxAge)) return reply({ env: hit.env, cli: hit.cli });
         const { env, max_age } = await brokerGet(path, { url: req.url, token: req.token });
-        cache.set(slot, { at: Date.now(), env, maxAge: max_age === undefined ? Infinity : Number(max_age) * 1000 });
-        reply({ env });
+        cache.set(slot, { at: Date.now(), env, cli: lastServed, maxAge: max_age === undefined ? Infinity : Number(max_age) * 1000 });
+        reply({ env, cli: lastServed });
       } catch (e) { reply({ error: e.message }); }
     });
   });
@@ -222,6 +224,7 @@ async function fetchEnv(project, keys, fresh = false) {
   if (TTL > 0) {
     const r = await cached({ op: "get", project, keys, ttl: TTL, fresh, ...callerCfg() });
     if (r?.error) throw new Error(r.error);
+    if (r?.cli) noticeStale(r.cli);
     if (r?.env) return r.env;
   }
   return (await brokerGet(envPath(project, keys))).env;

@@ -414,6 +414,9 @@ test("a CLI that differs from the broker's says so once, and update replaces it 
     const dir = mkdtempSync(join(tmpdir(), "tumbler-bin-")), copy = join(dir, "tumbler");
     writeFileSync(copy, readFileSync(CLI), { mode: 0o755 });
     const env = { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run"), TUMBLER_URL: `http://127.0.0.1:${(broker.address() as any).port}`, TUMBLER_TOKEN: devToken, TUMBLER_AUTO: "off" };
+    // A cached run fetches through the helper, whose stderr goes nowhere; the notice still reaches the caller.
+    const cachedRun = await exec(copy, ["run", "--", "true"], { env: { ...env, XDG_RUNTIME_DIR: mkdtempSync(join(tmpdir(), "tumbler-run-")) } });
+    assert.match(cachedRun.stderr, /differs from the broker's .*run `tumbler update`/);
     const before = await exec(copy, ["whoami"], { env });
     assert.equal(before.stderr.match(/run `tumbler update`/g)?.length, 1);
     assert.equal(JSON.parse(before.stdout).name, "dev"); // the notice never gets in the way
