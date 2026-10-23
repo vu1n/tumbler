@@ -135,6 +135,21 @@ test("pasting only a Cloudflare parent fills the account from CLOUDFLARE_ACCOUNT
   assert.deepEqual(lookup, { url: `https://api.cloudflare.com/client/v4/accounts/${ACCT}/tokens/permission_groups`, headers: { authorization: "Bearer good-parent", "content-type": "application/json" } });
 });
 
+test("workers:write carries Containers Write, and a re-save with config {} brings a saved key up to the defaults", async () => {
+  // Why: `wrangler deploy` of a Worker with a container pushes its image under /containers, a 403 without it.
+  assert.ok(DEFAULT_SCOPES["workers:write"].includes("Containers Write"));
+  const s = await setup();
+  await s.save("CLOUDFLARE_ACCOUNT_ID", { value: ACCT });
+  const id = (name: string) => GROUPS.find((g) => g.name === name)!.id;
+  const old = { "workers:write": [id("Workers Scripts Write")] };
+  assert.equal((await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare", config: { scopes: old } })).status, 200);
+  const saved = async () => JSON.parse((await s.catalog.keyRow("global", "CLOUDFLARE_API_TOKEN"))!.config).scopes;
+  assert.equal((await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare" })).status, 200);
+  assert.deepEqual(await saved(), old); // no config: the stored ids stay
+  assert.equal((await s.save("CLOUDFLARE_API_TOKEN", { value: "good-parent", kind: "mint:cloudflare", config: {} })).status, 200);
+  assert.deepEqual((await saved())["workers:write"], DEFAULT_SCOPES["workers:write"].map(id));
+});
+
 test("permission names Cloudflare doesn't list, or zone ones, are refused; so is a parent it won't list them for", async () => {
   const s = await setup();
   const save = (value: string, scopes: Record<string, string[]>) =>
