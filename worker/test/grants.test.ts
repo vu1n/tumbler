@@ -148,6 +148,9 @@ test("narrowing a token's scopes ends the children holding what it no longer all
   const s = await setup();
   await s.env(s.other);                                   // a read child: kept
   await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  // The same ceiling, spelled loosely, keeps the write child.
+  assert.equal((await s.call("PATCH", "/admin/api/tokens/dev", undefined, { scopes: [" workers:write "] }, "vu@example.com")).status, 200);
+  assert.deepEqual(s.fake.revoked, []);
   const r = await s.call("PATCH", "/admin/api/tokens/dev", undefined, { scopes: [] }, "vu@example.com");
   assert.equal(r.status, 200);
   assert.deepEqual(s.fake.revoked, ["id-2"]); // dev's write child; other's read child stays

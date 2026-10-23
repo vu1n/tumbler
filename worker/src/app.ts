@@ -247,10 +247,9 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     if (m === "PATCH" && parts.length === 2) {
       const b = await body();
       if ("scopes" in b) {
-        const scopes = list(b.scopes);
-        await catalog.setScopes(parts[1], scopes);
-        await grants?.closeOutsideCeiling(parts[1], scopes?.length ? scopes : null, who);
-        await catalog.audit(who, "token-scopes", null, [parts[1], ...(scopes?.length ? scopes : ["reads-only"])]);
+        const scopes = await catalog.setScopes(parts[1], list(b.scopes));
+        await grants?.closeOutsideCeiling(parts[1], scopes, who);
+        await catalog.audit(who, "token-scopes", null, [parts[1], ...(scopes ?? ["reads-only"])]);
         if (!("projects" in b)) return json({ ok: true });
       }
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;

@@ -137,10 +137,12 @@ export class Catalog {
 
   // Changes which minted scopes a live token may hold. Narrowing ends the children it holds beyond
   // the new scopes (Grants.closeOutsideCeiling); widening takes effect on its next request.
+  // Returns the ceiling as stored (trimmed, sorted, deduped; empty is null).
   async setScopes(name: string, scopes: string[] | null) {
     scopes = checkCeiling(scopes);
     const r = await this.db.prepare("UPDATE tokens SET scopes = ? WHERE name = ? AND revoked_at IS NULL").bind(asJson(scopes), name).run();
     if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
+    return scopes;
   }
 
   // True when this call revoked it; false when it was already revoked, so a retry still reaches the
