@@ -1,6 +1,6 @@
 // End to end: the real CLI against the real routes, served over plain HTTP on localhost.
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -228,4 +228,90 @@ test("if auto can't pick, the command doesn't start", async () => {
   await assert.rejects(cli(["run", "--", "touch", marker], { TUMBLER_AUTO: "", TUMBLER_TTL: "0", TUMBLER_TOKEN: "tmb_bad" }, dir),
     /auto could not pick keys/);
   assert.ok(!existsSync(marker));
+});
+
+// --- put and ssh-keygen ---
+
+const writer = await catalog.createToken("writer", ["dev"], null, null, ["dev", "global"]);
+// The CLI with `input` on its stdin (a pipe, not a TTY), as an agent drives it.
+const cliIn = (args: string[], input: string, env: Record<string, string> = {}) => new Promise<{ code: number | null; stdout: string; stderr: string }>((ok) => {
+  const child = spawn(CLI, args, { cwd: home, env: { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run"), TUMBLER_URL: url, TUMBLER_TOKEN: writer, TUMBLER_IDLE: "3", TUMBLER_TTL: "0", ...env } });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", (d) => { stdout += d; }); child.stderr.on("data", (d) => { stderr += d; });
+  child.on("close", (code) => ok({ code, stdout, stderr }));
+  child.stdin.end(input);
+});
+const stored = async (scope: string, name: string) => catalog.value((await catalog.keyRow(scope, name))!);
+
+test("put saves a piped value; a single line loses its trailing newline", async () => {
+  const r = await cliIn(["put", "NEW_TOKEN", "-p", "dev"], "fake-123\n");
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stderr, /created NEW_TOKEN in dev/);
+  assert.equal(await stored("dev", "NEW_TOKEN"), "fake-123");
+  assert.doesNotMatch(r.stdout + r.stderr, /fake-123/);
+  const { stdout } = await cli(["run", "-k", "NEW_TOKEN", "--", "node", "-e", "process.stdout.write(process.env.NEW_TOKEN)"], { TUMBLER_TTL: "0", TUMBLER_TOKEN: writer });
+  assert.equal(stdout, "fake-123");
+  assert.match((await cliIn(["put", "NEW_TOKEN", "-p", "dev"], "fake-456")).stderr, /rotated NEW_TOKEN in dev/);
+});
+
+test("put --from-file keeps a multi-line value exactly, and --clipboard reads the paste tool", async () => {
+  const dir = mkdtempSync(join(home, "put-")), file = join(dir, "key");
+  writeFileSync(file, "-----BEGIN FAKE-----\nabc\n-----END FAKE-----\n");
+  assert.equal((await cliIn(["put", "FAKE_KEY", "--global", "--from-file", file], "")).code, 0);
+  assert.equal(await stored("global", "FAKE_KEY"), "-----BEGIN FAKE-----\nabc\n-----END FAKE-----\n");
+  writeFileSync(join(dir, "pbpaste"), "#!/bin/sh\nprintf 'from-clip\\n'\n", { mode: 0o755 });
+  assert.equal((await cliIn(["put", "CLIP_KEY", "--global", "--clipboard"], "", { PATH: `${dir}:${process.env.PATH}` })).code, 0);
+  assert.equal(await stored("global", "CLIP_KEY"), "from-clip");
+});
+
+test("put refuses outside the token's writes, an empty value, and -p with --global", async () => {
+  const kypp = await cliIn(["put", "NOPE", "-p", "kypp"], "v");
+  assert.equal(kypp.code, 1);
+  assert.match(kypp.stderr, /may not write kypp/);
+  assert.match((await cliIn(["put", "NOPE", "--global"], "v", { TUMBLER_TOKEN: devToken })).stderr, /writes nothing/);
+  assert.match((await cliIn(["put", "NOPE", "--global"], "")).stderr, /empty value/);
+  assert.equal((await cliIn(["put", "NOPE", "-p", "dev", "--global"], "v")).code, 2);
+  assert.equal((await cliIn(["put", "lower"], "v")).code, 2);
+  assert.equal(await catalog.keyRow("global", "NOPE"), null);
+});
+
+test("neither the token nor a put value appears in curl's arguments", async () => {
+  const dir = mkdtempSync(join(home, "argv-")), log = join(dir, "argv");
+  const real = execFileSync("sh", ["-c", "command -v curl"], { encoding: "utf8" }).trim();
+  writeFileSync(join(dir, "curl"), `#!/bin/sh\necho "$@" >> ${log}\nexec ${real} "$@"\n`, { mode: 0o755 });
+  assert.equal((await cliIn(["put", "ARGV_KEY", "--global"], "argv-secret-fake", { PATH: `${dir}:${process.env.PATH}` })).code, 0);
+  const argv = readFileSync(log, "utf8");
+  assert.match(argv, /\/v1\/keys\/ARGV_KEY/);
+  assert.doesNotMatch(argv, /argv-secret-fake/);
+  assert.ok(!argv.includes(writer));
+});
+
+test("ssh-keygen saves an ed25519 private key and prints only its public half", async () => {
+  const r = await cliIn(["ssh-keygen", "DEPLOY_SSH_KEY", "--global", "-C", "deploy@test"], "");
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /^ssh-ed25519 [A-Za-z0-9+/=]+ deploy@test\n$/);
+  const priv = await stored("global", "DEPLOY_SSH_KEY");
+  assert.match(priv, /^-----BEGIN OPENSSH PRIVATE KEY-----\n[\s\S]+\n-----END OPENSSH PRIVATE KEY-----\n$/);
+  assert.doesNotMatch(r.stdout + r.stderr, /PRIVATE KEY/);
+  // OpenSSH itself reads the stored key back to the printed public key.
+  const dir = mkdtempSync(join(home, "ssh-")), file = join(dir, "id");
+  writeFileSync(file, priv, { mode: 0o600 });
+  assert.equal(execFileSync("ssh-keygen", ["-y", "-f", file], { encoding: "utf8" }).trim(), r.stdout.trim());
+});
+
+test("put at a terminal reads a hidden value; a bracketed paste keeps its newlines and Enter finishes", async () => {
+  // util-linux `script` gives the CLI a real TTY; what's written to it is what the user would type.
+  const typed = "\x1b[200~line-one\rline-two\r\x1b[201~" + "x\x7f" + "\r";
+  const r = await new Promise<{ code: number | null; out: string }>((ok) => {
+    const child = spawn("script", ["-qec", `${CLI} put TYPED_KEY --global`, "/dev/null"], { cwd: home,
+      env: { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run"), TUMBLER_URL: url, TUMBLER_TOKEN: writer, TUMBLER_TTL: "0", SHELL: "/bin/sh" } }); // no profile in between
+    // Typed once the prompt is up, so the terminal is already in raw mode.
+    let out = "", sent = false;
+    child.stdout.on("data", (d) => { out += d; if (!sent && out.includes("\x1b[?2004h")) { sent = true; child.stdin.write(typed); } });
+    child.on("close", (code) => ok({ code, out }));
+  });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /value for TYPED_KEY \(hidden/);
+  assert.doesNotMatch(r.out, /line-one/);
+  assert.equal(await stored("global", "TYPED_KEY"), "line-one\nline-two\n");
 });

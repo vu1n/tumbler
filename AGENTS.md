@@ -13,6 +13,8 @@
 - A key check's result is a status and an HTTP code; never a response body or error text, which can
   quote the value. `--watch` pushes only values that passed their check on save.
 - The project a caller reads comes from its token's pin, never from the request. Keep it that way.
+- A caller token writes (`PUT /v1/keys/NAME`) only static keys, only in a scope its `writes` reach, and
+  `global` only when named. It never sets or rotates a minted key's parent.
 - `cli/tumbler` is bundled into the Worker as text (wrangler `rules`) and served at `/cli`; it must
   stay a single dependency-free file.
 - Run `cd worker && npm test && npm run typecheck` before committing.

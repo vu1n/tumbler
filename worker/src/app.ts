@@ -1,5 +1,5 @@
 // app.ts — routes, apart from index.ts so tests can drive them without Worker bindings.
-import { Catalog, checkScope, GLOBAL, isKeyName, Refused } from "./catalog.ts";
+import { Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused, writeReaches } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
@@ -12,7 +12,7 @@ export interface Deps {
 }
 
 const verifiers = ({ grants, fetcher }: Deps): Verifiers => ({ providers: grants?.providers ?? {}, fetcher });
-const MAX_CHECKS = 20, MAX_IMPORT = 100;
+const MAX_CHECKS = 20, MAX_IMPORT = 100, MAX_VALUE = 64 * 1024;
 const list = (v: unknown) => Array.isArray(v) ? v.map(String) : null;
 
 // What a caller learns about its grant: never the child credential or its provider id.
@@ -99,8 +99,36 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     await catalog.audit(caller.name, "check", project, names);
     return json({ project, checks });
   }
+  // Save a static key: PUT /v1/keys/NAME {"scope", "value", "description"?}, what `tumbler put` sends.
+  // Only within the token's writes. A key with a check keeps it, and a value that fails it saves nothing.
+  if (url.pathname.startsWith("/v1/keys/") && request.method === "PUT") {
+    const name = decodeURIComponent(url.pathname.slice("/v1/keys/".length));
+    checkName(name);
+    if (Number(request.headers.get("content-length") ?? 0) > MAX_VALUE + 4096) return json({ error: "value too large" }, 413);
+    const b = await request.json().catch(() => ({})) as Record<string, unknown>;
+    // No scope named: the one the token reads by default, never global by accident.
+    const scope = b.scope ? String(b.scope) : caller.projects ? catalog.scopeFor(caller, null) : null;
+    if (!scope) return json({ error: "name a scope to write: global, a project or project/env" }, 400);
+    checkScope(scope);
+    if (!writeReaches(caller.writes, scope)) {
+      return json({ error: `this token may not write ${scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}; an admin adds it under the token's writes in /admin` }, 403);
+    }
+    const value = typeof b.value === "string" ? b.value : "";
+    if (!value) return json({ error: "empty value" }, 400);
+    if (new TextEncoder().encode(value).length > MAX_VALUE) return json({ error: `a value is at most ${MAX_VALUE} bytes` }, 413);
+    const prev = await catalog.keyRow(scope, name);
+    // Why: a mint key's value is a parent credential; a caller token never sets or rotates one.
+    if (prev && prev.kind !== "static") return json({ error: `${scope}/${name} is a ${prev.kind} key; change it in /admin` }, 409);
+    const cfg = JSON.parse(prev?.config || "{}"), check = await checkKey("static", cfg, value, verifiers(deps));
+    if (check.status === "invalid" || check.status === "error") {
+      return json({ error: `${name}: the new value failed its check, ${check.detail}; nothing was saved and the old value stays` }, check.status === "invalid" ? 400 : 502);
+    }
+    await catalog.put(scope, name, value, { kind: "static", config: cfg, checked: check.status === "ok", ...(typeof b.description === "string" ? { description: b.description } : {}) });
+    await catalog.audit(caller.name, "put", scope === GLOBAL ? null : scope, [name]);
+    return json({ scope, name, action: prev ? "rotated" : "created", checked: check.status === "ok" });
+  }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
-  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, expires_at: caller.expires_at ?? null });
+  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, writes: caller.writes ?? null, expires_at: caller.expires_at ?? null });
   // Names only: listing must not mint a child for every minted key.
   if (url.pathname === "/v1/keys") {
     const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
@@ -243,21 +271,23 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     if (m === "POST" && parts.length === 1) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
-      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes));
+      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes));
       await catalog.audit(who, "token-create", null, [String(b.name)]);
       return json({ name: b.name, token }); // shown once
     }
-    // {"projects": [...]} edits the pin, {"scopes": [...]} the ceiling; either or both.
+    // {"projects": [...]} edits the pin, {"scopes": [...]} the ceiling, {"writes": [...]} what it may
+    // write; any of them.
     if (m === "PATCH" && parts.length === 2) {
       const b = await body();
-      const pin = "projects" in b || !("scopes" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
+      const pin = "projects" in b || !("scopes" in b || "writes" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
       // One checked write for both, so a bad pin never lands a wider ceiling (or the reverse).
-      const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
+      const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
       // Both cleanups run before either audit; a cleanup cut short is finished by the sweep.
       if ("projects" in done) await grants?.closeOutsidePin(parts[1], done.projects!, who);
       if ("scopes" in done) await grants?.closeOutsideCeiling(parts[1], done.scopes!, who);
       if ("projects" in done) await catalog.audit(who, "token-pin", null, [parts[1], ...(done.projects ?? ["global-only"])]);
       if ("scopes" in done) await catalog.audit(who, "token-scopes", null, [parts[1], ...(done.scopes ?? ["reads-only"])]);
+      if ("writes" in done) await catalog.audit(who, "token-writes", null, [parts[1], ...(done.writes ?? ["writes-nothing"])]);
       return json({ ok: true });
     }
     if (m === "DELETE" && parts.length === 2) {
