@@ -762,7 +762,10 @@ async function admin(args) {
   const [sub, ...rest] = args;
   if (Object.hasOwn(ADMIN_LISTS, sub ?? "")) {
     const f = adminFlags(rest, { "--json": "bool" });
-    return table((await adminCall("GET", sub))[sub], ADMIN_LISTS[sub], f["--json"]);
+    const r = await adminCall("GET", sub);
+    // Children whose deletion at the provider failed may still work until a retry or their expiry.
+    if (r.revoke_pending) say(`${r.revoke_pending} revoked child credential(s) not yet deleted at the provider; retried every five minutes until they expire`);
+    return table(r[sub], ADMIN_LISTS[sub], f["--json"]);
   }
   switch (sub) {
     case "login": {
