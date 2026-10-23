@@ -6,7 +6,9 @@
 //     "ip": ["203.0.113.0/24"] }   // optional: children only work from these CIDRs
 // Permission group ids come from GET /accounts/{id}/tokens/permission_groups; names are cosmetic.
 // Pasting only the parent is enough: prepare() takes account_id from the CLOUDFLARE_ACCOUNT_ID key,
-// fills in DEFAULT_SCOPES, and turns any group named by name into its id using the parent itself.
+// marks the key `"defaults": true`, and turns any group named by name into its id using the parent.
+// A defaults key mints from DEFAULT_SCOPES as the code has them now, looked up by name at each mint,
+// so a change to them reaches saved keys with no re-save.
 import { Refused } from "./catalog.ts";
 import type { MintConfig, Provider } from "./grants.ts";
 import { byStatus, TIMEOUT_MS } from "./verify.ts";
@@ -20,6 +22,13 @@ const ACCOUNT = /^[0-9a-f]{32}$/, GROUP = /^[0-9a-f]{32}$/;
 export const DEFAULT_SCOPES: Record<string, string[]> = {
   "workers:read": ["Workers Scripts Read", "D1 Read", "Workers KV Storage Read", "Workers R2 Storage Read", "Containers Read"],
   "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write", "Containers Write"],
+};
+
+// DEFAULT_SCOPES before Containers, which keys saved then hold as ids: a key whose scopes resolve to
+// exactly these follows the live defaults too, so it needs no re-save.
+const LEGACY_DEFAULTS: Record<string, string[]> = {
+  "workers:read": ["Workers Scripts Read", "D1 Read", "Workers KV Storage Read", "Workers R2 Storage Read"],
+  "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write"],
 };
 
 export function cloudflare(fetcher: typeof fetch = fetch): Provider {
@@ -37,6 +46,22 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
     }
     return j.result;
   };
+  // Permission group ids by lowercase name: the account-scoped groups the parent can list.
+  const groupIds = async (parent: string, account: unknown) => {
+    // Why the parent: Account API Tokens Edit can list the account's permission groups, and an id
+    // looked up here is one Cloudflare will accept when minting.
+    const list = await call("GET", `/accounts/${account}/tokens/permission_groups`, parent).catch((e) => {
+      if (e.cfStatus === 401 || e.cfStatus === 403) throw new Refused(400, `Cloudflare refused this token (${e.cfStatus}); paste an account-owned token with Account API Tokens: Edit on account ${account}`);
+      throw e;
+    }) as { id: string; name: string; scopes?: string[] }[];
+    return new Map((Array.isArray(list) ? list : [])
+      .filter((g) => !g.scopes || g.scopes.includes("com.cloudflare.api.account"))
+      .map((g) => [String(g.name).toLowerCase(), String(g.id)]));
+  };
+  const unknownNames = (byName: Map<string, string>, names: string[]) => {
+    const unknown = names.filter((n) => !byName.has(n.toLowerCase()));
+    if (unknown.length) throw new Refused(400, `Cloudflare has no account permission named ${unknown.map((u) => JSON.stringify(u)).join(", ")}`);
+  };
   // Whether `parent` is an active user-owned token, which account routes reject.
   const userToken = async (parent: string) => {
     const r = await fetcher(`${API}/user/tokens/verify`, { headers: { authorization: `Bearer ${parent}` }, redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS) })
@@ -51,32 +76,24 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
         if (!c.account_id) throw new Refused(400, "no account id: save CLOUDFLARE_ACCOUNT_ID as a static key, or set config.account_id");
       }
       if (!ACCOUNT.test(String(c.account_id))) throw new Refused(400, "config.account_id must be a 32-hex account id");
-      if (!c.scopes || !Object.keys(c.scopes).length) { c.scopes = DEFAULT_SCOPES; c.start ??= ["workers:read"]; }
+      // A rotation passes the stored config back in, marker and all: it stays on the defaults.
+      if (!c.scopes || !Object.keys(c.scopes).length || c.defaults === true) {
+        // Names, not ids: mint() looks DEFAULT_SCOPES up again each time. Checked here so a save fails loud.
+        unknownNames(await groupIds(parent, c.account_id), Object.values(DEFAULT_SCOPES).flat());
+        return { ...c, defaults: true, scopes: DEFAULT_SCOPES, start: c.start ?? ["workers:read"] };
+      }
       const scopes = c.scopes as Record<string, unknown[]>;
       const named = Object.values(scopes).flat().some((g) => !GROUP.test(String(g)));
       if (!named) return c;
-      // Why the parent: Account API Tokens Edit can list the account's permission groups, and an id
-      // looked up here is one Cloudflare will accept when minting.
-      const list = await call("GET", `/accounts/${c.account_id}/tokens/permission_groups`, parent).catch((e) => {
-        if (e.cfStatus === 401 || e.cfStatus === 403) throw new Refused(400, `Cloudflare refused this token (${e.cfStatus}); paste an account-owned token with Account API Tokens: Edit on account ${c.account_id}`);
-        throw e;
-      }) as { id: string; name: string; scopes?: string[] }[];
-      const byName = new Map((Array.isArray(list) ? list : [])
-        .filter((g) => !g.scopes || g.scopes.includes("com.cloudflare.api.account"))
-        .map((g) => [String(g.name).toLowerCase(), String(g.id)]));
-      const unknown: string[] = [];
-      c.scopes = Object.fromEntries(Object.entries(scopes).map(([s, groups]) => [s, (Array.isArray(groups) ? groups : []).map((g) => {
-        if (GROUP.test(String(g))) return String(g);
-        const id = byName.get(String(g).toLowerCase());
-        if (!id) unknown.push(String(g));
-        return id ?? "";
-      })]));
-      if (unknown.length) throw new Refused(400, `Cloudflare has no account permission named ${unknown.map((u) => JSON.stringify(u)).join(", ")}`);
+      const byName = await groupIds(parent, c.account_id);
+      unknownNames(byName, Object.values(scopes).flat().map(String).filter((g) => !GROUP.test(g)));
+      c.scopes = Object.fromEntries(Object.entries(scopes).map(([s, groups]) => [s, (Array.isArray(groups) ? groups : [])
+        .map((g) => GROUP.test(String(g)) ? String(g) : byName.get(String(g).toLowerCase())!)]));
       return c;
     },
     validate(config: MintConfig) {
       if (!ACCOUNT.test(String(config.account_id ?? ""))) throw new Refused(400, "config.account_id must be a 32-hex account id");
-      for (const [s, ids] of Object.entries(config.scopes ?? {})) {
+      for (const [s, ids] of Object.entries(config.defaults === true ? {} : config.scopes ?? {})) {
         if (!Array.isArray(ids) || !ids.length || !ids.every((i) => GROUP.test(String(i)))) {
           throw new Refused(400, `config.scopes.${s} must list permission group ids`);
         }
@@ -86,7 +103,26 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       }
     },
     async mint(parent, config, scopes, expiresAt, label) {
-      const groups = [...new Set(scopes.flatMap((s) => (config.scopes as Record<string, string[]>)[s] ?? []))];
+      const stored = (config.scopes ?? {}) as Record<string, string[]>;
+      let byName: Map<string, string> | undefined;
+      const lookup = async () => byName ??= await groupIds(parent, config.account_id);
+      const legacy = async () => {
+        const keys = Object.keys(stored).sort();
+        if (keys.join() !== Object.keys(LEGACY_DEFAULTS).sort().join()) return false;
+        if (!keys.every((k) => Array.isArray(stored[k]) && stored[k].length === LEGACY_DEFAULTS[k].length)) return false;
+        // Why the catch: this only widens a key to the defaults; if the lookup fails it keeps its stored ids.
+        const m = await lookup().catch(() => undefined);
+        if (!m) return false;
+        const same = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
+        return keys.every((k) => Array.isArray(stored[k]) && same(stored[k], LEGACY_DEFAULTS[k].map((n) => m.get(n.toLowerCase()) ?? "")));
+      };
+      const onDefaults = config.defaults === true || await legacy();
+      let groups = [...new Set(scopes.flatMap((s) => (onDefaults ? DEFAULT_SCOPES : stored)[s] ?? []))];
+      if (onDefaults && groups.length) {
+        const m = await lookup();
+        unknownNames(m, groups);
+        groups = groups.map((n) => m.get(n.toLowerCase())!);
+      }
       if (!groups.length) throw new Refused(400, "no permission groups for these scopes");
       const result = await call("POST", `/accounts/${config.account_id}/tokens`, parent, {
         name: label.slice(0, 120),
