@@ -146,3 +146,12 @@ test("a token deletes a static key within its writes, never a minted one or one 
   assert.ok(await catalog.keyRow("huddles", "A"));
   assert.match(JSON.stringify(await catalog.recentAudit()), /"actor":"dev","action":"delete","project":"huddles\/dev","names":"A"/);
 });
+
+test("a key made minted between the check and the delete is not deleted", async () => {
+  const { catalog } = await setup();
+  await catalog.put("global", "RACED", "parent-fake", { kind: "mint:cloudflare" });
+  assert.equal(await catalog.removeStatic("global", "RACED"), false);
+  assert.ok(await catalog.keyRow("global", "RACED"));
+  await catalog.put("global", "PLAIN", "v");
+  assert.equal(await catalog.removeStatic("global", "PLAIN"), true);
+});

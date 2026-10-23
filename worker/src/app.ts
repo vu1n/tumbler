@@ -134,7 +134,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     if (!prev) return json({ error: `no key ${scope}/${name}` }, 404);
     // Why: deleting a parent ends every child it minted; that stays an admin's call.
     if (prev.kind !== "static") return json({ error: `${scope}/${name} is a ${prev.kind} key; delete it in /admin` }, 409);
-    await catalog.remove(scope, name);
+    if (!await catalog.removeStatic(scope, name)) return json({ error: `${scope}/${name} changed while it was being deleted; nothing was deleted` }, 409);
     await catalog.audit(caller.name, "delete", scope === GLOBAL ? null : scope, [name]);
     return json({ scope, name, action: "deleted" });
   }
