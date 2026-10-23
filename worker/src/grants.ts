@@ -95,13 +95,19 @@ export class Grants {
     return this.child(g);
   }
 
-  // More scopes on a mint key: minted at once (a wider child) when the token allows them all,
-  // refused otherwise. The old child keeps working until the new one lands.
-  async stepUp(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
-    const config = this.config(row), known = Object.keys(config.scopes ?? {});
+  // Refuses a step-up the key can't serve (400) or the token may not hold (403), before anything mints.
+  checkStepUp(caller: Caller, row: KeyRow, scopes: string[]) {
+    const known = Object.keys(this.config(row).scopes ?? {});
     for (const s of scopes) if (!known.includes(s)) throw new Refused(400, `${row.name} has no scope ${s}`);
     const outside = scopes.filter((s) => !allowedBy(caller.scopes ?? null, s));
     if (outside.length) throw new Refused(403, `${row.name}: token ${caller.name} may not hold ${outside.join(", ")}; add it to the token's scopes in /admin`);
+  }
+
+  // More scopes on a mint key: minted at once (a wider child) when the token allows them all,
+  // refused otherwise. The old child keeps working until the new one lands.
+  async stepUp(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
+    const config = this.config(row);
+    this.checkStepUp(caller, row, scopes);
     let g = await this.current(caller, project, row);
     if (!g) return this.open(caller, project, row, union((config.start ?? []).filter((s) => allowedBy(caller.scopes ?? null, s)), scopes));
     if (g.state !== "active") throw new Refused(409, `${row.name} is being minted by another request; run again`);

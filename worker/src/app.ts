@@ -65,15 +65,19 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
     const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : [], names = Array.isArray(body.keys) ? body.keys.map(String) : [];
     if (!scopes.length) return json({ error: "no scopes asked for" }, 400);
-    const out = [];
+    // Every key is checked before any mints, so a refused one never leaves another widened.
+    const asks = [];
     for (const name of names) {
       const { project, row } = await catalog.rowFor(caller, url.searchParams.get("project"), name);
       if (row.kind === "static") continue;
       const known = Object.keys(grants.config(row).scopes ?? {}), mine = scopes.filter((s) => known.includes(s));
       if (!mine.length) continue;
-      out.push(grantView(await grants.stepUp(caller, project, row, mine)));
+      grants.checkStepUp(caller, row, mine);
+      asks.push({ project, row, mine });
     }
-    if (!out.length) return json({ error: `no minted key in this set has scope ${scopes.join(", ")}` }, 400);
+    if (!asks.length) return json({ error: `no minted key in this set has scope ${scopes.join(", ")}` }, 400);
+    const out = [];
+    for (const { project, row, mine } of asks) out.push(grantView(await grants.stepUp(caller, project, row, mine)));
     return json({ grants: out });
   }
   // Run each key's check on its current value: {"keys": [...]} (empty: every key the caller reads).

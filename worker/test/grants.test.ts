@@ -206,6 +206,18 @@ test("scopes narrowed while a write mints: the child is deleted, never handed ou
   assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
 });
 
+test("a step-up over several keys is checked whole: one key outside the token's scopes widens none", async () => {
+  const s = await setup();
+  await s.catalog.put("dev", "D1_TOKEN", PARENT, { kind: "mint:cloudflare", config: { ...CONFIG, scopes: { ...CONFIG.scopes, "d1:write": [WRITE] } } });
+  await s.env(s.dev, "CLOUDFLARE_API_TOKEN,D1_TOKEN");
+  const minted = s.fake.minted.length;
+  const r = await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN", "D1_TOKEN"], scopes: ["workers:write", "d1:write"] });
+  assert.equal(r.status, 403);
+  assert.match((await r.json()).error, /D1_TOKEN: token dev may not hold d1:write/);
+  assert.equal(s.fake.minted.length, minted);
+  assert.deepEqual(s.fake.revoked, []);
+});
+
 test("a request left waiting from before ceilings lapses in the sweep, or is dropped by the next step-up", async () => {
   const s = await setup();
   await s.env(); await s.env(s.other);
