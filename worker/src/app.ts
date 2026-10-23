@@ -104,7 +104,8 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
   if (url.pathname.startsWith("/v1/keys/") && request.method === "PUT") {
     const name = decodeURIComponent(url.pathname.slice("/v1/keys/".length));
     checkName(name);
-    if (Number(request.headers.get("content-length") ?? 0) > MAX_VALUE + 4096) return json({ error: "value too large" }, 413);
+    // Loose: JSON can spell one byte of value in up to six (\u0000); the exact limit is on the value below.
+    if (Number(request.headers.get("content-length") ?? 0) > MAX_VALUE * 6 + 4096) return json({ error: "value too large" }, 413);
     const b = await request.json().catch(() => ({})) as Record<string, unknown>;
     // No scope named: the one the token reads by default, never global by accident.
     const scope = b.scope ? String(b.scope) : caller.projects ? catalog.scopeFor(caller, null) : null;
@@ -123,6 +124,9 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     if (check.status === "invalid" || check.status === "error") {
       return json({ error: `${name}: the new value failed its check, ${check.detail}; nothing was saved and the old value stays` }, check.status === "invalid" ? 400 : 502);
     }
+    // Again after the check, which can take seconds: a revoke or a narrowed writes in the meantime wins.
+    const now = await catalog.caller(token!);
+    if (!now || !writeReaches(now.writes, scope)) return json({ error: `this token may no longer write ${scope}; nothing was saved` }, 403);
     await catalog.put(scope, name, value, { kind: "static", config: cfg, checked: check.status === "ok", ...(typeof b.description === "string" ? { description: b.description } : {}) });
     await catalog.audit(caller.name, "put", scope === GLOBAL ? null : scope, [name]);
     return json({ scope, name, action: prev ? "rotated" : "created", checked: check.status === "ok" });

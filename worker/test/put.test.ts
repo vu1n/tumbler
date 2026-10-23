@@ -74,6 +74,27 @@ test("a token never sets a minted key's parent, and a key with a check keeps it"
   assert.equal(await catalog.value((await catalog.keyRow("global", "OPENAI_API_KEY"))!), "old-fake");
 });
 
+test("writes narrowed or revoked while a value's check runs save nothing", async () => {
+  const { catalog, tokens } = await setup();
+  await catalog.put("global", "OPENAI_API_KEY", "old-fake", { config: { check: "openai" } });
+  for (const cut of [() => catalog.updateToken("laptop", { writes: ["*"] }), () => catalog.revokeToken("laptop")]) {
+    const fetcher = (async () => { await cut(); return new Response("{}", { status: 200 }); }) as typeof fetch;
+    const r = await handle(new Request("https://t.example/v1/keys/OPENAI_API_KEY", { method: "PUT",
+      headers: { authorization: `Bearer ${tokens.laptop}`, "content-type": "application/json" }, body: JSON.stringify({ scope: "global", value: "new-fake" }) }),
+      { catalog, fetcher, admin: async () => null });
+    assert.equal(r.status, 403);
+    assert.equal(await catalog.value((await catalog.keyRow("global", "OPENAI_API_KEY"))!), "old-fake");
+  }
+});
+
+test("a value JSON spells long still fits when the value itself is under the limit", async () => {
+  const { tokens, deps } = await setup();
+  const body = JSON.stringify({ scope: "global", value: "\n".repeat(40 * 1024) });
+  const r = await handle(new Request("https://t.example/v1/keys/BIG", { method: "PUT", body,
+    headers: { authorization: `Bearer ${tokens.laptop}`, "content-type": "application/json", "content-length": String(body.length) } }), deps);
+  assert.equal(r.status, 200);
+});
+
 test("bad names, empty and oversized values are refused", async () => {
   const { tokens, put } = await setup();
   assert.equal((await put("lower", tokens.laptop, { scope: "global", value: "v" })).status, 400);
