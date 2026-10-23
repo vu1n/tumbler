@@ -17,11 +17,19 @@ const API = "https://api.cloudflare.com/client/v4";
 const ACCOUNT = /^[0-9a-f]{32}$/, GROUP = /^[0-9a-f]{32}$/;
 
 // Read is granted on request, write waits for an admin (machine.ts autoApproved).
-// Why Containers: `wrangler deploy` of a Worker with `containers` pushes its image through
-// /accounts/{id}/containers/*, which Workers Scripts Write doesn't reach (403 on the push).
 export const DEFAULT_SCOPES: Record<string, string[]> = {
-  "workers:read": ["Workers Scripts Read", "D1 Read", "Workers KV Storage Read", "Workers R2 Storage Read", "Containers Read"],
-  "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write", "Containers Write"],
+  "workers:read": ["Workers Scripts Read", "D1 Read", "Workers KV Storage Read", "Workers R2 Storage Read"],
+  "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write"],
+};
+// Groups a defaults mint adds when the account lists one of the names (the first that matches), and
+// leaves out otherwise: a name Cloudflare doesn't list here must never stop every mint, as a wrong
+// "Containers Write" once did.
+// Why Containers: `wrangler deploy` of a Worker with `containers` pushes its image through
+// /accounts/{id}/containers/*, which Workers Scripts Write doesn't reach (403 on the push). The
+// account permission behind it is listed as Cloudchamber; the docs call it Containers.
+export const OPTIONAL_DEFAULTS: Record<string, string[][]> = {
+  "workers:read": [["Cloudchamber Read", "Containers Read"]],
+  "workers:write": [["Cloudchamber Write", "Containers Write"]],
 };
 
 // DEFAULT_SCOPES before Containers, which keys saved then hold as ids: a key whose scopes resolve to
@@ -130,6 +138,14 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       const onDefaults = config.defaults === true || await legacy();
       const extra = (config.extra ?? {}) as Record<string, string[]>;
       let groups = [...new Set(scopes.flatMap((s) => [...((onDefaults ? DEFAULT_SCOPES : stored)[s] ?? []), ...(extra[s] ?? [])]))];
+      if (onDefaults) {
+        const m = await lookup();
+        for (const choices of scopes.flatMap((s) => OPTIONAL_DEFAULTS[s] ?? [])) {
+          const name = choices.find((n) => m.has(n.toLowerCase()));
+          if (name) groups.push(name);
+        }
+        groups = [...new Set(groups)];
+      }
       // Names (the defaults, an operator's additions) are looked up now; ids are used as stored.
       const names = groups.filter((g) => !GROUP.test(g));
       if (names.length) {
