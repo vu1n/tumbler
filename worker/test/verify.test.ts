@@ -12,9 +12,9 @@ import { memoryD1 } from "./d1.ts";
 
 const ACCT = "a".repeat(32), READ = "1".repeat(32);
 const CF = { account_id: ACCT, start: ["workers:read"], scopes: { "workers:read": [READ] } };
-// The account's permission groups, as Cloudflare lists them: every default name, the Cloudchamber
-// (Containers) groups under both names, plus a zone group.
-const GROUPS = [...[...Object.values(DEFAULT_SCOPES).flat(), "Cloudchamber Read", "Cloudchamber Write", "Containers Read", "Containers Write"].map((name, i) => ({ id: i.toString(16).padStart(32, "0"), name, scopes: ["com.cloudflare.api.account"] })),
+// The account's permission groups, as Cloudflare lists them: every default name, the Containers
+// groups under each name, plus a zone group.
+const GROUPS = [...[...Object.values(DEFAULT_SCOPES).flat(), ...Object.values(OPTIONAL_DEFAULTS).flat(2)].map((name, i) => ({ id: i.toString(16).padStart(32, "0"), name, scopes: ["com.cloudflare.api.account"] })),
   { id: "f".repeat(32), name: "DNS Read", scopes: ["com.cloudflare.api.account.zone"] }];
 
 // A fake internet: `good-*` values pass, `bad-*` get a 401, `down-*` can't be reached.
@@ -136,9 +136,9 @@ test("pasting only a Cloudflare parent fills the account from CLOUDFLARE_ACCOUNT
   assert.deepEqual(lookup, { url: `https://api.cloudflare.com/client/v4/accounts/${ACCT}/tokens/permission_groups`, headers: { authorization: "Bearer good-parent", "content-type": "application/json" } });
 });
 
-test("a defaults key mints from DEFAULT_SCOPES as they are now, so workers:write carries Cloudchamber Write", async () => {
+test("a defaults key mints from DEFAULT_SCOPES as they are now, so workers:write carries Workers Containers Write", async () => {
   // Why: `wrangler deploy` of a Worker with a container pushes its image under /containers, a 403 without it.
-  assert.deepEqual(OPTIONAL_DEFAULTS["workers:write"], [["Cloudchamber Write", "Containers Write"]]);
+  assert.deepEqual(OPTIONAL_DEFAULTS["workers:write"][0][0], "Workers Containers Write");
   const posted: any[] = [];
   let listed = GROUPS;
   const fetcher = (async (url: string, init: RequestInit = {}) => {
@@ -150,7 +150,7 @@ test("a defaults key mints from DEFAULT_SCOPES as they are now, so workers:write
   // Stored ids from an older default set are ignored on a defaults key; a named config keeps its own.
   const stale = { "workers:read": [id("Workers Scripts Read")], "workers:write": [id("Workers Scripts Write")] };
   const cf = cloudflare(fetcher), at = new Date("2026-10-23T12:00:00Z");
-  const write = [...DEFAULT_SCOPES["workers:write"], "Cloudchamber Write"].map((n) => ({ id: id(n) }));
+  const write = [...DEFAULT_SCOPES["workers:write"], "Workers Containers Write"].map((n) => ({ id: id(n) }));
   await cf.mint("good-parent", { account_id: ACCT, defaults: true, scopes: stale }, ["workers:write"], at, "t");
   assert.deepEqual(posted[0].policies[0].permission_groups, write);
   await cf.mint("good-parent", { account_id: ACCT, scopes: stale }, ["workers:write"], at, "t");
@@ -170,6 +170,9 @@ test("a defaults key mints from DEFAULT_SCOPES as they are now, so workers:write
   const named = await cf.prepare!("good-parent", { account_id: ACCT, scopes: { "x:write": ["Containers Write"] } }, async () => undefined);
   assert.deepEqual([named.defaults, named.scopes], [undefined, { "x:write": [id("Containers Write")] }]);
   // An account that lists neither name still mints the rest: an optional group never blocks a mint.
+  listed = GROUPS.filter((g) => g.name !== "Workers Containers Write");
+  await cf.mint("good-parent", { account_id: ACCT, defaults: true, scopes: DEFAULT_SCOPES }, ["workers:write"], at, "t");
+  assert.deepEqual(posted.at(-1).policies[0].permission_groups.at(-1), { id: id("Cloudchamber Write") }); // the next name listed
   listed = GROUPS.filter((g) => !/Cloudchamber|Containers/.test(g.name));
   await cf.mint("good-parent", { account_id: ACCT, defaults: true, scopes: DEFAULT_SCOPES }, ["workers:read", "workers:write"], at, "t");
   assert.deepEqual(posted.at(-1).policies[0].permission_groups, Object.values(DEFAULT_SCOPES).flat().map((n) => ({ id: id(n) })));

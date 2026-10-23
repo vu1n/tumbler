@@ -26,10 +26,10 @@ export const DEFAULT_SCOPES: Record<string, string[]> = {
 // "Containers Write" once did.
 // Why Containers: `wrangler deploy` of a Worker with `containers` pushes its image through
 // /accounts/{id}/containers/*, which Workers Scripts Write doesn't reach (403 on the push). The
-// account permission behind it is listed as Cloudchamber; the docs call it Containers.
+// Containers API names "Workers Containers"; older accounts may list it under the other names.
 export const OPTIONAL_DEFAULTS: Record<string, string[][]> = {
-  "workers:read": [["Cloudchamber Read", "Containers Read"]],
-  "workers:write": [["Cloudchamber Write", "Containers Write"]],
+  "workers:read": [["Workers Containers Read", "Cloudchamber Read", "Containers Read"]],
+  "workers:write": [["Workers Containers Write", "Cloudchamber Write", "Containers Write"]],
 };
 
 // DEFAULT_SCOPES before Containers, which keys saved then hold as ids: a key whose scopes resolve to
