@@ -40,8 +40,11 @@ const save = async (name: string, value: string, config?: unknown) => {
 
 const CLI = new URL("../../cli/tumbler", import.meta.url).pathname;
 const home = mkdtempSync(join(tmpdir(), "tumbler-rotate-"));
+// Why: macOS caps a unix socket path at 104 bytes, and the cache socket under macOS's long tmpdir
+// overshoots it. The helper then never starts, and the cache tests fail because nothing is cached.
+const runDir = mkdtempSync("/tmp/tmb-");
 const { ROT_KEY: _a, ROT_PLAIN: _b, TUMBLER_URL: _u, TUMBLER_TOKEN: _t, TUMBLER_PROJECT: _j, ...baseEnv } = process.env;
-const env = (extra: Record<string, string> = {}) => ({ ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run"), TUMBLER_IDLE: "3", TUMBLER_AUTO: "off",
+const env = (extra: Record<string, string> = {}) => ({ ...baseEnv, HOME: home, XDG_RUNTIME_DIR: runDir, TUMBLER_IDLE: "3", TUMBLER_AUTO: "off",
   TUMBLER_URL: `http://127.0.0.1:${(server.address() as any).port}`, TUMBLER_TOKEN: token, ...extra });
 const exec = promisify(execFile);
 const cli = (args: string[], extra?: Record<string, string>) => exec(CLI, args, { cwd: home, env: env(extra) }).then(
