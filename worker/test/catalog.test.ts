@@ -266,13 +266,15 @@ test("migration 0007 carries over each token's live write approvals and active w
   for (const f of files.filter((f) => f < "0007")) at(f);
   const ins = (sql: string, ...v: (string | null)[]) => db.prepare(sql).run(...v);
   for (const n of ["approved", "granted", "reader", "lapsed", "gone"]) ins("INSERT INTO tokens (name, hash, created_at, revoked_at) VALUES (?, ?, '2026-01-01', ?)", n, `h-${n}`, n === "gone" ? "2026-01-02" : null);
-  const approval = (caller: string, scopes: string[], until: string, ended: string | null = null) =>
-    ins("INSERT INTO approvals (id, caller, key_scope, name, key_rev, scopes, approved_by, created_at, until, ended_at) VALUES (?, ?, 'dev', 'K', 'r', ?, 'vu', '2026-01-01', ?, ?)", `a-${caller}-${until}`, caller, JSON.stringify(scopes), until, ended);
+  ins("INSERT INTO keys (scope, name, kind, iv, ciphertext, created_at, rotated_at, rev) VALUES ('dev', 'K', 'mint:cloudflare', x'00', x'00', '2026-01-01', '2026-01-01', 'r')");
+  const approval = (caller: string, scopes: string[], until: string, ended: string | null = null, rev = "r") =>
+    ins("INSERT INTO approvals (id, caller, key_scope, name, key_rev, scopes, approved_by, created_at, until, ended_at) VALUES (?, ?, 'dev', 'K', ?, ?, 'vu', '2026-01-01', ?, ?)", `a-${caller}-${until}-${rev}`, caller, rev, JSON.stringify(scopes), until, ended);
   const grant = (caller: string, scopes: string[], state: string) =>
     ins("INSERT INTO grants (id, caller, key_scope, key_rev, name, state, scopes, expires_at, created_at, updated_at) VALUES (?, ?, 'dev', 'r', 'K', ?, ?, '2999-01-01T00:00:00Z', '2026-01-01', '2026-01-01')", `g-${caller}-${state}`, caller, state, JSON.stringify(scopes));
   approval("approved", ["workers:read", "workers:write"], "2999-01-01T00:00:00Z");
   approval("lapsed", ["workers:write"], "2000-01-01T00:00:00Z");
   approval("lapsed", ["d1:write"], "2999-01-01T00:00:00Z", "2026-01-02");
+  approval("lapsed", ["r2:write"], "2999-01-01T00:00:00Z", null, "rotated-away");
   grant("granted", ["workers:read", "workers:write", "d1:write", "Audit:Read", "*"], "active");
   grant("granted", ["r2:write"], "revoked");
   grant("reader", ["workers:read"], "active");
