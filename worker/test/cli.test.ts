@@ -1,6 +1,6 @@
 // End to end: the real CLI against the real routes, served over plain HTTP on localhost.
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
@@ -139,7 +139,7 @@ test("the token never appears in the process's arguments", async () => {
 
 const repo = (files: Record<string, string>) => {
   const dir = mkdtempSync(join(home, "repo-"));
-  mkdirSync(join(dir, ".git"));
+  execFileSync("git", ["init", "-q", dir]);
   for (const [f, body] of Object.entries(files)) { mkdirSync(join(dir, f, ".."), { recursive: true }); writeFileSync(join(dir, f), body); }
   return dir;
 };
@@ -157,7 +157,18 @@ test("auto picks keys by rule and by Clef, sends names only, and writes .tumbler
   await cli(["auto", "--force", "-p", "dev"], {}, dir);
   assert.match(readFileSync(join(dir, ".tumbler"), "utf8"), /^project = dev$/m);
   // Kept out of git, listed once however often it's rewritten.
-  assert.equal(readFileSync(join(dir, ".git", "info", "exclude"), "utf8"), "/.tumbler\n");
+  assert.match(readFileSync(join(dir, ".git", "info", "exclude"), "utf8"), /^\/\.tumbler$/m);
+  assert.equal(readFileSync(join(dir, ".git", "info", "exclude"), "utf8").split("\n").filter((l) => l === "/.tumbler").length, 1);
+});
+
+test("auto in a linked worktree lists .tumbler in the repository's real exclude file", async () => {
+  const dir = repo({ "wrangler.toml": "" }), wt = join(dir, "..", `${dir.split("/").at(-1)}-wt`);
+  const git = (...a: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...a]);
+  git("add", "."); git("commit", "-qm", "x"); git("worktree", "add", "-q", wt);
+  await cli(["auto"], {}, wt);
+  const exclude = execFileSync("git", ["-C", wt, "rev-parse", "--git-path", "info/exclude"], { encoding: "utf8" }).trim();
+  assert.match(readFileSync(exclude.startsWith("/") ? exclude : join(wt, exclude), "utf8"), /^\/\.tumbler$/m);
+  assert.equal(execFileSync("git", ["-C", wt, "status", "--porcelain"], { encoding: "utf8" }), "");
 });
 
 test("auto reads every dependency a pyproject.toml declares, extras included", async () => {

@@ -159,6 +159,15 @@ test("narrowing a token's scopes ends the children holding what it no longer all
   assert.equal((await s.call("PATCH", "/admin/api/tokens/dev", undefined, { scopes: ["not a scope"] }, "vu@example.com")).status, 400);
 });
 
+test("a live child wider than the token's scopes ends on the next request, even when the narrowing's cleanup never ran", async () => {
+  const s = await setup();
+  await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  await s.catalog.setScopes("dev", null); // as after migration 0007, or a PATCH cut short before closeOutsideCeiling
+  assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
+  assert.deepEqual(s.fake.revoked, ["id-1"]); // the write child
+  assert.deepEqual(s.fake.minted.at(-1)!.scopes, ["workers:read"]);
+});
+
 test("scopes narrowed while a write mints: the child is deleted, never handed out", async () => {
   const s = await setup();
   await s.env();

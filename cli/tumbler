@@ -32,7 +32,7 @@
 // only those keys; if auto fails the command doesn't start. A `.tumbler` auto writes is kept out of
 // git (.git/info/exclude), so nobody has to review or commit it; commit one only to pin a set.
 // TUMBLER_AUTO=off skips auto and fetches every key the token can read.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
@@ -275,14 +275,15 @@ function writeManifest(path, r, project) {
 }
 
 // A written .tumbler is the CLI's working note, not part of the change: list it in the repo's own
-// .git/info/exclude so it never shows up as untracked. Best effort; a worktree's .git is a file.
+// info/exclude (asked of git, so a worktree or submodule finds its real one) so it never shows up
+// as untracked. Best effort: no git, no exclude.
 function keepOutOfGit(path) {
   try {
-    if (!existsSync(join(dirname(path), ".git"))) return;
-    const info = join(dirname(path), ".git", "info"), exclude = join(info, "exclude");
+    const cwd = dirname(path);
+    const exclude = resolve(cwd, execFileSync("git", ["rev-parse", "--git-path", "info/exclude"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
     const have = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
     if (have.split("\n").some((l) => l.trim() === "/.tumbler")) return;
-    mkdirSync(info, { recursive: true });
+    mkdirSync(dirname(exclude), { recursive: true });
     writeFileSync(exclude, have + (have && !have.endsWith("\n") ? "\n" : "") + "/.tumbler\n");
   } catch {}
 }

@@ -220,6 +220,9 @@ export class Grants {
     const g = await this.live(caller, project, row.name);
     if (!g) return null;
     if (g.state === "active" && !this.fresh(g)) { await this.close(g, "expired", "system"); return null; }
+    // A child wider than the token now allows (scopes narrowed, or minted before ceilings existed)
+    // ends here rather than at expiry; the caller gets a fresh one within its scopes.
+    if (g.state === "active" && !g.scopes.every((s) => allowedBy(caller.scopes ?? null, s))) { await this.close(g, "revoked", "system"); return null; }
     // A read claim whose minting request died (evicted, crashed) before storing: drop it and retry.
     if (g.state === "pending" && !g.child_id && Date.parse(g.created_at) < this.now().getTime() - ABANDONED_MS) {
       await this.apply(g, { type: "abandon", who: "system" });
