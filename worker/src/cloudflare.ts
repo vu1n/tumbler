@@ -31,6 +31,10 @@ const LEGACY_DEFAULTS: Record<string, string[]> = {
   "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write"],
 };
 
+// Groups an operator may never add (`tumbler scope add`): a child holding one could make tokens,
+// members or billing changes, which would let an agent widen its own reach past this broker.
+const UNDELEGABLE = /api tokens|memberships?|account settings|billing/i;
+
 export function cloudflare(fetcher: typeof fetch = fetch): Provider {
   const call = async (method: string, path: string, parent: string, body?: unknown) => {
     // Why the catch: a fetch error message can quote a header, and the parent is one.
@@ -98,6 +102,13 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
           throw new Refused(400, `config.scopes.${s} must list permission group ids`);
         }
       }
+      for (const [s, names] of Object.entries((config.extra ?? {}) as Record<string, string[]>)) {
+        const bad = names.filter((n) => UNDELEGABLE.test(n) || GROUP.test(n));
+        if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (use permission names; token, member, account settings and billing groups stay with /admin)`);
+        // Why: a `:read` scope is granted to every token on request (machine.ts autoApproved), so it carries reads only.
+        const writes = s.endsWith(":read") ? names.filter((n) => !/ read$/i.test(n)) : [];
+        if (writes.length) throw new Refused(400, `config.extra.${s}: ${writes.join(", ")} isn't a read, and every token gets ${s}; add it to a write scope instead`);
+      }
       if (config.ip !== undefined && !(Array.isArray(config.ip) && config.ip.every((c) => typeof c === "string"))) {
         throw new Refused(400, "config.ip must be a list of CIDRs");
       }
@@ -117,11 +128,14 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
         return keys.every((k) => Array.isArray(stored[k]) && same(stored[k], LEGACY_DEFAULTS[k].map((n) => m.get(n.toLowerCase()) ?? "")));
       };
       const onDefaults = config.defaults === true || await legacy();
-      let groups = [...new Set(scopes.flatMap((s) => (onDefaults ? DEFAULT_SCOPES : stored)[s] ?? []))];
-      if (onDefaults && groups.length) {
+      const extra = (config.extra ?? {}) as Record<string, string[]>;
+      let groups = [...new Set(scopes.flatMap((s) => [...((onDefaults ? DEFAULT_SCOPES : stored)[s] ?? []), ...(extra[s] ?? [])]))];
+      // Names (the defaults, an operator's additions) are looked up now; ids are used as stored.
+      const names = groups.filter((g) => !GROUP.test(g));
+      if (names.length) {
         const m = await lookup();
-        unknownNames(m, groups);
-        groups = groups.map((n) => m.get(n.toLowerCase())!);
+        unknownNames(m, names);
+        groups = [...new Set(groups.map((g) => GROUP.test(g) ? g : m.get(g.toLowerCase())!))];
       }
       if (!groups.length) throw new Refused(400, "no permission groups for these scopes");
       const result = await call("POST", `/accounts/${config.account_id}/tokens`, parent, {
@@ -136,6 +150,15 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       });
       if (!result?.id || !result?.value) throw new Refused(502, "cloudflare minted no token");
       return { id: String(result.id), value: String(result.value) };
+    },
+    async groups(parent, config, names) {
+      const bad = names.filter((n) => UNDELEGABLE.test(n));
+      if (bad.length) throw new Refused(403, `${bad.join(", ")} can't be added from the CLI: a child with it could make tokens, members or billing changes. An admin adds it to the key's config in /admin`);
+      const list = await call("GET", `/accounts/${config.account_id}/tokens/permission_groups`, parent) as { name: string; scopes?: string[] }[];
+      const byName = new Map((Array.isArray(list) ? list : []).filter((g) => !g.scopes || g.scopes.includes("com.cloudflare.api.account"))
+        .map((g) => [String(g.name).toLowerCase(), String(g.name)]));
+      unknownNames(new Map([...byName].map(([k]) => [k, k])), names);
+      return names.map((n) => byName.get(n.toLowerCase())!);
     },
     // Before a parent is saved: Cloudflare must accept it as an active token on this account.
     async verify(parent, config) {

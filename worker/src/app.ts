@@ -3,7 +3,7 @@ import { type Caller, Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
-import { errorClass, MINTED_MAX_AGE_S, type GrantRow, type Grants } from "./grants.ts";
+import { errorClass, MINTED_MAX_AGE_S, scopeNames, type GrantRow, type Grants } from "./grants.ts";
 import { checkKey, type Verifiers } from "./verify.ts";
 
 export interface Deps {
@@ -70,7 +70,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     for (const name of names) {
       const { project, row } = await catalog.rowFor(caller, url.searchParams.get("project"), name);
       if (row.kind === "static") continue;
-      const known = Object.keys(grants.config(row).scopes ?? {}), mine = scopes.filter((s) => known.includes(s));
+      const known = scopeNames(grants.config(row)), mine = scopes.filter((s) => known.includes(s));
       if (!mine.length) continue;
       grants.checkStepUp(caller, row, mine);
       asks.push({ project, row, mine });
@@ -138,8 +138,39 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     await catalog.audit(caller.name, "delete", scope === GLOBAL ? null : scope, [name]);
     return json({ scope, name, action: "deleted" });
   }
+  // A minted key's scopes, and an operator's changes to them: what `tumbler scope` sends. Only for an
+  // operator token, only on the key it reads, and only the groups the admin's config doesn't set.
+  if (url.pathname.startsWith("/v1/mint/") && (request.method === "GET" || request.method === "PATCH")) {
+    if (!caller.operator) return json({ error: `token ${caller.name} is not an operator; an admin turns that on for it in /admin or with \`tumbler admin token edit ${caller.name} --operator on\`` }, 403);
+    if (!grants) return json({ error: "minting is off" }, 501);
+    const { row } = await catalog.rowFor(caller, url.searchParams.get("project"), decodeURIComponent(url.pathname.slice("/v1/mint/".length)));
+    if (row.kind === "static") return json({ error: `${row.scope}/${row.name} is a static key; it has no scopes` }, 400);
+    let cfg = grants.config(row);
+    if (request.method === "PATCH") {
+      const b = await request.json().catch(() => ({})) as Record<string, unknown>;
+      const scope = String(b.scope ?? ""), add = list(b.add) ?? [], remove = list(b.remove) ?? [];
+      if (!scope || (!add.length && !remove.length)) return json({ error: "name a scope and the groups to add or remove" }, 400);
+      const extra = { ...(cfg.extra ?? {}) };
+      const added = add.length ? await grants.groups(row.kind, await catalog.value(row), cfg, add) : [];
+      const gone = new Set(remove.map((g) => g.toLowerCase()));
+      const absent = remove.filter((g) => !(extra[scope] ?? []).some((e) => e.toLowerCase() === g.toLowerCase()));
+      if (absent.length) return json({ error: `${absent.join(", ")} isn't an addition on ${row.name} ${scope}; only groups added with tumbler scope can be removed there, the rest is the key's config in /admin` }, 400);
+      const next = [...new Set([...(extra[scope] ?? []), ...added])].filter((g) => !gone.has(g.toLowerCase()));
+      if (next.length) extra[scope] = next; else delete extra[scope];
+      cfg = { ...cfg, extra };
+      if (!Object.keys(extra).length) delete cfg.extra;
+      grants.validate(row.kind, cfg);
+      if (!await catalog.setConfig(row.scope, row.name, row.rev, cfg)) return json({ error: `${row.name} changed meanwhile; nothing was saved, run again` }, 409);
+      // Its children carry the old groups: end them, so the next run mints with the new ones.
+      await grants.closeStale(row.scope, row.name);
+      await catalog.audit(caller.name, "mint-scope", row.scope === GLOBAL ? null : row.scope, [row.name, scope, ...added.map((g) => `+${g}`), ...remove.map((g) => `-${g}`)]);
+    }
+    const base = (cfg.scopes ?? {}) as Record<string, unknown[]>, extra = cfg.extra ?? {};
+    return json({ scope: row.scope, name: row.name, kind: row.kind, defaults: cfg.defaults === true,
+      scopes: Object.fromEntries(scopeNames(cfg).sort().map((s) => [s, { base: (base[s] ?? []).map(String), extra: extra[s] ?? [] }])) });
+  }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
-  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, writes: caller.writes ?? null, expires_at: caller.expires_at ?? null });
+  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, writes: caller.writes ?? null, operator: caller.operator ?? false, expires_at: caller.expires_at ?? null });
   // Names only: listing must not mint a child for every minted key.
   if (url.pathname === "/v1/keys") {
     const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
@@ -294,7 +325,7 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     if (m === "POST" && parts.length === 1) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
-      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes));
+      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true);
       await catalog.audit(who, "token-create", null, [String(b.name)]);
       return json({ name: b.name, token }); // shown once
     }
@@ -302,15 +333,16 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     // write; any of them.
     if (m === "PATCH" && parts.length === 2) {
       const b = await body();
-      const pin = "projects" in b || !("scopes" in b || "writes" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
+      const pin = "projects" in b || !("scopes" in b || "writes" in b || "operator" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
       // One checked write for both, so a bad pin never lands a wider ceiling (or the reverse).
-      const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
+      const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...("operator" in b ? { operator: b.operator === true } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
       // Both cleanups run before either audit; a cleanup cut short is finished by the sweep.
       if ("projects" in done) await grants?.closeOutsidePin(parts[1], done.projects!, who);
       if ("scopes" in done) await grants?.closeOutsideCeiling(parts[1], done.scopes!, who);
       if ("projects" in done) await catalog.audit(who, "token-pin", null, [parts[1], ...(done.projects ?? ["global-only"])]);
       if ("scopes" in done) await catalog.audit(who, "token-scopes", null, [parts[1], ...(done.scopes ?? ["reads-only"])]);
       if ("writes" in done) await catalog.audit(who, "token-writes", null, [parts[1], ...(done.writes ?? ["writes-nothing"])]);
+      if ("operator" in done) await catalog.audit(who, "token-operator", null, [parts[1], done.operator ? "on" : "off"]);
       return json({ ok: true });
     }
     if (m === "DELETE" && parts.length === 2) {

@@ -60,7 +60,7 @@ textarea.env{display:block;min-height:120px}
 
 <h2>Tokens</h2>
 <div id="once"></div>
-<div class="wrap"><table><thead><tr><th>Name</th><th>Reads</th><th>May mint</th><th>May write</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Name</th><th>Reads</th><th>May mint</th><th>May write</th><th>Operator</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
 <form id="newToken" method="post">
   <input name="name" placeholder="token name" required>
   <input name="projects" placeholder="huddles, huddles/prod, */dev (empty = global only)" title="A project reads its shared keys; project/env one environment (dev, staging, prod); * is every project, */env that environment of every project.">
@@ -68,6 +68,7 @@ textarea.env{display:block;min-height:120px}
   <input name="scopes" placeholder="may mint beyond reads: workers:write, or * (empty = reads only)" title="What this token's minted keys may carry beyond reads, without asking anyone. A scope outside this list is refused.">
   <span class="chips" title="Fill in a preset"><button type="button" data-scopes="">Read only</button><button type="button" data-scopes="workers:write" title="workers:write: Workers, D1, KV, R2 and Containers writes, not just deploys">Read + deploy</button><button type="button" data-scopes="*" title="Every scope any key has, including ones added later">Any scope</button></span>
   <input name="writes" placeholder="may write with tumbler put: global, huddles, */dev (empty = nothing)" title="Where this token may save static keys from the CLI (tumbler put). global must be named; a project or project/env as in a pin. Minted keys are changed here only.">
+  <label title="May add or remove permission groups on the minted keys it reads with tumbler scope, on your word in chat. Never tokens, pins, ceilings, parents or token/member/billing groups."><input name="operator" type="checkbox"> operator</label>
   <input name="hours" type="number" min="1" step="1" placeholder="expires in hours (empty = never)" title="The token stops working then; grants it holds are ended by the next sweep.">
   <button>Create</button>
 </form>
@@ -121,7 +122,13 @@ async function load() {
       try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ writes: next.split(',').map(s => s.trim()).filter(Boolean) }) }); } catch (err) { alert(err.message); }
       load(); });
     writes.firstChild.title = 'Edit writes';
-    tr.append(td(t.name), t.revoked_at ? td(reach(t)) : pin, t.revoked_at ? td(t.scopes ? t.scopes.join(', ') : 'reads only') : mints, t.revoked_at ? td(writesText) : writes, td(day(t.created_at)),
+    // Operator: may change minted keys' groups with tumbler scope; toggled in place.
+    const operator = btn(t.operator ? 'yes' : 'no', async () => {
+      if (!confirm((t.operator ? 'Stop ' + t.name + ' changing' : 'Let ' + t.name + ' add and remove') + ' permission groups on the minted keys it reads (tumbler scope)?')) return;
+      try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ operator: !t.operator }) }); } catch (err) { alert(err.message); }
+      load(); });
+    operator.firstChild.title = 'Toggle operator';
+    tr.append(td(t.name), t.revoked_at ? td(reach(t)) : pin, t.revoked_at ? td(t.scopes ? t.scopes.join(', ') : 'reads only') : mints, t.revoked_at ? td(writesText) : writes, t.revoked_at ? td(t.operator ? 'yes' : 'no') : operator, td(day(t.created_at)),
       td(t.expires_at ? (expired ? 'expired ' : '') + t.expires_at.slice(0, 16).replace('T', ' ') + ' UTC' : 'never', expired ? 'muted' : ''),
       t.revoked_at ? td('revoked ' + day(t.revoked_at), 'muted') : btn('Revoke', async () => { if (confirm('Revoke ' + t.name + '?')) { await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }); load(); } }));
     return tr; }));
@@ -172,7 +179,7 @@ document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); 
   const scopes = String(f.get('scopes')).split(',').map(s => s.trim()).filter(Boolean);
   const writes = String(f.get('writes')).split(',').map(s => s.trim()).filter(Boolean);
   const hours = Number(f.get('hours')), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
-  try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects, scopes, writes, expires_at }) });
+  try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects, scopes, writes, operator: f.get('operator') === 'on', expires_at }) });
     const once = document.getElementById('once'); once.style.display = 'block';
     const copy = (label, text) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
       b.onclick = () => navigator.clipboard.writeText(text).then(() => { b.textContent = 'Copied'; setTimeout(() => b.textContent = label, 1500); }, () => alert('Copy failed; select the token and copy it by hand.')); return b; };

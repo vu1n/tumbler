@@ -30,6 +30,14 @@
 //                                    -p, TUMBLER_PROJECT or .tumbler, else the token's one project
 //   tumbler rm NAME [-p project | --global]
 //                                    delete a static key, within the token's writes; same default scope
+//   tumbler scope NAME [-p project] [--json]
+//                                    a minted key's scopes and their permission groups (names/ids)
+//   tumbler scope add|rm NAME SCOPE GROUP... [-p project]
+//                                    add or remove permission groups on a minted key's scope (a new
+//                                    scope name makes a new scope), for an operator token (set in
+//                                    /admin). Only groups added this way can be removed; token,
+//                                    member and billing groups are refused. Children holding the old
+//                                    groups are ended, so the next run mints with the new ones
 //   tumbler admin <command>          what /admin does (keys, tokens, pins, scopes, moves, grants,
 //                                    audit), signed in through Cloudflare Access: `tumbler admin
 //                                    login` runs cloudflared. `tumbler admin` lists the commands
@@ -693,14 +701,44 @@ async function sshKeygen(args) {
   await save(f, key.private, "", `\ntumbler: ${f.name} may or may not have been saved; the public key above matches it only if it was. Run this again before installing it anywhere.`);
 }
 
+// --- scope: an operator token's changes to a minted key's scopes --------------------------------
+
+const SCOPE_USAGE = "usage: tumbler scope NAME [-p project] [--json] | tumbler scope add|rm NAME SCOPE GROUP... [-p project]";
+
+async function scope(args) {
+  let project = process.env.TUMBLER_PROJECT || manifest().project || null, json = false;
+  const pos = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "-p" || a === "--project") project = args[++i] ?? die(`${a} needs a value\n${SCOPE_USAGE}`, 2);
+    else if (a === "--json") json = true;
+    else if (a.startsWith("-")) die(`unexpected ${a}\n${SCOPE_USAGE}`, 2);
+    else pos.push(a);
+  }
+  const verb = pos[0] === "add" || pos[0] === "rm" ? pos.shift() : null;
+  const [name, scopeName, ...groups] = pos;
+  if (!name || (verb ? !scopeName || !groups.length : pos.length > 1)) die(SCOPE_USAGE, 2);
+  const path = `/v1/mint/${encodeURIComponent(name)}${project ? `?project=${encodeURIComponent(project)}` : ""}`;
+  let r;
+  try { r = verb ? await brokerCall("PATCH", path, { scope: scopeName, [verb === "add" ? "add" : "remove"]: groups }) : await brokerGet(path); }
+  catch (e) { die(e.message); }
+  if (verb) { try { await ask({ op: "reload" }); } catch {} } // so the next run mints with the new groups
+  if (json) return void process.stdout.write(JSON.stringify(r) + "\n");
+  if (verb) say(`${verb === "add" ? "added" : "removed"} ${groups.join(", ")} ${verb === "add" ? "to" : "from"} ${r.name} ${scopeName} (${r.scope})`);
+  const rows = Object.entries(r.scopes).map(([s, g]) => `${s}\t${[...g.base, ...g.extra.map((e) => `+${e}`)].join(", ")}`);
+  process.stdout.write(`${r.scope}/${r.name}${r.defaults ? " (follows the defaults)" : ""}\n${rows.join("\n")}\n`);
+}
+
 // --- admin: what /admin does, signed in through Cloudflare Access ---------------------------------
 
 const ADMIN_USAGE = `usage: tumbler admin <command>
   login                                   sign in through Cloudflare Access (cloudflared)
   keys | tokens | grants | audit [--json] list them (names and metadata, never values)
-  token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--expires-hours N]
+  token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off] [--expires-hours N]
                                           prints the new token once, on stdout
-  token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b]   (an empty list clears it)
+  token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off]   (an empty list clears it)
+                                          --operator on: the token may change minted keys' groups
+                                          with tumbler scope (never tokens, parents or token groups)
   token revoke NAME
   put NAME --scope S [--kind static|mint:<provider>] [--config JSON] [--from-file F | --clipboard]
       [-d description] [--skip-check]     any key, minted ones included; the value as for put
@@ -754,7 +792,7 @@ function table(rows, cols, json) {
 }
 
 const ADMIN_LISTS = {
-  keys: ["scope", "name", "kind", "checked", "rotated_at"], tokens: ["name", "projects", "scopes", "writes", "expires_at", "revoked_at"],
+  keys: ["scope", "name", "kind", "checked", "rotated_at"], tokens: ["name", "projects", "scopes", "writes", "operator", "expires_at", "revoked_at"],
   grants: ["id", "name", "caller", "project", "state", "scopes", "expires_at"], audit: ["at", "actor", "action", "project", "names"],
 };
 
@@ -776,13 +814,15 @@ async function admin(args) {
     }
     case "token": {
       const [verb, ...more] = rest;
-      const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--expires-hours": "value" });
+      const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--operator": "value", "--expires-hours": "value" });
       const [name] = f._;
       if (!name || f._.length > 1) die(ADMIN_USAGE, 2);
+      if (f["--operator"] !== undefined && !["on", "off"].includes(f["--operator"])) die("--operator takes on or off", 2);
+      const operator = f["--operator"] === undefined ? {} : { operator: f["--operator"] === "on" };
       if (verb === "create") {
         const hours = f["--expires-hours"] === undefined ? null : Number(f["--expires-hours"]);
         if (hours !== null && !(hours > 0)) die("--expires-hours takes a number of hours", 2);
-        const r = await adminCall("POST", "tokens", { name, projects: names(f["--pin"] ?? ""), scopes: names(f["--scopes"] ?? ""), writes: names(f["--writes"] ?? ""),
+        const r = await adminCall("POST", "tokens", { name, projects: names(f["--pin"] ?? ""), scopes: names(f["--scopes"] ?? ""), writes: names(f["--writes"] ?? ""), ...operator,
           expires_at: hours === null ? null : new Date(Date.now() + hours * 3600_000).toISOString() });
         process.stdout.write(r.token + "\n");
         return say(`created token ${name}; it is shown once, so store it now (as a network secret, or TUMBLER_TOKEN)`);
@@ -790,7 +830,8 @@ async function admin(args) {
       if (verb === "edit") {
         const edit = {};
         for (const [flag, field] of [["--pin", "projects"], ["--scopes", "scopes"], ["--writes", "writes"]]) if (f[flag] !== undefined) edit[field] = names(f[flag]);
-        if (!Object.keys(edit).length) die("name what to change: --pin, --scopes or --writes", 2);
+        Object.assign(edit, operator);
+        if (!Object.keys(edit).length) die("name what to change: --pin, --scopes, --writes or --operator", 2);
         await adminCall("PATCH", `tokens/${encodeURIComponent(name)}`, edit);
         return say(`updated token ${name}`);
       }
@@ -875,8 +916,9 @@ switch (cmd) {
   case "put": await put(args); break;
   case "rm": await rm(args); break;
   case "ssh-keygen": await sshKeygen(args); break;
+  case "scope": await scope(args); break;
   case "admin": await admin(args); break;
   case "reload": try { await ask({ op: "reload" }); } catch {} process.stdout.write("cache cleared\n"); break;
   case "shim": shim(args); break;
-  default: die("usage: tumbler run|auto|keys|whoami|put|rm|admin|ssh-keygen|reload|shim  (see the header of this file)", 2);
+  default: die("usage: tumbler run|auto|keys|whoami|put|rm|scope|admin|ssh-keygen|reload|shim  (see the header of this file)", 2);
 }

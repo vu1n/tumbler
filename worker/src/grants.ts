@@ -19,7 +19,11 @@ export const errorClass = (e: unknown) => e instanceof Error && KNOWN_ERRORS.has
 export { autoApproved };
 
 export interface Minted { id: string; value: string }
-export interface MintConfig { ttl_minutes?: number; start?: string[]; scopes?: Record<string, unknown>; [k: string]: unknown }
+// `extra`: permission groups an operator token added on top of `scopes` (`tumbler scope add`), by
+// the provider's names; a scope only there is a new scope. The admin's `scopes` stay the base.
+export interface MintConfig { ttl_minutes?: number; start?: string[]; scopes?: Record<string, unknown>; extra?: Record<string, string[]>; [k: string]: unknown }
+// Every scope a mint key's config can grant: its own and the ones operators added.
+export const scopeNames = (config: MintConfig) => [...new Set([...Object.keys(config.scopes ?? {}), ...Object.keys(config.extra ?? {})])];
 export interface Provider {
   validate(config: MintConfig): void;
   mint(parent: string, config: MintConfig, scopes: string[], expiresAt: Date, label: string): Promise<Minted>;
@@ -30,6 +34,9 @@ export interface Provider {
   // defaults (`setting` reads a static key the admin saved, such as the account id) and resolves
   // anything named for people into the ids the provider needs.
   prepare?(parent: string, config: MintConfig, setting: (name: string) => Promise<string | undefined>): Promise<MintConfig>;
+  // The provider's own spelling of each group an operator adds, after checking it exists and may be
+  // delegated. Optional: without it a key's scopes can't be changed from the CLI.
+  groups?(parent: string, config: MintConfig, names: string[]): Promise<string[]>;
 }
 
 export const DEFAULT_TTL_MIN = 30, MIN_TTL_MIN = 15, MAX_TTL_MIN = 24 * 60;
@@ -71,6 +78,13 @@ export class Grants {
     return p.prepare ? p.prepare(parent, config, setting) : config;
   }
 
+  // The provider's spelling of groups an operator adds, refused when it can't delegate them.
+  async groups(kind: string, parent: string, config: MintConfig, names: string[]) {
+    const p = this.provider(kind);
+    if (!p.groups) throw new Refused(400, `${kind} keys' scopes can't be changed from the CLI`);
+    return p.groups(parent, config, names);
+  }
+
   // Checks a mint key's config before it is saved: known scopes, a sane TTL, start scopes that exist.
   validate(kind: string, config: MintConfig) {
     const p = this.provider(kind);
@@ -78,6 +92,11 @@ export class Grants {
     if (!scopes.length) throw new Refused(400, "config.scopes names no scopes");
     for (const s of scopes) if (!scopeName(s) || s === "*") throw new Refused(400, `config.scopes: invalid scope name ${JSON.stringify(s)}; no whitespace or bare *, at most 128 characters`);
     for (const s of config.start ?? []) if (!scopes.includes(s)) throw new Refused(400, `start scope ${s} is not in config.scopes`);
+    if (config.extra !== undefined && (typeof config.extra !== "object" || config.extra === null || Array.isArray(config.extra))) throw new Refused(400, "config.extra must map scope names to group names");
+    for (const [s, groups] of Object.entries(config.extra ?? {})) {
+      if (!scopeName(s) || s === "*") throw new Refused(400, `config.extra: invalid scope name ${JSON.stringify(s)}`);
+      if (!Array.isArray(groups) || !groups.length || !groups.every((g) => typeof g === "string" && g.trim())) throw new Refused(400, `config.extra.${s} must list group names`);
+    }
     const ttl = config.ttl_minutes ?? DEFAULT_TTL_MIN;
     if (!(ttl >= MIN_TTL_MIN && ttl <= MAX_TTL_MIN)) throw new Refused(400, `ttl_minutes must be ${MIN_TTL_MIN}..${MAX_TTL_MIN}`);
     p.validate(config);
@@ -98,7 +117,7 @@ export class Grants {
 
   // Refuses a step-up the key can't serve (400) or the token may not hold (403), before anything mints.
   checkStepUp(caller: Caller, row: KeyRow, scopes: string[]) {
-    const known = Object.keys(this.config(row).scopes ?? {});
+    const known = scopeNames(this.config(row));
     for (const s of scopes) if (!known.includes(s)) throw new Refused(400, `${row.name} has no scope ${s}`);
     const outside = scopes.filter((s) => !allowedBy(caller.scopes ?? null, s));
     if (outside.length) throw new Refused(403, `${row.name}: token ${caller.name} may not hold ${outside.join(", ")}. Refused; retrying won't help: ask a human to add it to this token's scopes in /admin`);
