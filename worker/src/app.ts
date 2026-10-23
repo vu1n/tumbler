@@ -69,10 +69,15 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       const { project, row } = await catalog.rowFor(caller, url.searchParams.get("project"), name);
       if (row.kind === "static") continue;
       const known = Object.keys(grants.config(row).scopes ?? {}), mine = scopes.filter((s) => known.includes(s));
-      if (mine.length) out.push(grantView(await grants.stepUp(caller, project, row, mine)));
+      if (!mine.length) continue;
+      const g = await grants.stepUp(caller, project, row, mine);
+      // Nothing waiting, yet without a scope asked for: the request was denied (an active grant
+      // keeps its narrower child), so the caller must not run as if it had been granted.
+      const denied = !g.requested && !mine.every((s) => g.scopes.includes(s));
+      out.push({ ...grantView(g), ...(denied ? { denied } : {}) });
     }
     if (!out.length) return json({ error: `no minted key in this set has scope ${scopes.join(", ")}` }, 400);
-    return json({ grants: out });
+    return json({ grants: out, approve_in: grants.approver?.where ?? "/admin" });
   }
   // Run each key's check on its current value: {"keys": [...]} (empty: every key the caller reads).
   // Statuses only, never a value; `tumbler run` calls this when a command fails.

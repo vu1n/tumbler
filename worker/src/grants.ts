@@ -48,6 +48,15 @@ export interface GrantRow extends GrantState {
   id: string; caller: string; project: string | null; key_scope: string; key_rev: string; name: string; created_at: string; updated_at: string;
 }
 export interface Approval { id: string; caller: string; key_scope: string; name: string; scopes: string[]; approved_by: string; grant_id: string | null; created_at: string; until: string }
+// Somewhere else a person can approve a waiting grant (asks.ts: Needs you in Huddles). settle()
+// applies an answer already given, or asks; it never approves on its own.
+export interface Approver {
+  where: string;
+  settle(g: GrantRow): Promise<GrantRow | null>;
+  sweep(): Promise<void>;
+  // A decision made elsewhere (/admin): take back the grant's open ask, so its answer can't land later.
+  decided(grantId: string): Promise<void>;
+}
 // What the caller's live standing approvals on a key cover, and which ones (for the audit row).
 interface Standing { ids: string[]; scopes: string[] }
 
@@ -57,7 +66,7 @@ const grantScope = (id: string) => `grant:${id}`; // AAD for the sealed child, a
 const LIVE = "state IN ('pending', 'active')";
 
 export class Grants {
-  catalog: Catalog; providers: Record<string, Provider>; now: () => Date;
+  catalog: Catalog; providers: Record<string, Provider>; now: () => Date; approver?: Approver;
   constructor(catalog: Catalog, providers: Record<string, Provider>, now = () => new Date()) {
     this.catalog = catalog; this.providers = providers; this.now = now;
   }
@@ -92,6 +101,8 @@ export class Grants {
     if (!g) g = await this.open(caller, project, row, this.config(row).start ?? []);
     // Approved for a while since it was asked (perhaps on another grant): mint without asking again.
     if (g.requested) g = await this.byStanding(caller, g, row) ?? g;
+    if (g.requested && this.approver) g = await this.approver.settle(g) ?? g;
+    if (!isLive(g.state)) throw new Refused(403, `${row.name}: the request was denied; run again to ask again`);
     if (g.state !== "active") {
       // Another request's read grant, claimed but still minting: not a wait for approval.
       if ((g.requested ?? []).every(autoApproved) && !await this.blocked(caller, row)) throw new Refused(409, `${row.name} is being minted by another request; run again`);
@@ -102,7 +113,13 @@ export class Grants {
 
   // Ask for more scopes on a mint key. Read scopes are added at once (a wider child is minted);
   // anything else is recorded as `requested` and waits for an admin while the old child keeps working.
+  // A request still waiting goes to the approver too (asks it, or applies an answer already given).
   async stepUp(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
+    const g = await this.stepUpOnly(caller, project, row, scopes);
+    return g.requested && this.approver ? await this.approver.settle(g) ?? g : g;
+  }
+
+  async stepUpOnly(caller: Caller, project: string | null, row: KeyRow, scopes: string[]): Promise<GrantRow> {
     const config = this.config(row), known = Object.keys(config.scopes ?? {});
     for (const s of scopes) if (!known.includes(s)) throw new Refused(400, `${row.name} has no scope ${s}`);
     const g = await this.current(caller, project, row);
@@ -120,9 +137,13 @@ export class Grants {
   // between the page loading and the click.
   // `forMinutes` > 0 also lets the same caller hold these scopes on this key for that long (capped
   // at MAX_STANDING_MIN): a grant that expires, or one on another project, gets them again unasked.
-  async decide(id: string, approve: boolean, who: string, expected?: string[], forMinutes = 0): Promise<GrantRow> {
+  // `requestedAt` (from an ask): the request generation the answer was given for. A request denied
+  // and asked again carries the same scopes but a new requested_at, so an answer to the old one
+  // decides nothing; apply()'s compare-and-set holds requested_at, so this is checked atomically.
+  async decide(id: string, approve: boolean, who: string, expected?: string[], forMinutes = 0, requestedAt?: string): Promise<GrantRow> {
     const g = await this.get(id);
     if (!g || !isLive(g.state) || !g.requested) throw new Refused(404, `no grant ${id} waiting for a decision`);
+    if (requestedAt !== undefined && g.requested_at !== requestedAt) throw new Refused(409, `grant ${id} was asked again since; decide the new request`);
     if (approve) {
       if (!expected || [...expected].sort().join("+") !== g.requested.join("+")) {
         throw new Refused(409, `grant ${id} now asks for ${g.requested.join(", ")}; reload and decide again`);
@@ -135,6 +156,7 @@ export class Grants {
       }
       const done = await this.mintFor(g, row, g.requested, who);
       if (forMinutes > 0) await this.stand(done, row, who, forMinutes);
+      await this.decidedElsewhere(id, who);
       return done;
     }
     // A compare-and-set on the state read above, so a deny racing a revoke can't overwrite it (and
@@ -142,7 +164,13 @@ export class Grants {
     const done = await this.apply(g, { type: "deny", who });
     if (!done) throw new Refused(409, `grant ${id} changed meanwhile; reload and decide again`);
     await this.catalog.audit(who, "grant-deny", g.project, [`${g.name}:${g.requested.join("+")}`]);
+    await this.decidedElsewhere(id, who);
     return done;
+  }
+
+  async decidedElsewhere(id: string, who: string) {
+    if (who.startsWith("huddles:") || !this.approver) return;
+    await this.approver.decided(id).catch((e) => console.error("tumbler: taking back the ask failed", errorClass(e)));
   }
 
   async revoke(id: string, who: string) {
@@ -205,6 +233,7 @@ export class Grants {
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
     await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
     await this.retryRevokes();
+    await this.approver?.sweep(); // answers given in Huddles since, before anything lapses
     // Nobody answered: a pending grant lapses to denied, and a waiting step-up is dropped.
     const stale = new Date(this.now().getTime() - PENDING_TTL_MS).toISOString();
     const { results: unanswered } = await this.db.prepare(`SELECT * FROM grants WHERE ${LIVE} AND requested IS NOT NULL AND requested_at <= ?`)
@@ -280,7 +309,7 @@ export class Grants {
   config(row: KeyRow): MintConfig { return JSON.parse(row.config || "{}"); }
   fresh(g: GrantRow) { return !!g.expires_at && Date.parse(g.expires_at) - this.now().getTime() > REUSE_MARGIN_MS; }
   waiting(g: GrantRow) {
-    return new Refused(409, `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in /admin (grant ${g.id}); run again once approved`);
+    return new Refused(409, `${g.name} needs approval for ${(g.requested ?? []).join(", ")} in ${this.approver?.where ?? "/admin"} (grant ${g.id}); run again once approved`);
   }
 
   async get(id: string) {
@@ -496,8 +525,8 @@ export class Grants {
     const cols = Object.keys(set);
     const [where, binds] = extra.live
       ? [`id = ? AND ${LIVE}`, [g.id]]
-      : [`id = ? AND state = ? AND requested IS ? AND child_id IS ?${extra.guard ? ` AND ${extra.guard}` : ""}`,
-        [g.id, g.state, asJson(g.requested), g.child_id, ...(extra.binds ?? [])]];
+      : [`id = ? AND state = ? AND requested IS ? AND requested_at IS ? AND child_id IS ?${extra.guard ? ` AND ${extra.guard}` : ""}`,
+        [g.id, g.state, asJson(g.requested), g.requested_at, g.child_id, ...(extra.binds ?? [])]];
     // Ending a live grant records its child's delete in the same write, so a crash before the
     // provider call still leaves it for sweep() to retry; revokeChild() clears the row on success.
     const intent = extra.live ? [this.db.prepare(
