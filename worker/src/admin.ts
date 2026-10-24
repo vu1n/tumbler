@@ -1,190 +1,362 @@
 // admin.ts — the admin page. Values are write-only here: the page can set or rotate one, never read it.
 // Grants show state and scopes only, never a minted child.
 // ADMIN_HTML is a template literal: a backslash in the script must be doubled (\\n, \\'), or the
-// served script stops parsing. test/admin.test.ts parses it. The forms are method="post" so that if
-// the script ever fails, a value is never put in a URL.
+// served script stops parsing, and the script must not use backticks or a dollar-brace. test/admin.test.ts
+// parses it. The forms are method="post" so that if the script ever fails, a value is never put in a URL.
+// The visual system (tokens, button roles, the phone layout) is recorded in DESIGN.md at the repo root.
 export const ADMIN_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tumbler</title>
 <style>
-:root{--bg:#fafaf9;--fg:#1c1917;--muted:#78716c;--line:#e7e5e4;--accent:#0f766e;--warn:#b45309}
-@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--fg:#f5f5f4;--muted:#a8a29e;--line:#44403c;--accent:#2dd4bf;--warn:#f59e0b}}
+:root{color-scheme:light dark;--bg:#fafaf9;--fg:#1c1917;--muted:#78716c;--line:#e7e5e4;--edge:#8f8984;--accent:#0f766e;--on-accent:#fafaf9;--warn:#b45309;--danger:#b91c1c}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1917;--fg:#f5f5f4;--muted:#a8a29e;--line:#44403c;--edge:#78716c;--accent:#2dd4bf;--on-accent:#1c1917;--warn:#f59e0b;--danger:#f87171}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+html{accent-color:var(--accent);caret-color:var(--accent);scrollbar-color:var(--edge) transparent}
+::selection{background:color-mix(in srgb,var(--accent) 28%,transparent)}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}
-main{max-width:960px;margin:0 auto;padding:16px}
-h1{font-size:20px}h2{font-size:16px;margin-top:32px}
-table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--muted);font-weight:500}.muted{color:var(--muted)}.warn{color:var(--warn)}
-textarea{font:12px/1.4 ui-monospace,monospace;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;width:100%;min-height:72px;display:none}
-select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit}
-form{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}input{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;min-width:0}
-button{font:inherit;padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);cursor:pointer}
-code{font-family:ui-monospace,monospace;word-break:break-all}.wrap{overflow-x:auto}
-textarea.env{display:block;min-height:120px}
-.chips{display:flex;gap:4px;flex-wrap:wrap;align-items:center}.chips button{padding:2px 10px;border-radius:999px;font-size:12px}
-#once{padding:12px;border:1px solid var(--warn);border-radius:6px;display:none}
+main{max-width:1120px;margin:0 auto;padding:16px 16px 96px}
+h1{font-size:20px;margin:8px 0 4px}h2{font-size:16px;margin:40px 0 4px;scroll-margin-top:16px}
+p{max-width:60ch;margin:4px 0 12px;text-wrap:pretty}
+a{color:var(--accent);text-underline-offset:3px}
+code,.mono{font-family:ui-monospace,monospace}code{font-size:13px}
+.muted{color:var(--muted)}.warn{color:var(--warn)}.danger{color:var(--danger)}.nw{white-space:nowrap;font-variant-numeric:tabular-nums}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+nav{display:flex;flex-wrap:wrap;gap:4px 20px;margin:12px 0 0;padding:8px 0;border-block:1px solid var(--line)}
+nav a{text-decoration:none}nav a:hover{text-decoration:underline}nav span{color:var(--muted)}
+table{width:100%;border-collapse:collapse}
+td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:500}
+td.acts{white-space:nowrap;text-align:right;padding-block:4px}
+tr.off td{color:var(--muted)}tr.empty td{color:var(--muted);padding:16px 8px}
+.wrap{overflow-x:auto}
+button{font:inherit;padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);cursor:pointer;transition:background-color .15s ease-out,color .15s ease-out}
+button:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+button.primary{background:var(--accent);color:var(--on-accent)}
+button.primary:hover{background:color-mix(in srgb,var(--accent) 85%,var(--fg))}
+button.quiet{border-color:transparent;padding-inline:8px}
+button.del{border-color:transparent;padding-inline:8px;color:var(--muted)}
+button.del:hover,button.del:focus-visible{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,transparent)}
+button:disabled{opacity:.55;cursor:not-allowed}button[aria-busy=true]{cursor:progress}
+input,select,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--edge);border-radius:6px;padding:6px 8px;min-width:0;width:100%}
+input[readonly]{border-style:dashed}
+input[type=checkbox]{width:16px;height:16px;margin:0}
+textarea{font:12px/1.4 ui-monospace,monospace;min-height:96px;resize:vertical}
+::placeholder{color:var(--muted);opacity:1}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input:focus-visible,select:focus-visible,textarea:focus-visible{outline-offset:0;border-color:var(--accent)}
+details.act{border-top:1px solid var(--line)}details.act:last-of-type{border-bottom:1px solid var(--line)}
+details.act+details.act{margin-top:-1px}.acts-group{margin-top:16px}
+summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}summary::marker{color:var(--accent)}
+.fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin:4px 0 16px;align-items:start}
+.f{display:flex;flex-direction:column;gap:4px}.f>label{font-weight:500}.full{grid-column:1/-1}
+.hint{color:var(--muted);font-size:13px;max-width:62ch}
+.check{flex-direction:row;align-items:center;gap:8px;padding-top:24px}.check label{font-weight:500}
+.bar{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chips button{padding:2px 10px;border-radius:999px;font-size:12px}
+.chips button[aria-pressed=true]{background:var(--accent);color:var(--on-accent)}
+.note{grid-column:1/-1;margin:0}
+.notice{border:1px solid var(--warn);border-radius:6px;padding:8px 12px;color:var(--warn);max-width:none}
+#once{border:1px solid var(--warn);border-radius:6px;padding:12px;margin:12px 0}
+#once p{margin:0 0 8px}#once input{font:13px ui-monospace,monospace;margin-bottom:8px}
+#status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);width:min(600px,calc(100% - 32px));display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 8px 8px 12px;background:var(--bg);border:1px solid var(--edge);border-radius:6px}
+#status.error{border-color:var(--danger);color:var(--danger)}
+@media (pointer:coarse){button,summary,input,select{min-height:44px}.chips button{min-height:40px}}
+@media (min-width:720px){.w2{grid-column:span 2}}
+@media (max-width:640px){
+  table.rec thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  table.rec tr{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;padding:12px 0;border-bottom:1px solid var(--line)}
+  table.rec td{display:block;padding:0;border:0;overflow-wrap:anywhere}
+  table.rec td::before{content:attr(data-label);display:block;color:var(--muted);font-size:12px}
+  table.rec td:first-child,table.rec td.acts,table.rec tr.empty td,table.rec tr.editor td{grid-column:1/-1}
+  table.rec td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}
+  table.rec td:empty{display:none}
+  table.rec td.acts{display:flex;gap:8px;text-align:left;margin-left:-8px}
+  table.log tr{display:flex;flex-wrap:wrap;gap:2px 10px;padding:10px 0;border-bottom:1px solid var(--line)}
+  table.log thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+  table.log td{display:inline;padding:0;border:0;overflow-wrap:anywhere}table.log td:nth-child(3){font-weight:600;order:-1}
+  table.log td:last-child{flex-basis:100%}
+}
 </style></head><body><main>
 <h1>Tumbler</h1>
-<p class="muted">One store for env vars and keys. Values are never shown after they're saved. A key with a check is tested before a new value is saved; if the test fails, nothing is saved.</p>
+<p class="muted">One store for env vars and keys. Values are never shown after they're saved. A key with a check is tested before a new value is saved; if the test fails, nothing is saved. Sessions work through the CLI (<code>tumbler run</code>, <code>tumbler put</code>); this page is for reviewing what's stored and for what only you may do.</p>
+<nav aria-label="Sections"><a href="#s-keys">Keys <span id="nKeys"></span></a><a href="#s-grants">Grants <span id="nGrants"></span></a><a href="#s-tokens">Tokens <span id="nTokens"></span></a><a href="#s-audit">Audit</a></nav>
 
-<h2>Keys</h2>
-<div class="wrap"><table><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Checked</th><th>Description</th><th>Rotated</th><th>Expires</th><th></th></tr></thead><tbody id="keys"></tbody></table></div>
-<form id="putKey" method="post">
-  <input name="name" placeholder="NAME" required pattern="[A-Z_][A-Z0-9_]*">
-  <input name="scope" placeholder="global, project, or project/dev|staging|prod" value="global" required>
-  <select name="kind" title="static: the value is handed out. mint: the value is a parent token that mints short-lived children.">
-    <option value="static">static</option><option value="mint:cloudflare">mint:cloudflare</option>
-  </select>
-  <input name="value" type="password" placeholder="value (parent token for mint)" required autocomplete="off">
-  <input name="description" placeholder="what it's for">
-  <input name="expires_at" type="date" title="expires">
-  <button>Save</button>
-  <textarea name="config" placeholder='Optional. Left empty: workers:read (Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize read and analytics; granted on request) and workers:write (the same, write, plus Workers Tail; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.'></textarea>
+<section aria-labelledby="s-keys"><h2 id="s-keys">Keys</h2>
+<div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Check</th><th>Description</th><th>Rotated</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="keys"></tbody></table></div>
+<div class="acts-group">
+<details class="act" id="addKey"><summary>Add a key or replace a value</summary>
+<form id="putKey" method="post" class="fields">
+  <div class="f"><label for="kName">Name</label><input id="kName" name="name" required pattern="[A-Z_][A-Z0-9_]*" title="UPPER_SNAKE_CASE, like OPENAI_API_KEY" placeholder="OPENAI_API_KEY" autocomplete="off" spellcheck="false"></div>
+  <div class="f"><label for="kScope">Scope</label><input id="kScope" name="scope" value="global" required autocomplete="off" spellcheck="false" aria-describedby="kScopeHint"><span class="hint" id="kScopeHint">global, a project, or project/dev, staging or prod</span></div>
+  <div class="f"><label for="kKind">Kind</label><select id="kKind" name="kind" aria-describedby="kKindHint"><option value="static">static</option><option value="mint:cloudflare">mint:cloudflare</option></select><span class="hint" id="kKindHint">static: the value is handed out. mint: a parent that mints short-lived tokens.</span></div>
+  <div class="f w2"><label for="kValue">Value</label><input id="kValue" name="value" type="password" required autocomplete="off" aria-describedby="kValueHint"><span class="hint" id="kValueHint">Write-only: it can't be shown again after saving.</span></div>
+  <div class="f w2"><label for="kDesc">What it's for</label><input id="kDesc" name="description" autocomplete="off"></div>
+  <div class="f"><label for="kExp">Expires</label><input id="kExp" name="expires_at" type="date" aria-describedby="kExpHint"><span class="hint" id="kExpHint">Optional. Turns amber a week before.</span></div>
+  <div class="f full"><label for="kConfig">Config <span class="muted">(optional)</span></label><textarea id="kConfig" name="config" spellcheck="false" autocomplete="off" aria-describedby="kConfigHint"></textarea>
+    <span class="hint" id="kConfigHint"><span data-for="static">A check that runs before a new value is saved, so a bad value saves nothing: {"check": "openai"} (or anthropic, github, stripe, cloudflare), or {"url": "https://…", "header": "authorization", "prefix": "Bearer "}.</span><span data-for="mint">Left empty: workers:read (Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize read and analytics; granted on request) and workers:write (the same, write, plus Workers Tail; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.</span></span></div>
+  <p class="note hint" id="putNote" aria-live="polite"></p>
+  <div class="bar"><button class="primary" id="putSave">Save</button><button type="button" class="quiet" id="putCancel">Cancel</button></div>
+</form></details>
+<details class="act" id="importBox"><summary>Import a .env</summary>
+<form id="importEnv" method="post" class="fields">
+  <div class="f full"><label for="iText">.env text</label><textarea id="iText" name="text" required spellcheck="false" autocomplete="off" aria-describedby="iTextHint" placeholder="OPENAI_API_KEY=sk-...&#10;export AWS_REGION=&quot;us-east-1&quot;  # comments are fine"></textarea><span class="hint" id="iTextHint">Each line becomes a static key. You'll see what each line does before anything is saved; minted keys are never overwritten.</span></div>
+  <div class="f"><label for="iScope">Into scope</label><input id="iScope" name="scope" value="global" required autocomplete="off" spellcheck="false"></div>
+  <div class="bar"><button class="primary">Preview</button></div>
 </form>
+<div id="importPlan"></div></details>
+<details class="act" id="moveBox"><summary>Move a scope</summary>
+<form id="moveScope" method="post" class="fields">
+  <p class="note hint">Moves every key in a scope and repoints the token pins that name it. Minted children on the moved keys stop working at once, and a repo whose .tumbler names the old scope needs its project line changed.</p>
+  <div class="f"><label for="mFrom">From</label><input id="mFrom" name="from" placeholder="huddles-dev" required autocomplete="off" spellcheck="false"></div>
+  <div class="f"><label for="mTo">To</label><input id="mTo" name="to" placeholder="huddles/dev" required autocomplete="off" spellcheck="false"></div>
+  <div class="bar"><button class="primary">Move</button></div>
+</form></details>
+</div></section>
 
-<form id="importEnv" method="post">
-  <textarea class="env" name="text" required spellcheck="false" autocomplete="off" placeholder="Paste a .env to save many static keys at once:&#10;OPENAI_API_KEY=sk-...&#10;export AWS_REGION=&quot;us-east-1&quot;  # comments, quotes and export are fine"></textarea>
-  <input name="scope" placeholder="global, project, or project/dev|staging|prod" value="global" required>
-  <button>Preview</button>
-</form>
-<div id="importPlan"></div>
-<form id="moveScope" method="post" title="Moves every key in a scope and repoints the token pins that name it. Minted children on the moved keys are ended.">
-  <input name="from" placeholder="move scope, e.g. huddles-dev" required>
-  <input name="to" placeholder="to, e.g. huddles/dev" required>
-  <button>Move</button>
-</form>
-
-<h2>Grants</h2>
+<section aria-labelledby="s-grants"><h2 id="s-grants">Grants</h2>
 <p class="muted">Short-lived children of minted keys. Each is minted at once within its token's scopes; nothing waits for you here.</p>
-<p id="revokePending" class="warn"></p>
-<div class="wrap"><table><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Expires</th><th></th></tr></thead><tbody id="grants"></tbody></table></div>
+<p id="grantsNote" class="notice" hidden></p>
+<div class="wrap"><table class="rec"><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="grants"></tbody></table></div>
+</section>
 
-<h2>Tokens</h2>
-<div id="once"></div>
-<div class="wrap"><table><thead><tr><th>Name</th><th>Reads</th><th>May mint</th><th>May write</th><th>Operator</th><th>Created</th><th>Expires</th><th></th></tr></thead><tbody id="tokens"></tbody></table></div>
-<form id="newToken" method="post">
-  <input name="name" placeholder="token name" required>
-  <input name="projects" placeholder="huddles, huddles/prod, */dev (empty = global only)" title="A project reads its shared keys; project/env one environment (dev, staging, prod); * is every project, */env that environment of every project.">
-  <span class="chips" title="Fill in a preset"><button type="button" data-pin="*, */dev, */staging, */prod">Everything</button><button type="button" data-pin="*, */dev">All projects, dev</button><button type="button" data-pin="">Global only</button></span>
-  <input name="scopes" placeholder="may mint beyond reads: workers:write, or * (empty = reads only)" title="What this token's minted keys may carry beyond reads, without asking anyone. A scope outside this list is refused.">
-  <span class="chips" title="Fill in a preset"><button type="button" data-scopes="">Read only</button><button type="button" data-scopes="workers:write" title="workers:write: Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive and Vectorize writes, not just deploys">Read + deploy</button><button type="button" data-scopes="*" title="Every scope any key has, including ones added later">Any scope</button></span>
-  <input name="writes" placeholder="may write with tumbler put: global, huddles, */dev (empty = nothing)" title="Where this token may save static keys from the CLI (tumbler put). global must be named; a project or project/env as in a pin. Minted keys are changed here only.">
-  <label title="May add or remove permission groups on the minted keys it reads with tumbler scope, on your word in chat. Never tokens, pins, ceilings, parents or token/member/billing groups."><input name="operator" type="checkbox"> operator</label>
-  <input name="hours" type="number" min="1" step="1" placeholder="expires in hours (empty = never)" title="The token stops working then; grants it holds are ended by the next sweep.">
-  <button>Create</button>
-</form>
+<section aria-labelledby="s-tokens"><h2 id="s-tokens">Tokens</h2>
+<div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Reads</th><th>May mint</th><th>May write</th><th>Operator</th><th>Created</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="tokens"></tbody></table></div>
+<div class="acts-group">
+<details class="act" id="createBox"><summary>Create a token</summary>
+<form id="newToken" method="post" class="fields">
+  <div class="f"><label for="tName">Name</label><input id="tName" name="name" required pattern="[a-z0-9][a-z0-9._-]{0,63}" title="lowercase letters, digits, dot, dash or underscore" placeholder="pillbox-agent" autocomplete="off" spellcheck="false"></div>
+  <div class="f full"><label for="tProjects">Reads</label><input id="tProjects" name="projects" autocomplete="off" spellcheck="false" placeholder="huddles, huddles/prod, */dev" aria-describedby="tProjectsHint">
+    <span class="chips" role="group" aria-label="Reads presets"><button type="button" data-pin="*, */dev, */staging, */prod">Everything</button><button type="button" data-pin="*, */dev">All projects, dev</button><button type="button" data-pin="">Global only</button></span>
+    <span class="hint" id="tProjectsHint">A project reads its shared keys; project/env one environment (dev, staging, prod); * every project; */env that environment of every project. Empty: global keys only.</span></div>
+  <div class="f full"><label for="tScopes">May mint</label><input id="tScopes" name="scopes" autocomplete="off" spellcheck="false" placeholder="workers:write" aria-describedby="tScopesHint">
+    <span class="chips" role="group" aria-label="May mint presets"><button type="button" data-scopes="">Read only</button><button type="button" data-scopes="workers:write">Read + deploy</button><button type="button" data-scopes="*">Any scope</button></span>
+    <span class="hint" id="tScopesHint">What its minted keys may carry beyond reads, with no one asked; anything else is refused. workers:write covers Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive and Vectorize writes; * is every scope, including ones added later. Empty: reads only.</span></div>
+  <div class="f"><label for="tWrites">May write</label><input id="tWrites" name="writes" autocomplete="off" spellcheck="false" placeholder="*/dev" aria-describedby="tWritesHint"><span class="hint" id="tWritesHint">Where tumbler put may save static keys: global (only when named), a project or project/env. Empty: nothing.</span></div>
+  <div class="f"><label for="tHours">Expires in hours</label><input id="tHours" name="hours" type="number" min="1" step="1" aria-describedby="tHoursHint"><span class="hint" id="tHoursHint">Empty: never. Its grants end at the next sweep after it expires.</span></div>
+  <div class="f full check"><input id="tOperator" name="operator" type="checkbox" aria-describedby="tOperatorHint"><label for="tOperator">Operator</label><span class="hint" id="tOperatorHint">May add or remove permission groups on the minted keys it reads (tumbler scope), on your word in chat. Never tokens, pins, ceilings, parents or token, member or billing groups.</span></div>
+  <div class="bar"><button class="primary" id="tCreate">Create token</button></div>
+</form></details>
+<div id="once" tabindex="-1" hidden></div>
+</div></section>
 
-<h2>Audit</h2>
-<div class="wrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Project</th><th>Keys</th></tr></thead><tbody id="audit"></tbody></table></div>
-</main><script>
+<section aria-labelledby="s-audit"><h2 id="s-audit">Audit</h2>
+<div class="wrap"><table class="log"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Project</th><th>Names</th></tr></thead><tbody id="audit"></tbody></table></div>
+</section>
+</main>
+<div id="status" hidden><span id="statusText"></span><button type="button" class="quiet" id="statusClose">Dismiss</button></div>
+<div id="live" class="sr" aria-live="polite"></div>
+<script>
+const $ = id => document.getElementById(id);
+// A form's own properties (form.name) shadow its fields, so fields are always looked up by name.
+const F = (form, name) => form.elements.namedItem(name);
 const api = (p, o = {}) => fetch('/admin/api/' + p, { ...o, headers: { 'content-type': 'application/json', 'x-tumbler-admin': '1' } })
-  .then(async r => { const b = await r.json(); if (!r.ok) throw Object.assign(new Error(b.error || r.status), { canSkip: !!b.can_skip }); return b; });
+  .then(async r => { const b = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(b.error || 'request failed (' + r.status + ')'), { canSkip: !!b.can_skip }); return b; });
+// One place every action reports what happened: a line at the bottom of the screen, read out too.
+let statusTimer;
+const say = (text, error) => { clearTimeout(statusTimer); const live = $('live');
+  $('statusText').textContent = text; $('status').className = error ? 'error' : ''; $('status').hidden = false;
+  live.setAttribute('aria-live', error ? 'assertive' : 'polite'); live.textContent = text;
+  if (!error) statusTimer = setTimeout(() => { $('status').hidden = true; }, 6000); };
+$('statusClose').onclick = () => { $('status').hidden = true; };
+// A button stays disabled while its request runs, so nothing is sent twice.
+const busy = async (b, fn) => { if (b) { b.disabled = true; b.setAttribute('aria-busy', 'true'); }
+  try { return await fn(); } catch (err) { say(err.message, true); } finally { if (b) { b.disabled = false; b.removeAttribute('aria-busy'); } } };
+// Errors say which action failed, then what the server said.
+const fail = what => err => { throw Object.assign(new Error(what + ': ' + err.message), { canSkip: err.canSkip }); };
+const refresh = () => load().catch(err => say('Could not load the page: ' + err.message + '. Reload to try again.', true));
 const td = (t, cls) => { const e = document.createElement('td'); e.textContent = t ?? ''; if (cls) e.className = cls; return e; };
-const btn = (label, fn) => { const c = document.createElement('td'), b = document.createElement('button'); b.textContent = label; b.onclick = fn; c.append(b); return c; };
+const button = (label, fn, cls, aria) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+  if (cls) b.className = cls; if (aria) b.setAttribute('aria-label', aria); b.onclick = () => busy(b, fn); return b; };
+const acts = (...bs) => { const c = document.createElement('td'); c.className = 'acts'; c.append(...bs); return c; };
+// A date, then how far off it is; neither part breaks mid-value.
+const when = (main, rel, cls) => { const c = document.createElement('td'), v = document.createElement('span'), a = document.createElement('span'); a.className = 'nw'; a.textContent = main; v.append(a);
+  if (rel) { const b = document.createElement('span'); b.className = 'nw'; b.textContent = rel; v.append(', ', b); } c.append(v); if (cls) c.className = cls; return c; };
+const day = s => s ? s.slice(0, 10) : '';
+const stamp = s => s ? s.slice(0, 16).replace('T', ' ') + ' UTC' : '';
+const until = s => { const ms = Date.parse(s) - Date.now(), h = Math.round(ms / 36e5); return h < 48 ? 'in ' + h + ' h' : 'in ' + Math.round(ms / 864e5) + ' days'; };
+const soon = s => s && Date.parse(s) < Date.now() + 7 * 864e5;
+const past = s => s && Date.parse(s) <= Date.now();
+// Rows carry their column names, so a phone shows each row as a labelled record.
+const fill = (id, rows, empty) => { const body = $(id), heads = [...body.closest('table').querySelectorAll('thead th')].map(th => th.textContent);
+  if (!rows.length) { const tr = document.createElement('tr'), c = td(empty); tr.className = 'empty'; c.colSpan = heads.length; tr.append(c); body.replaceChildren(tr); return; }
+  for (const tr of rows) [...tr.children].forEach((c, i) => { if (heads[i]) c.dataset.label = heads[i]; });
+  body.replaceChildren(...rows); };
+const row = (cells, cls) => { const tr = document.createElement('tr'); if (cls) tr.className = cls; tr.append(...cells); return tr; };
 // A pin in words: each project (or all of them) with what it reads, shared keys and environments.
 const reach = t => { if (!t.projects) return 'global only'; const by = new Map();
   for (const p of t.projects) { const [proj, env] = p.split('/'), k = proj === '*' ? 'all projects' : proj; by.set(k, [...(by.get(k) ?? []), env ?? 'shared']); }
   return [...by].map(([k, v]) => k + ' (' + v.join(', ') + ')').join(', '); };
-const day = s => s ? s.slice(0, 10) : '';
-const stale = s => s && Date.parse(s) < Date.now() + 7 * 864e5;
+const checkText = k => { let c = {}; try { c = JSON.parse(k.config || '{}'); } catch (err) { c = {}; }
+  if (k.kind !== 'static') return k.checked ? 'parent passed' : 'none';
+  if (!c.check) return 'none';
+  return (typeof c.check === 'string' ? c.check : 'custom') + (k.checked ? ', passed' : ', saved unchecked'); };
+let KEYS = [];
+
 async function load() {
-  const [{ keys }, { tokens }, { audit }, { grants, revoke_pending }] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(() => ({ grants: [] }))]);
-  document.getElementById('revokePending').textContent = revoke_pending
-    ? revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
-  document.getElementById('keys').replaceChildren(...keys.map(k => { const tr = document.createElement('tr');
-    tr.append(td(k.name), td(k.scope), td(k.kind), td(k.checked ? 'yes' : 'no', k.checked ? '' : 'muted'), td(k.description, 'muted'), td(day(k.rotated_at)), td(day(k.expires_at), stale(k.expires_at) ? 'warn' : ''),
-      btn('Delete', async () => { if (confirm('Delete ' + k.scope + '/' + k.name + '?')) { await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }); load(); } }));
-    return tr; }));
-  document.getElementById('grants').replaceChildren(...grants.map(g => { const tr = document.createElement('tr'), live = g.state === 'active' || g.state === 'pending';
-    tr.append(td(g.name), td(g.caller), td(g.project ?? 'global'), td(g.state), td(g.scopes.join(', ')), td((g.expires_at ?? '').replace('T', ' ').slice(0, 16)),
-      live ? btn('Revoke', async () => { if (!confirm('Revoke ' + g.name + ' for ' + g.caller + '? This child stops working now; the next run by its caller mints a new one within the scopes of that token. To cut the caller off, revoke its token or narrow its scopes.')) return;
-        try { await api('grants/' + g.id, { method: 'DELETE' }); } catch (err) { alert(err.message); } load(); }) : td(''));
-    return tr; }));
-  document.getElementById('tokens').replaceChildren(...tokens.map(t => { const tr = document.createElement('tr');
-    const expired = t.expires_at && Date.parse(t.expires_at) <= Date.now();
-    // A pin is edited in place, so reaching one more project never means a new token.
-    const pin = btn(reach(t), async () => {
-      const next = prompt('What ' + t.name + ' reads, comma-separated (empty = global only): a project (its shared keys), project/env (dev, staging, prod), * for every project, */env for that environment of every project.', (t.projects ?? []).join(', '));
-      if (next === null) return;
-      try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ projects: next.split(',').map(s => s.trim()).filter(Boolean) }) }); } catch (err) { alert(err.message); }
-      load(); });
-    pin.firstChild.title = 'Edit pin';
-    // Scopes are edited in place too; narrowing them ends the children holding what they no longer allow.
-    const mints = btn(t.scopes ? t.scopes.join(', ') : 'reads only', async () => {
-      const next = prompt('What ' + t.name + ' may mint beyond reads, comma-separated: scope names such as workers:write, or * for any (empty = reads only).', (t.scopes ?? []).join(', '));
-      if (next === null) return;
-      try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ scopes: next.split(',').map(s => s.trim()).filter(Boolean) }) }); } catch (err) { alert(err.message); }
-      load(); });
-    mints.firstChild.title = 'Edit scopes';
-    const writesText = t.writes ? t.writes.join(', ') : 'nothing';
-    const writes = btn(writesText, async () => {
-      const next = prompt('Where ' + t.name + ' may save static keys with tumbler put, comma-separated: global, a project, project/env, * or */env (empty = nothing).', (t.writes ?? []).join(', '));
-      if (next === null) return;
-      try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ writes: next.split(',').map(s => s.trim()).filter(Boolean) }) }); } catch (err) { alert(err.message); }
-      load(); });
-    writes.firstChild.title = 'Edit writes';
-    // Operator: may change minted keys' groups with tumbler scope; toggled in place.
-    const operator = btn(t.operator ? 'yes' : 'no', async () => {
-      if (!confirm((t.operator ? 'Stop ' + t.name + ' changing' : 'Let ' + t.name + ' add and remove') + ' permission groups on the minted keys it reads (tumbler scope)?')) return;
-      try { await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify({ operator: !t.operator }) }); } catch (err) { alert(err.message); }
-      load(); });
-    operator.firstChild.title = 'Toggle operator';
-    tr.append(td(t.name), t.revoked_at ? td(reach(t)) : pin, t.revoked_at ? td(t.scopes ? t.scopes.join(', ') : 'reads only') : mints, t.revoked_at ? td(writesText) : writes, t.revoked_at ? td(t.operator ? 'yes' : 'no') : operator, td(day(t.created_at)),
-      td(t.expires_at ? (expired ? 'expired ' : '') + t.expires_at.slice(0, 16).replace('T', ' ') + ' UTC' : 'never', expired ? 'muted' : ''),
-      t.revoked_at ? td('revoked ' + day(t.revoked_at), 'muted') : btn('Revoke', async () => { if (confirm('Revoke ' + t.name + '?')) { await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }); load(); } }));
-    return tr; }));
-  document.getElementById('audit').replaceChildren(...audit.map(a => { const tr = document.createElement('tr');
-    tr.append(td(a.at.replace('T', ' ').slice(0, 19)), td(a.actor), td(a.action), td(a.project), td(a.names, 'muted')); return tr; }));
+  const [{ keys }, { tokens }, { audit }, g] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(err => ({ grants: [], failed: err.message }))]);
+  KEYS = keys; note();
+  $('nKeys').textContent = String(keys.length);
+  fill('keys', keys.map(k => { const what = k.scope + '/' + k.name, check = checkText(k);
+    const exp = !k.expires_at ? when('no date', '', 'muted') : past(k.expires_at) ? when('expired ' + day(k.expires_at), '', 'warn') : when(day(k.expires_at), soon(k.expires_at) ? until(k.expires_at) : '', soon(k.expires_at) ? 'warn' : '');
+    return row([td(k.name), td(k.scope), td(k.kind), td(check, check === 'none' ? 'muted' : ''), td(k.description, 'muted'), when(day(k.rotated_at)), exp,
+      acts(button('Set value', () => rotate(k), 'quiet', 'Set a new value for ' + what), button('Delete', () => deleteKey(k), 'del', 'Delete ' + what))]); }),
+    'No keys yet. Add one below, paste a .env, or run tumbler put NAME from a session.');
+
+  const live = g.grants.filter(x => x.state === 'active' || x.state === 'pending');
+  $('nGrants').textContent = live.length + ' active';
+  const note2 = $('grantsNote');
+  note2.textContent = g.failed ? 'Could not load grants (' + g.failed + '). Keys, tokens and audit below are current.'
+    : g.revoke_pending ? g.revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
+  note2.hidden = !note2.textContent;
+  fill('grants', g.grants.map(x => { const on = x.state === 'active' || x.state === 'pending';
+    return row([td(x.name), td(x.caller), td(x.project ?? 'global'), td(x.state), td(x.scopes.join(', ')), when(stamp(x.expires_at)),
+      on ? acts(button('Revoke', () => revokeGrant(x), 'del', 'Revoke ' + x.name + ' for ' + x.caller)) : td('')], on ? '' : 'off'); }),
+    g.failed ? 'Grants could not be loaded.' : 'No grants. One appears when a token reads a minted key, and ends on its own when it expires.');
+
+  $('nTokens').textContent = tokens.filter(t => !t.revoked_at && !past(t.expires_at)).length + ' live';
+  fill('tokens', tokens.map(t => { const gone = !!t.revoked_at, done = gone || past(t.expires_at);
+    const exp = !t.expires_at ? when('never', '', 'muted') : past(t.expires_at) ? when('expired ' + stamp(t.expires_at)) : when(stamp(t.expires_at), soon(t.expires_at) ? until(t.expires_at) : '', soon(t.expires_at) ? 'warn' : '');
+    const tr = row([td(t.name), td(reach(t)), td(t.scopes ? t.scopes.join(', ') : 'reads only'), td(t.writes ? t.writes.join(', ') : 'nothing'), td(t.operator ? 'yes' : 'no'), when(day(t.created_at)), exp], done ? 'off' : '');
+    tr.append(gone ? td('revoked ' + day(t.revoked_at)) : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name)));
+    return tr; }),
+    'No tokens yet. Create one below, then add it as a network secret on the environment that should read keys.');
+
+  fill('audit', audit.map(a => row([when(stamp(a.at)), td(a.actor), td(a.action), td(a.project ?? ''), td(String(a.names ?? '').split(',').join(', '), 'muted')])), 'Nothing has happened yet.');
 }
-const putKey = document.getElementById('putKey');
-const STATIC_HINT = '{"check": "openai"}  (optional: anthropic, openai, github, stripe, cloudflare, or {"url": "https://…", "header": "authorization", "prefix": "Bearer "})';
-putKey.kind.onchange = () => { putKey.config.placeholder = putKey.kind.value === 'static' ? STATIC_HINT : MINT_HINT;
-  if (putKey.kind.value === 'mint:cloudflare' && !putKey.name.value) putKey.name.value = 'CLOUDFLARE_API_TOKEN'; };
-const MINT_HINT = putKey.config.placeholder; putKey.config.style.display = 'block'; putKey.kind.onchange();
-putKey.onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target), kind = f.get('kind');
-  const put = skip_check => { const config = !String(f.get('config')).trim() ? undefined : JSON.parse(f.get('config'));
-    return api('keys/' + encodeURIComponent(f.get('scope')) + '/' + encodeURIComponent(f.get('name')), { method: 'PUT',
-    body: JSON.stringify({ value: f.get('value'), kind, config, skip_check, description: f.get('description'), expires_at: f.get('expires_at') || null }) }); };
-  try { await put(false); e.target.reset(); load(); } catch (err) {
+
+// --- keys ---
+const putKey = $('putKey'), addKey = $('addKey');
+const syncKind = () => { const mint = F(putKey, 'kind').value !== 'static';
+  for (const h of putKey.querySelectorAll('[data-for]')) h.hidden = h.dataset.for !== (mint ? 'mint' : 'static');
+  F(putKey, 'config').placeholder = mint ? '{"scopes": {"pages:write": ["Pages Write"]}}' : '{"check": "openai"}';
+  $('kValueHint').textContent = mint ? 'The parent token. It never leaves tumbler and cannot be shown again.' : 'Write-only: it cannot be shown again after saving.';
+  if (mint && !F(putKey, 'name').value) F(putKey, 'name').value = 'CLOUDFLARE_API_TOKEN'; };
+// Before saving, say whether this creates a key or replaces a value, and what else changes.
+function note() { const n = F(putKey, 'name').value, s = F(putKey, 'scope').value, out = $('putNote');
+  const k = KEYS.find(x => x.name === n && x.scope === s), kind = F(putKey, 'kind').value;
+  if (!n || !s) { out.textContent = ''; return; }
+  if (!k) { out.textContent = 'Creates ' + s + '/' + n + '.'; out.className = 'note hint'; return; }
+  let t = 'Replaces the value of ' + s + '/' + n + '; the old value can not be recovered.';
+  if (k.kind !== 'static') t += ' Children minted from the old parent stop working.';
+  if (k.kind !== kind) t += ' It is ' + k.kind + ': set Kind to match.';
+  if (k.expires_at && !F(putKey, 'expires_at').value) t += ' Saving with no date clears its expiry (' + day(k.expires_at) + ').';
+  out.textContent = t; out.className = 'note warn'; }
+const resetKey = () => { putKey.reset(); F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = false; F(putKey, 'kind').disabled = false;
+  $('putSave').textContent = 'Save'; syncKind(); note(); };
+// Set value on a row: the key's name, scope and kind are fixed, and its description and expiry carry over.
+function rotate(k) { resetKey(); addKey.open = true;
+  F(putKey, 'name').value = k.name; F(putKey, 'scope').value = k.scope; F(putKey, 'kind').value = k.kind;
+  F(putKey, 'description').value = k.description || ''; F(putKey, 'expires_at').value = day(k.expires_at);
+  F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = true; F(putKey, 'kind').disabled = true;
+  $('putSave').textContent = 'Save new value'; syncKind(); note();
+  addKey.scrollIntoView({ block: 'start', behavior: 'smooth' }); F(putKey, 'value').focus({ preventScroll: true }); }
+F(putKey, 'kind').onchange = () => { syncKind(); note(); };
+for (const n of ['name', 'scope', 'expires_at']) F(putKey, n).addEventListener('input', note);
+$('putCancel').onclick = () => { resetKey(); addKey.open = false; addKey.querySelector('summary').focus(); };
+putKey.onsubmit = e => { e.preventDefault(); busy($('putSave'), async () => {
+  const name = F(putKey, 'name').value, scope = F(putKey, 'scope').value, kind = F(putKey, 'kind').value, raw = F(putKey, 'config').value.trim(), what = scope + '/' + name;
+  let config;
+  if (raw) { try { config = JSON.parse(raw); } catch (err) { say('Config is not valid JSON (' + err.message + '); nothing was saved.', true); F(putKey, 'config').focus(); return; } }
+  const existed = KEYS.some(x => x.name === name && x.scope === scope);
+  const put = skip_check => api('keys/' + encodeURIComponent(scope) + '/' + encodeURIComponent(name), { method: 'PUT',
+    body: JSON.stringify({ value: F(putKey, 'value').value, kind, config, skip_check, description: F(putKey, 'description').value, expires_at: F(putKey, 'expires_at').value || null }) });
+  try { await put(false); } catch (err) {
     // The check couldn't run (the service is down): offer to save unchecked, e.g. to replace a leaked key.
-    if (!err.canSkip || !confirm(err.message + '\\n\\nSave it unchecked anyway? Running commands with --watch won\\'t get it pushed.')) return alert(err.message);
-    try { await put(true); e.target.reset(); load(); } catch (err2) { alert(err2.message); } } };
+    if (!err.canSkip) throw err.message.startsWith(name + ':') ? err : new Error('Could not save ' + what + ': ' + err.message);
+    if (!confirm(err.message + '\\n\\nSave it unchecked anyway? Commands running with --watch will not get it pushed.')) { say('Nothing was saved; ' + what + ' keeps its old value.'); return; }
+    await put(true).catch(fail('Could not save ' + what)); }
+  resetKey(); addKey.open = false; addKey.querySelector('summary').focus();
+  say((existed ? 'Saved a new value for ' : 'Created ') + what + '.'); await refresh(); }); };
+async function deleteKey(k) { const what = k.scope + '/' + k.name;
+  if (!confirm(k.kind === 'static'
+    ? 'Delete ' + what + '?\\n\\nThe value is gone for good: tumbler never shows a saved value, so there is no copy here. Sessions that read it stop getting it on their next run.'
+    : 'Delete ' + what + '?\\n\\nIts parent credential is gone for good, and every child it minted stops working now. Sessions can mint again only after a new parent is saved.')) return;
+  await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }).catch(fail('Could not delete ' + what));
+  say('Deleted ' + what + '.'); await refresh(); }
+
 // Paste a .env: preview what each line does, then save. The text goes in a POST body only.
-const importEnv = document.getElementById('importEnv'), importPlan = document.getElementById('importPlan');
-const showPlan = (r, onSave) => { const rows = [...r.errors.map(e => ['line ' + e.line, '', 'error', e.error]),
-    ...r.keys.map(k => [String(k.line), k.name, k.action, k.reason || (k.checked ? 'tested before saving' : '')])];
-  const table = document.createElement('table');
-  table.replaceChildren(...rows.map(([line, name, action, note]) => { const tr = document.createElement('tr');
-    tr.append(td(line, 'muted'), td(name), td(action, ['error', 'failed', 'overwrite'].includes(action) ? 'warn' : action === 'skip' ? 'muted' : ''), td(note, 'muted')); return tr; }));
+const importEnv = $('importEnv'), importPlan = $('importPlan');
+const showPlan = (r, onSave) => { const table = document.createElement('table'), head = document.createElement('thead');
+  head.append(row(['Line', 'Key', 'Action', 'Note'].map(h => { const th = document.createElement('th'); th.textContent = h; return th; })));
+  const body = document.createElement('tbody'); table.className = 'rec'; table.append(head, body);
+  const rows = [...r.errors.map(e => [e.line, '', 'error', e.error]), ...r.keys.map(k => [k.line, k.name, k.action, k.reason || (k.checked ? 'tested before saving' : '')])].sort((a, b) => a[0] - b[0]);
+  body.replaceChildren(...rows.map(([line, name, action, why]) => { const tr = row([td(String(line), 'muted'), td(name), td(action, ['error', 'failed', 'overwrite'].includes(action) ? 'warn' : action === 'skip' ? 'muted' : ''), td(why, 'muted')]);
+    [...tr.children].forEach((c, i) => { c.dataset.label = ['Line', 'Key', 'Action', 'Note'][i]; }); return tr; }));
   const parts = [table], n = r.keys.filter(k => k.action === 'create' || k.action === 'overwrite').length;
   if (r.saved) parts.push(Object.assign(document.createElement('p'), { textContent: 'Saved ' + r.saved.length + ' key(s) to ' + r.scope + '.' }));
   else if (r.errors.length) parts.push(Object.assign(document.createElement('p'), { className: 'warn', textContent: 'Fix the lines marked error, then preview again.' }));
-  else if (n) { const b = document.createElement('button'); b.type = 'button'; b.textContent = 'Save ' + n + ' key(s) to ' + r.scope; b.onclick = onSave; parts.push(b); }
+  else if (n) { const b = button('Save ' + n + ' key(s) to ' + r.scope, onSave, 'primary'); const p = document.createElement('p'); p.append(b); parts.push(p); }
   importPlan.replaceChildren(...parts); };
-const importCall = save => api('import', { method: 'POST', body: JSON.stringify({ scope: importEnv.scope.value, text: importEnv.text.value, save }) });
-importEnv.text.oninput = importEnv.scope.oninput = () => importPlan.replaceChildren();
-importEnv.onsubmit = async e => { e.preventDefault();
-  try { showPlan(await importCall(false), async () => {
-    try { const r = await importCall(true); showPlan(r); if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length) importEnv.text.value = ''; load(); }
-    catch (err) { alert(err.message); } }); } catch (err) { alert(err.message); } };
-document.getElementById('moveScope').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
-  if (!confirm('Move every key in ' + f.get('from') + ' to ' + f.get('to') + ' and repoint pins? A repo whose .tumbler names ' + f.get('from') + ' needs its project line changed.')) return;
-  try { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from: f.get('from'), to: f.get('to') }) });
-    alert('Moved ' + r.moved.length + ' key(s); repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); e.target.reset(); } catch (err) { alert(err.message); }
-  load(); };
-// Presets fill the field, which stays editable.
-for (const b of document.querySelectorAll('#newToken [data-pin]')) b.onclick = () => { document.getElementById('newToken').projects.value = b.dataset.pin; };
-for (const b of document.querySelectorAll('#newToken [data-scopes]')) b.onclick = () => { document.getElementById('newToken').scopes.value = b.dataset.scopes; };
-document.getElementById('newToken').onsubmit = async e => { e.preventDefault(); const f = new FormData(e.target);
-  const projects = String(f.get('projects')).split(',').map(s => s.trim()).filter(Boolean);
-  const scopes = String(f.get('scopes')).split(',').map(s => s.trim()).filter(Boolean);
-  const writes = String(f.get('writes')).split(',').map(s => s.trim()).filter(Boolean);
-  const hours = Number(f.get('hours')), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
-  try { const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name: f.get('name'), projects, scopes, writes, operator: f.get('operator') === 'on', expires_at }) });
-    const once = document.getElementById('once'); once.style.display = 'block';
-    const copy = (label, text) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
-      b.onclick = () => navigator.clipboard.writeText(text).then(() => { b.textContent = 'Copied'; setTimeout(() => b.textContent = label, 1500); }, () => alert('Copy failed; select the token and copy it by hand.')); return b; };
-    once.replaceChildren('Copy this token now; it will not be shown again. Add it as a network secret on the environment: ', Object.assign(document.createElement('code'), { textContent: r.token }),
-      ' ', copy('Copy', r.token), ' ', copy('Copy as "Bearer …"', 'Bearer ' + r.token));
-    e.target.reset(); load(); } catch (err) { alert(err.message); } };
-load().catch(err => alert(err.message));
+const importCall = save => api('import', { method: 'POST', body: JSON.stringify({ scope: F(importEnv, 'scope').value, text: F(importEnv, 'text').value, save }) }).catch(fail(save ? 'Could not save the .env' : 'Could not preview the .env'));
+F(importEnv, 'text').oninput = F(importEnv, 'scope').oninput = () => importPlan.replaceChildren();
+importEnv.onsubmit = e => { e.preventDefault(); busy(importEnv.querySelector('button'), async () => {
+  showPlan(await importCall(false), async () => {
+    const r = await importCall(true); showPlan(r); if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length) F(importEnv, 'text').value = '';
+    say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + '.'); await refresh(); }); }); };
+$('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = F(f, 'from').value, to = F(f, 'to').value;
+  if (!confirm('Move every key in ' + from + ' to ' + to + '?\\n\\nMinted children on the moved keys stop working now, and tokens pinned to ' + from + ' are repinned to ' + to + '. A repo whose .tumbler names ' + from + ' needs its project line changed.')) return;
+  busy(f.querySelector('button'), async () => { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from, to }) }).catch(fail('Could not move ' + from));
+    say('Moved ' + r.moved.length + ' key(s) from ' + from + ' to ' + to + '; repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); f.reset(); await refresh(); }); };
+
+// --- grants and tokens ---
+async function revokeGrant(g) {
+  if (!confirm('Revoke ' + g.name + ' for ' + g.caller + '? This child stops working now; the next run by its caller mints a new one within the scopes of that token. To cut the caller off, revoke its token or narrow its scopes.')) return;
+  await api('grants/' + g.id, { method: 'DELETE' }).catch(fail('Could not revoke ' + g.name + ' for ' + g.caller)); say('Revoked ' + g.name + ' for ' + g.caller + '.'); await refresh(); }
+async function revokeToken(t) {
+  if (!confirm('Revoke ' + t.name + '?\\n\\nEvery session using it loses access now, and the grants it holds end. A revoked token can not be restored: to give access back, create a new token and replace the network secret that carries it.')) return;
+  await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }).catch(fail('Could not revoke ' + t.name)); say('Revoked ' + t.name + '.'); await refresh(); }
+const list = v => String(v).split(',').map(s => s.trim()).filter(Boolean);
+const same = (a, b) => (a ?? []).join(',') === (b ?? []).join(',');
+let edits = 0;
+// Edit a token in place, so reaching one more project never means a new token. Only what changed is sent;
+// narrowing its scopes or pin ends the children it holds beyond them.
+function editToken(t, tr) {
+  const open = tr.nextElementSibling; if (open && open.classList.contains('editor')) { open.remove(); return; }
+  const id = 'ed' + (++edits), ed = document.createElement('tr'), c = document.createElement('td'), f = document.createElement('form');
+  ed.className = 'editor'; c.colSpan = 8; f.method = 'post'; f.className = 'fields';
+  f.innerHTML = '<div class="f full"><label for="' + id + 'p">Reads</label><input id="' + id + 'p" name="projects" autocomplete="off" spellcheck="false"><span class="hint">Comma-separated: a project, project/env, * or */env. Empty: global keys only.</span></div>'
+    + '<div class="f"><label for="' + id + 's">May mint</label><input id="' + id + 's" name="scopes" autocomplete="off" spellcheck="false"><span class="hint">workers:write, or * for any. Empty: reads only.</span></div>'
+    + '<div class="f"><label for="' + id + 'w">May write</label><input id="' + id + 'w" name="writes" autocomplete="off" spellcheck="false"><span class="hint">global, a project, project/env, * or */env. Empty: nothing.</span></div>'
+    + '<div class="f check"><input id="' + id + 'o" name="operator" type="checkbox"><label for="' + id + 'o">Operator</label></div>'
+    + '<div class="bar"><button class="primary">Save changes</button><button type="button" class="quiet">Cancel</button></div>';
+  F(f, 'projects').value = (t.projects ?? []).join(', '); F(f, 'scopes').value = (t.scopes ?? []).join(', '); F(f, 'writes').value = (t.writes ?? []).join(', '); F(f, 'operator').checked = !!t.operator;
+  const [save, cancel] = f.querySelectorAll('.bar button');
+  cancel.onclick = () => { ed.remove(); tr.querySelector('.acts button').focus(); };
+  f.onsubmit = e => { e.preventDefault(); busy(save, async () => {
+    const body = {}, projects = list(F(f, 'projects').value), scopes = list(F(f, 'scopes').value), writes = list(F(f, 'writes').value), operator = F(f, 'operator').checked;
+    if (!same(projects, t.projects)) body.projects = projects;
+    if (!same(scopes, t.scopes)) body.scopes = scopes;
+    if (!same(writes, t.writes)) body.writes = writes;
+    if (operator !== !!t.operator) body.operator = operator;
+    if (!Object.keys(body).length) { say('Nothing changed for ' + t.name + '.'); ed.remove(); return; }
+    if ('operator' in body && !confirm((operator ? 'Let ' + t.name + ' add and remove' : 'Stop ' + t.name + ' changing') + ' permission groups on the minted keys it reads (tumbler scope)?')) return;
+    await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify(body) }).catch(fail('Could not update ' + t.name));
+    say('Updated ' + t.name + ': ' + Object.keys(body).map(k => ({ projects: 'reads', scopes: 'may mint', writes: 'may write', operator: 'operator' })[k]).join(', ') + '.'); await refresh(); }); };
+  c.append(f); ed.append(c); tr.after(ed); F(f, 'projects').focus(); }
+
+// Presets fill the field, which stays editable; the preset matching the field shows as pressed.
+const newToken = $('newToken');
+const presses = () => { for (const b of newToken.querySelectorAll('[data-pin]')) b.setAttribute('aria-pressed', String(F(newToken, 'projects').value === b.dataset.pin));
+  for (const b of newToken.querySelectorAll('[data-scopes]')) b.setAttribute('aria-pressed', String(F(newToken, 'scopes').value === b.dataset.scopes)); };
+for (const b of newToken.querySelectorAll('[data-pin]')) b.onclick = () => { F(newToken, 'projects').value = b.dataset.pin; presses(); };
+for (const b of newToken.querySelectorAll('[data-scopes]')) b.onclick = () => { F(newToken, 'scopes').value = b.dataset.scopes; presses(); };
+F(newToken, 'projects').oninput = F(newToken, 'scopes').oninput = presses;
+newToken.onsubmit = e => { e.preventDefault(); busy($('tCreate'), async () => {
+  const name = F(newToken, 'name').value, hours = Number(F(newToken, 'hours').value), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
+  const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name, projects: list(F(newToken, 'projects').value), scopes: list(F(newToken, 'scopes').value),
+    writes: list(F(newToken, 'writes').value), operator: F(newToken, 'operator').checked, expires_at }) }).catch(fail('Could not create ' + name));
+  newToken.reset(); presses(); $('createBox').open = false; showOnce(name, r.token); await refresh(); }); };
+// The new token is shown once, right where it was created, and stays until the owner says it's stored.
+function showOnce(name, token) { const once = $('once'), p = document.createElement('p'), field = document.createElement('input'), bar = document.createElement('div');
+  const strong = document.createElement('strong'); strong.textContent = 'Copy the token for ' + name + ' now.';
+  p.append(strong, ' It will not be shown again. Add it as a network secret on the environment: header Authorization, prefix Bearer.');
+  field.readOnly = true; field.value = token; field.setAttribute('aria-label', 'Token for ' + name); field.onfocus = () => field.select();
+  const copy = (label, text) => button(label, () => navigator.clipboard.writeText(text).then(() => say('Copied the token for ' + name + '.'), () => say('Copy failed; select the token and copy it by hand.', true)), label === 'Copy' ? 'primary' : '');
+  const done = button('I have stored it', () => { once.replaceChildren(); once.hidden = true; $('createBox').querySelector('summary').focus(); }, 'quiet');
+  bar.className = 'bar'; bar.append(copy('Copy', token), copy('Copy as "Bearer …"', 'Bearer ' + token), done);
+  once.setAttribute('role', 'region'); once.setAttribute('aria-label', 'New token'); once.replaceChildren(p, field, bar); once.hidden = false;
+  once.scrollIntoView({ block: 'center', behavior: 'smooth' }); once.focus({ preventScroll: true }); say('Created ' + name + '. Copy it now; it will not be shown again.'); }
+
+syncKind(); presses(); refresh();
 </script></body></html>`;
