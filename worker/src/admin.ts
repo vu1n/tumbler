@@ -30,22 +30,23 @@ td.acts{white-space:nowrap;text-align:right;padding-block:4px}
 tr.off td{color:var(--muted)}tr.empty td{color:var(--muted);padding:16px 8px}
 .wrap{overflow-x:auto}
 button{font:inherit;padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);cursor:pointer;transition:background-color .15s ease-out,color .15s ease-out}
-button:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
 button.primary{background:var(--accent);color:var(--on-accent)}
-button.primary:hover{background:color-mix(in srgb,var(--accent) 85%,var(--fg))}
 button.quiet{border-color:transparent;padding-inline:8px}
 button.del{border-color:transparent;padding-inline:8px;color:var(--muted)}
-button.del:hover,button.del:focus-visible{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,transparent)}
+button.del:focus-visible{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,transparent)}
+@media (hover:hover){button:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+  button.primary:hover{background:color-mix(in srgb,var(--accent) 85%,var(--fg))}
+  button.del:hover{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,transparent)}}
 button:disabled{opacity:.55;cursor:not-allowed}button[aria-busy=true]{cursor:progress}
 input,select,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--edge);border-radius:6px;padding:6px 8px;min-width:0;width:100%}
-input[readonly]{border-style:dashed}
+input[readonly],textarea[readonly],select:disabled{border-style:dashed;color:inherit;opacity:1}
 input[type=checkbox]{width:16px;height:16px;margin:0}
 textarea{font:12px/1.4 ui-monospace,monospace;min-height:96px;resize:vertical}
 ::placeholder{color:var(--muted);opacity:1}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 input:focus-visible,select:focus-visible,textarea:focus-visible{outline-offset:0;border-color:var(--accent)}
 details.act{border-top:1px solid var(--line)}details.act:last-of-type{border-bottom:1px solid var(--line)}
-details.act+details.act{margin-top:-1px}.acts-group{margin-top:16px}
+details.act+details.act{margin-top:-1px}.acts-group>details.act:first-child{border-top:0}
 summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}summary::marker{color:var(--accent)}
 .fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin:4px 0 16px;align-items:start}
 .f{display:flex;flex-direction:column;gap:4px}.f>label{font-weight:500}.full{grid-column:1/-1}
@@ -57,24 +58,24 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 .chips button[aria-pressed=true]{background:var(--accent);color:var(--on-accent)}
 .note{grid-column:1/-1;margin:0}
 .notice{border:1px solid var(--warn);border-radius:6px;padding:8px 12px;color:var(--warn);max-width:none}
-#once{border:1px solid var(--warn);border-radius:6px;padding:12px;margin:12px 0}
-#once p{margin:0 0 8px}#once input{font:13px ui-monospace,monospace;margin-bottom:8px}
+#once{border:1px solid var(--warn);border-radius:6px;padding:12px;margin:12px 0;scroll-margin-bottom:96px}
+#once p{margin:0 0 8px}#once textarea{font-size:13px;min-height:0;resize:none;overflow:hidden;word-break:break-all;field-sizing:content;margin-bottom:8px}
 #status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);width:min(600px,calc(100% - 32px));display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 8px 8px 12px;background:var(--bg);border:1px solid var(--edge);border-radius:6px}
 #status.error{border-color:var(--danger);color:var(--danger)}
 @media (pointer:coarse){button,summary,input:not([type=checkbox]),select{min-height:44px}.chips button{min-height:40px}}
 @media (min-width:720px){.w2{grid-column:span 2}}
 @media (max-width:640px){
   table.rec thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
-  table.rec tr{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;padding:12px 0;border-bottom:1px solid var(--line)}
-  table.rec td{display:block;padding:0;border:0;overflow-wrap:anywhere}
+  table.rec tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 16px;padding:12px 0;border-bottom:1px solid var(--line)}
+  table.rec td{display:block;padding:0;border:0;overflow-wrap:break-word}
   table.rec td::before{content:attr(data-label);display:block;color:var(--muted);font-size:12px}
-  table.rec td:first-child,table.rec td.acts,table.rec tr.empty td,table.rec tr.editor td{grid-column:1/-1}
-  table.rec td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}
+  table.rec td:first-child,table.rec td.name,table.rec td.acts,table.rec tr.empty td,table.rec tr.editor td{grid-column:1/-1}
+  table.rec tr:not(.empty) td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}
   table.rec td:empty{display:none}
-  table.rec td.acts{display:flex;gap:8px;text-align:left;margin-left:-8px}
+  table.rec td.acts{display:flex;gap:8px;text-align:left;margin-left:-8px}table.rec td.ended{margin-left:0}
   table.log tr{display:flex;flex-wrap:wrap;gap:2px 10px;padding:10px 0;border-bottom:1px solid var(--line)}
   table.log thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
-  table.log td{display:inline;padding:0;border:0;overflow-wrap:anywhere}table.log td:nth-child(3){font-weight:600;order:-1}
+  table.log td{display:inline;padding:0;border:0;overflow-wrap:break-word}table.log td:nth-child(3){font-weight:600;order:-1}
   table.log td:last-child{flex-basis:100%}
 }
 </style></head><body><main>
@@ -94,7 +95,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   <div class="f w2"><label for="kDesc">What it's for</label><input id="kDesc" name="description" autocomplete="off"></div>
   <div class="f"><label for="kExp">Expires</label><input id="kExp" name="expires_at" type="date" aria-describedby="kExpHint"><span class="hint" id="kExpHint">Optional. Turns amber a week before.</span></div>
   <div class="f full"><label for="kConfig">Config <span class="muted">(optional)</span></label><textarea id="kConfig" name="config" spellcheck="false" autocomplete="off" aria-describedby="kConfigHint"></textarea>
-    <span class="hint" id="kConfigHint"><span data-for="static">A check that runs before a new value is saved, so a bad value saves nothing: {"check": "openai"} (or anthropic, github, stripe, cloudflare), or your own endpoint: {"check": {"url": "https://…", "header": "authorization", "prefix": "Bearer "}}.</span><span data-for="mint">Left empty, an existing key keeps its config and a new one gets workers:read (Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize read and analytics; granted on request) and workers:write (the same, write, plus Workers Tail; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.</span></span></div>
+    <span class="hint" id="kConfigHint"><span data-for="static">A check that runs before a new value is saved, so a bad value saves nothing: <code>{"check": "openai"}</code> (or anthropic, github, stripe, cloudflare), or your own endpoint: <code>{"check": {"url": "https://…", "header": "authorization", "prefix": "Bearer "}}</code>.</span><span data-for="mint">Left empty, an existing key keeps its config and a new one gets workers:read (Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize read and analytics; granted on request) and workers:write (the same, write, plus Workers Tail; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: <code>{"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}</code>, with Cloudflare permission names or ids.</span></span></div>
   <p class="note hint" id="putNote" aria-live="polite"></p>
   <div class="bar"><button class="primary" id="putSave">Save</button><button type="button" class="quiet" id="putCancel">Cancel</button></div>
 </form></details>
@@ -148,6 +149,9 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 <div id="live" class="sr" aria-live="polite"></div>
 <script>
 const $ = id => document.getElementById(id);
+// The name of a new token still shown once; until it is stored, leaving the page asks first.
+let unstored = '';
+addEventListener('beforeunload', e => { if (unstored) { e.preventDefault(); e.returnValue = ''; } });
 // A form's own properties (form.name) shadow its fields, so fields are always looked up by name.
 const F = (form, name) => form.elements.namedItem(name);
 const api = (p, o = {}) => fetch('/admin/api/' + p, { ...o, headers: { 'content-type': 'application/json', 'x-tumbler-admin': '1' } })
@@ -166,25 +170,31 @@ const busy = async (b, fn) => { if (b) { b.disabled = true; b.setAttribute('aria
   try { return await fn(); } catch (err) { say(err.message, true); } finally { if (b) { b.disabled = false; b.removeAttribute('aria-busy'); } } };
 // Errors say which action failed, then what the server said.
 const fail = what => err => { throw Object.assign(new Error(what + ': ' + err.message), { canSkip: err.canSkip }); };
-const refresh = () => load().catch(err => say('Could not load the page: ' + err.message + '. Reload to try again.', true));
+const refresh = () => load().catch(err => say('Could not load the page: ' + err.message + (unstored ? '. Copy the new token before you reload.' : '. Reload to try again.'), true));
 const td = (t, cls) => { const e = document.createElement('td'); e.textContent = t ?? ''; if (cls) e.className = cls; return e; };
 const button = (label, fn, cls, aria) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
   if (cls) b.className = cls; if (aria) b.setAttribute('aria-label', aria); b.onclick = () => busy(b, fn); return b; };
 const acts = (...bs) => { const c = document.createElement('td'); c.className = 'acts'; c.append(...bs); return c; };
 // A date, then how far off it is; neither part breaks mid-value.
-const when = (main, rel, cls) => { const c = document.createElement('td'), v = document.createElement('span'), a = document.createElement('span'); a.className = 'nw'; a.textContent = main; v.append(a);
-  if (rel) { const b = document.createElement('span'); b.className = 'nw'; b.textContent = rel; v.append(', ', b); } c.append(v); if (cls) c.className = cls; return c; };
+const when = (main, rel, cls) => { const c = document.createElement('td'), v = document.createElement('span'), a = document.createElement('span'); a.className = 'nw'; a.textContent = main + (rel ? ',' : ''); v.append(a);
+  if (rel) { const b = document.createElement('span'); b.className = 'nw'; b.textContent = rel; v.append(' ', b); } c.append(v); if (cls) c.className = cls; return c; };
 const day = s => s ? s.slice(0, 10) : '';
 const stamp = s => s ? s.slice(0, 16).replace('T', ' ') + ' UTC' : '';
 const until = s => { const ms = Date.parse(s) - Date.now(), m = Math.max(1, Math.round(ms / 6e4)), h = Math.round(ms / 36e5);
   return m < 60 ? 'in ' + m + ' min' : h < 48 ? 'in ' + h + ' h' : 'in ' + Math.round(ms / 864e5) + ' days'; };
 const soon = s => s && Date.parse(s) < Date.now() + 7 * 864e5;
 const past = s => s && Date.parse(s) <= Date.now();
+// A key's expiry is a calendar date, good through that day: counted in whole days from today, where the owner is.
+const daysLeft = k => k.expires_at ? Math.round((Date.parse(k.expires_at.slice(0, 10)) - Date.parse(new Date().toLocaleDateString('en-CA'))) / 864e5) : Infinity;
+const inDays = n => n === 0 ? 'today' : n === 1 ? 'tomorrow' : 'in ' + n + ' days';
 // Rows carry their column names, so a phone shows each row as a labelled record.
 const fill = (id, rows, empty) => { const body = $(id), heads = [...body.closest('table').querySelectorAll('thead th')].map(th => th.textContent);
-  if (!rows.length) { const tr = document.createElement('tr'), c = td(empty); tr.className = 'empty'; c.colSpan = heads.length; tr.append(c); body.replaceChildren(tr); return; }
+  if (!rows.length) { const tr = document.createElement('tr'), c = td(); c.append(...[empty].flat()); tr.className = 'empty'; c.colSpan = heads.length; tr.append(c); body.replaceChildren(tr); return; }
   for (const tr of rows) [...tr.children].forEach((c, i) => { if (heads[i]) c.dataset.label = heads[i]; });
   body.replaceChildren(...rows); };
+const code = t => Object.assign(document.createElement('code'), { textContent: t });
+// An audit name like KEY:scope+scope may break after a colon, plus or comma, never inside a word.
+const names = t => { const c = td('', 'muted'); for (const p of t.split(/([:+]|, )/)) { c.append(p); if (/^([:+]|, )$/.test(p)) c.append(document.createElement('wbr')); } return c; };
 const row = (cells, cls) => { const tr = document.createElement('tr'); if (cls) tr.className = cls; tr.append(...cells); return tr; };
 // A pin in words: each project (or all of them) with what it reads, shared keys and environments.
 const reach = t => { if (!t.projects) return 'global only'; const by = new Map();
@@ -197,15 +207,18 @@ const checkText = k => { let c;
   return (typeof c.check === 'string' ? c.check : 'custom') + (k.checked ? ', passed' : ', saved unchecked'); };
 let KEYS = [];
 
-async function load() {
+let loads = 0;
+async function load() { const mine = ++loads;
   const [{ keys }, { tokens }, { audit }, g] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(err => ({ grants: [], failed: err.message }))]);
+  if (mine !== loads) return; // a newer load is drawing the page
   KEYS = keys; note();
-  $('nKeys').textContent = String(keys.length);
+  const due = keys.filter(k => daysLeft(k) < 7).length;
+  $('nKeys').replaceChildren(String(keys.length), ...(due ? [', ', Object.assign(document.createElement('span'), { className: 'warn', textContent: due + ' need you' })] : []));
   fill('keys', keys.map(k => { const what = k.scope + '/' + k.name, check = checkText(k);
-    const exp = !k.expires_at ? when('no date', '', 'muted') : past(k.expires_at) ? when('expired ' + day(k.expires_at), '', 'warn') : when(day(k.expires_at), soon(k.expires_at) ? until(k.expires_at) : '', soon(k.expires_at) ? 'warn' : '');
-    return row([td(k.name), td(k.scope), td(k.kind), td(check, check === 'none' ? 'muted' : ''), td(k.description, 'muted'), when(day(k.rotated_at)), exp,
+    const left = daysLeft(k), exp = !k.expires_at ? when('no date', '', 'muted') : left < 0 ? when('expired ' + day(k.expires_at), '', 'warn') : when(day(k.expires_at), left < 7 ? inDays(left) : '', left < 7 ? 'warn' : '');
+    return row([td(k.name), td(k.scope), td(k.kind), td(check, check === 'none' ? 'muted' : ''), td(k.description || 'none', 'muted'), when(day(k.rotated_at)), exp,
       acts(button('Set value', () => rotate(k), 'quiet', 'Set a new value for ' + what), button('Delete', () => deleteKey(k), 'del', 'Delete ' + what))]); }),
-    'No keys yet. Add one below, paste a .env, or run tumbler put NAME from a session.');
+    ['No keys yet. Add one below, paste a .env, or run ', code('tumbler put NAME'), ' from a session.']);
 
   const live = g.grants.filter(x => x.state === 'active' || x.state === 'pending');
   $('nGrants').textContent = g.failed ? '' : live.length + ' active';
@@ -223,11 +236,11 @@ async function load() {
     const exp = !t.expires_at ? when('never', '', 'muted') : past(t.expires_at) ? when('expired ' + stamp(t.expires_at)) : when(stamp(t.expires_at), soon(t.expires_at) ? until(t.expires_at) : '', soon(t.expires_at) ? 'warn' : '');
     const tr = row([td(t.name), td(reach(t)), td(t.scopes ? t.scopes.join(', ') : 'reads only'), td(t.writes ? t.writes.join(', ') : 'nothing'), td(t.operator ? 'yes' : 'no'), when(day(t.created_at)), exp], done ? 'off' : '');
     const ended = Object.assign(document.createElement('span'), { className: 'nw', textContent: day(t.revoked_at) });
-    tr.append(gone ? acts('revoked ', ended) : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name)));
+    tr.append(gone ? Object.assign(acts('revoked ', ended), { className: 'acts ended' }) : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name)));
     return tr; }),
     'No tokens yet. Create one below, then add it as a network secret on the environment that should read keys.');
 
-  fill('audit', audit.map(a => row([when(stamp(a.at)), td(a.actor), td(a.action), td(a.project ?? ''), td(String(a.names ?? '').split(',').join(', '), 'muted')])), 'Nothing has happened yet.');
+  fill('audit', audit.map(a => row([when(stamp(a.at)), td(a.actor), td(a.action), td(a.project ?? ''), names(String(a.names ?? '').split(',').join(', '))])), 'Nothing has happened yet.');
 }
 
 // --- keys ---
@@ -242,17 +255,17 @@ function note() { const n = F(putKey, 'name').value, s = F(putKey, 'scope').valu
   const k = KEYS.find(x => x.name === n && x.scope === s), kind = F(putKey, 'kind').value;
   if (!n || !s) { out.textContent = ''; return; }
   if (!k) { out.textContent = 'Creates ' + s + '/' + n + '.'; out.className = 'note hint'; return; }
-  let t = 'Replaces the value of ' + s + '/' + n + '; the old value can not be recovered.';
+  let t = 'Replaces the value of ' + s + '/' + n + '; the old value cannot be recovered.';
   if (k.kind !== 'static') t += ' Children minted from the old parent stop working.';
   if (k.kind !== kind) t += ' It is ' + k.kind + ': set Kind to match.';
-  if (k.expires_at && !F(putKey, 'expires_at').value) t += past(k.expires_at) ? ' It expired ' + day(k.expires_at) + ': set a new date, or save with none.' : ' Saving with no date clears its expiry (' + day(k.expires_at) + ').';
+  if (k.expires_at && !F(putKey, 'expires_at').value) t += daysLeft(k) < 0 ? ' It expired ' + day(k.expires_at) + ': set a new date, or save with none.' : ' Saving with no date clears its expiry (' + day(k.expires_at) + ').';
   out.textContent = t; out.className = 'note warn'; }
 const resetKey = () => { putKey.reset(); F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = false; F(putKey, 'kind').disabled = false;
   $('putSave').textContent = 'Save'; syncKind(); note(); };
 // Set value on a row: the key's name, scope and kind are fixed, and its description and expiry carry over.
 function rotate(k) { resetKey(); addKey.open = true;
   F(putKey, 'name').value = k.name; F(putKey, 'scope').value = k.scope; F(putKey, 'kind').value = k.kind;
-  F(putKey, 'description').value = k.description || ''; F(putKey, 'expires_at').value = past(k.expires_at) ? '' : day(k.expires_at);
+  F(putKey, 'description').value = k.description || ''; F(putKey, 'expires_at').value = daysLeft(k) < 0 ? '' : day(k.expires_at);
   F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = true; F(putKey, 'kind').disabled = true;
   $('putSave').textContent = 'Save new value'; syncKind(); note();
   addKey.scrollIntoView({ block: 'start', behavior: 'smooth' }); F(putKey, 'value').focus({ preventScroll: true }); }
@@ -289,18 +302,20 @@ const showPlan = (r, onSave) => { const table = document.createElement('table'),
   head.append(row(['Line', 'Key', 'Action', 'Note'].map(h => { const th = document.createElement('th'); th.textContent = h; return th; })));
   const body = document.createElement('tbody'); table.className = 'rec'; table.append(head, body);
   const rows = [...r.errors.map(e => [e.line, '', 'error', e.error]), ...r.keys.map(k => [k.line, k.name, k.action, k.reason || (k.checked ? 'tested before saving' : '')])].sort((a, b) => a[0] - b[0]);
-  body.replaceChildren(...rows.map(([line, name, action, why]) => { const tr = row([td(String(line), 'muted'), td(name), td(action, ['error', 'failed', 'overwrite'].includes(action) ? 'warn' : action === 'skip' ? 'muted' : ''), td(why, 'muted')]);
+  body.replaceChildren(...rows.map(([line, name, action, why]) => { const tr = row([td(String(line), 'muted'), td(name, 'name'), td(action, ['error', 'failed', 'overwrite'].includes(action) ? 'warn' : action === 'skip' ? 'muted' : ''), td(why, 'muted')]);
     [...tr.children].forEach((c, i) => { c.dataset.label = ['Line', 'Key', 'Action', 'Note'][i]; }); return tr; }));
   const parts = [table], n = r.keys.filter(k => k.action === 'create' || k.action === 'overwrite').length;
   if (r.saved) parts.push(Object.assign(document.createElement('p'), { textContent: 'Saved ' + r.saved.length + ' key(s) to ' + r.scope + '.' }));
   else if (r.errors.length) parts.push(Object.assign(document.createElement('p'), { className: 'warn', textContent: 'Fix the lines marked error, then preview again.' }));
   else if (n) { const b = button('Save ' + n + ' key(s) to ' + r.scope, onSave, 'primary'); const p = document.createElement('p'); p.append(b); parts.push(p); }
   importPlan.replaceChildren(...parts); };
-const importCall = save => api('import', { method: 'POST', body: JSON.stringify({ scope: F(importEnv, 'scope').value, text: F(importEnv, 'text').value, save }) }).catch(fail(save ? 'Could not save the .env' : 'Could not preview the .env'));
+const importCall = (sent, save) => api('import', { method: 'POST', body: JSON.stringify({ ...sent, save }) }).catch(fail(save ? 'Could not save the .env' : 'Could not preview the .env'));
 F(importEnv, 'text').oninput = F(importEnv, 'scope').oninput = () => importPlan.replaceChildren();
-importEnv.onsubmit = e => { e.preventDefault(); busy(importEnv.querySelector('button'), async () => {
-  showPlan(await importCall(false), async () => {
-    const r = await importCall(true); showPlan(r); if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length) F(importEnv, 'text').value = '';
+importEnv.onsubmit = e => { e.preventDefault(); const sent = { scope: F(importEnv, 'scope').value, text: F(importEnv, 'text').value };
+  busy(importEnv.querySelector('button'), async () => { const plan = await importCall(sent, false);
+  if (F(importEnv, 'text').value !== sent.text || F(importEnv, 'scope').value !== sent.scope) return; // edited while previewing: preview again
+  showPlan(plan, async () => {
+    const r = await importCall(sent, true); showPlan(r); if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length) F(importEnv, 'text').value = '';
     const failed = r.keys.filter(k => k.action === 'failed').length;
     say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + (failed ? '; ' + failed + ' failed their check and were not saved (marked failed above).' : '.'), failed > 0); await refresh(); }); }); };
 $('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = F(f, 'from').value, to = F(f, 'to').value;
@@ -313,7 +328,7 @@ async function revokeGrant(g) {
   if (!confirm('Revoke ' + g.name + ' for ' + g.caller + '? This child stops working now; the next run by its caller mints a new one within the scopes of that token. To cut the caller off, revoke its token or narrow its scopes.')) return;
   await api('grants/' + g.id, { method: 'DELETE' }).catch(fail('Could not revoke ' + g.name + ' for ' + g.caller)); say('Revoked ' + g.name + ' for ' + g.caller + '.'); await refresh(); }
 async function revokeToken(t) {
-  if (!confirm('Revoke ' + t.name + '?\\n\\nEvery session using it loses access now, and the grants it holds end. A revoked token can not be restored: to give access back, create a new token and replace the network secret that carries it.')) return;
+  if (!confirm('Revoke ' + t.name + '?\\n\\nEvery session using it loses access now, and the grants it holds end. A revoked token cannot be restored: to give access back, create a new token and replace the network secret that carries it.')) return;
   await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }).catch(fail('Could not revoke ' + t.name)); say('Revoked ' + t.name + '.'); await refresh(); }
 const list = v => String(v).split(',').map(s => s.trim()).filter(Boolean);
 const same = (a, b) => (a ?? []).join(',') === (b ?? []).join(',');
@@ -351,24 +366,26 @@ const presses = () => { for (const b of newToken.querySelectorAll('[data-pin]'))
 for (const b of newToken.querySelectorAll('[data-pin]')) b.onclick = () => { F(newToken, 'projects').value = b.dataset.pin; presses(); };
 for (const b of newToken.querySelectorAll('[data-scopes]')) b.onclick = () => { F(newToken, 'scopes').value = b.dataset.scopes; presses(); };
 F(newToken, 'projects').oninput = F(newToken, 'scopes').oninput = presses;
-let unstored = '';
 newToken.onsubmit = e => { e.preventDefault();
   if (unstored) { say('Copy the token for ' + unstored + ' and press "I have stored it" first; it is shown only once.', true); $('once').focus(); return; }
   busy($('tCreate'), async () => {
   const name = F(newToken, 'name').value, hours = Number(F(newToken, 'hours').value), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
   const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name, projects: list(F(newToken, 'projects').value), scopes: list(F(newToken, 'scopes').value),
     writes: list(F(newToken, 'writes').value), operator: F(newToken, 'operator').checked, expires_at }) }).catch(fail('Could not create ' + name));
-  newToken.reset(); presses(); $('createBox').open = false; showOnce(name, r.token); await refresh(); }); };
+  newToken.reset(); presses(); $('createBox').open = false;
+  // The table grows by the new row first, so the box lands where it is scrolled to.
+  await refresh(); showOnce(name, r.token); }); };
 // The new token is shown once, right where it was created, and stays until the owner says it's stored.
-function showOnce(name, token) { unstored = name; const once = $('once'), p = document.createElement('p'), field = document.createElement('input'), bar = document.createElement('div');
+function showOnce(name, token) { unstored = name; const once = $('once'), p = document.createElement('p'), field = document.createElement('textarea'), bar = document.createElement('div');
   const strong = document.createElement('strong'); strong.textContent = 'Copy the token for ' + name + ' now.';
   p.append(strong, ' It will not be shown again. Add it as a network secret on the environment: header Authorization, prefix Bearer.');
-  field.readOnly = true; field.value = token; field.setAttribute('aria-label', 'Token for ' + name); field.onfocus = () => field.select();
+  field.readOnly = true; field.rows = 1; field.spellcheck = false; field.value = token; field.setAttribute('aria-label', 'Token for ' + name); field.onfocus = () => field.select();
   const copy = (label, text) => button(label, () => navigator.clipboard.writeText(text).then(() => say('Copied the token for ' + name + '.'), () => say('Copy failed; select the token and copy it by hand.', true)), label === 'Copy' ? 'primary' : '');
   const done = button('I have stored it', () => { unstored = ''; once.replaceChildren(); once.hidden = true; $('createBox').querySelector('summary').focus(); }, 'quiet');
   bar.className = 'bar'; bar.append(copy('Copy', token), copy('Copy as "Bearer …"', 'Bearer ' + token), done);
   once.setAttribute('role', 'region'); once.setAttribute('aria-label', 'New token'); once.replaceChildren(p, field, bar); once.hidden = false;
-  once.scrollIntoView({ block: 'center', behavior: 'smooth' }); once.focus({ preventScroll: true }); say('Created ' + name + '. Copy it now; it will not be shown again.'); }
+  field.style.height = field.scrollHeight + 2 + 'px'; // every line of the token, where field-sizing isn't supported
+  once.scrollIntoView({ block: 'end', behavior: 'smooth' }); once.focus({ preventScroll: true }); say('Created ' + name + '. Copy it now; it will not be shown again.'); }
 
 syncKind(); presses(); refresh();
 </script></body></html>`;
