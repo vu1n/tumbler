@@ -162,7 +162,10 @@ not a brochure.
 
 **The Unbroken Date Rule.** Dates and times never wrap inside the value and use tabular numerals.
 Times are always `YYYY-MM-DD HH:MM UTC`; dates are `YYYY-MM-DD`. In a phone record, where a column is
-narrow, the time may go under its date (and "expired" before it), but no part breaks.
+narrow, the time may go under its date (and "expired" before it), but no part breaks. Names in the
+audit (who, action, project, names), a grant's caller and project, and the import plan's notes stay
+whole too (`workers:write`, `ci-smoke`, `huddles-prod/dev`), in the text's own figures: only dates and
+times are tabular. On a phone, a name longer than the line breaks rather than push the page sideways.
 
 ## Layout
 
@@ -178,10 +181,12 @@ with its chips and hint at the field's width, then Operator and the button.
 Below 640px each table row becomes a labelled record: the name on its own line, then label-over-value
 pairs in two equal columns, then the row's actions. A key name elsewhere in a record takes the full
 width, and words never break mid-name: a long audit name breaks after the key name's colon, a plus or a
-comma, never inside a scope such as `workers:write` or a name such as `huddles-prod/dev`; a permission
-group of several words may wrap between them. An empty
+comma, never inside a scope such as `workers:write` or a name such as `huddles-prod/dev` (unless that one
+piece is longer than the line); a permission group of several words may wrap between them. An empty
 cell says "none" rather than disappearing, so every record keeps its fields on the same side. The audit becomes log lines: the action and when;
-then who, and the project after a muted "in"; then the names. Above 640px a table that is still too wide scrolls inside its own
+then who, and the project after a muted "in"; then the names. The import plan's records lead with
+the key (a line that has no key leads with "Line 3"), then the line and the action side by side, then
+the note at full width. Above 640px a table that is still too wide scrolls inside its own
 container; the page itself never scrolls sideways.
 
 ## Elevation & Depth
@@ -225,22 +230,26 @@ rounded.
   above and a hint below; placeholders are examples, never the label.
 - **Set value** says what carries over before it saves: the expiry (with how far off it is, and that
   the date can change) and the check that will test the new value. Left empty, Config keeps an
-  existing key's check.
+  existing key's check. The how-to hints under the fields it locks are hidden.
+- **Text boxes** (Config, `.env` text) grow with what is typed or pasted, showing it from its first
+  line, up to 60% of the screen before they scroll, and stop at 80ch wide.
 - **Focus:** the border turns teal with a 2px teal ring. **Read-only** (a locked name, scope or kind
   while replacing a value, the shown-once token): dashed border, ink text.
 
 ### Tables
 - **Style:** full width, collapsed borders, a hairline under each row, Faded Ink column labels; the
   action column has a hidden "Actions" header. Ended rows (revoked, expired) are Faded Ink.
-- **Wrapping:** above 640px column labels, the name column and a date with how far off it is
-  ("2026-10-26 01:25 UTC, in 36 h") never wrap; the other columns take the wrapping. Row actions sit on the row's first line of text.
+- **Wrapping:** above 640px column labels, the name column, a date with how far off it is
+  ("2026-10-26 01:25 UTC, in 36 h") and the names the Unbroken Date Rule lists (a grant's caller and
+  project; the audit's who, action and project) never wrap; the other columns take the wrapping. Row actions sit on the row's first line of text.
 - **Empty:** one row that says what will appear there and how to add the first one.
 
 ### Status line
 - **Style:** fixed at the bottom center, max 600px, Stone Paper ground, 1px Field Edge border, and an
   8px Stone Paper margin (an outline, not a shadow) so rows behind it end cleanly; Delete Red border and
   text for a failure. Success clears itself after six seconds; a failure stays until dismissed. The
-  same text goes to a polite (failure: assertive) live region.
+  same text goes to a polite (failure: assertive) live region. Where the browser supports it, its last line
+  never holds a lone word.
 - **A failure** names the action and what the server said. A refusal (the request was wrong) changed
   nothing, so its reason is the next step and an open editor keeps what was typed. A server or network
   failure may have half-happened, so the tables reload and the line says the state it left and what to
