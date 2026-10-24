@@ -162,7 +162,7 @@ const F = (form, name) => form.elements.namedItem(name);
 const api = (p, o = {}) => fetch('/admin/api/' + p, { ...o, headers: { 'content-type': 'application/json', 'x-tumbler-admin': '1' } })
   .then(async r => { const b = await r.json().catch(() => null);
     if (!r.ok) throw Object.assign(new Error(b?.error || 'request failed (' + r.status + ')'), { canSkip: !!b?.can_skip, status: r.status });
-    if (!b) throw Object.assign(new Error('the reply was not JSON (' + r.status + ')'), { status: r.status }); return b; });
+    if (!b) throw new Error('the reply was not JSON (' + r.status + ')'); return b; }); // unknown outcome: no status, like a dropped connection
 // One place every action reports what happened: a line at the bottom of the screen, read out too.
 let statusTimer;
 const say = (text, error) => { clearTimeout(statusTimer); const live = $('live');
@@ -183,12 +183,12 @@ const busy = async (b, fn, doing) => { const label = b.textContent, form = b.clo
     if (form) { form.inert = false; if (document.activeElement === document.body && back.isConnected) back.focus(); } } };
 // Errors say which action failed, then what the server said. A refusal (4xx) changed nothing and its reason says
 // what to fix, and an open editor stays as typed. A server or network failure may have half-happened, so the tables
-// reload and the status line says what is stored now (now() reads the reloaded tables) and to try again if nothing
-// changed. A preview changes nothing, so it passes now = null.
+// reload and the status line says what is stored now (now() reads the reloaded tables, or returns '' when they can't
+// tell) and to try again if nothing changed. A preview changes nothing, so it passes now = null.
 const fail = (what, now = () => 'The tables show what is stored now; try again') => err => {
   throw Object.assign(new Error(what + ': ' + err.message), { canSkip: err.canSkip, status: err.status, now: err.status < 500 ? null : now }); };
-const after = async err => '. ' + (await refresh() ? err.now()
-  : (unstored ? 'Copy the new token for ' + unstored + ', then reload' : 'Reload') + ' to see what is stored and try again') + '.';
+const after = async err => '. ' + ((await refresh() && err.now())
+  || (unstored ? 'Copy the new token for ' + unstored + ', then reload' : 'Reload') + ' to see what is stored and try again') + '.';
 // Loads can overlap when two actions finish close together: only the newest draws or reports a failure,
 // and every caller waits for it, so what runs after a refresh sees the page as drawn. True when it drew.
 let loads = 0, newest;
@@ -247,7 +247,7 @@ let KEYS = [], TOKENS = [], GRANTS = [];
 async function load(mine) {
   const [{ keys }, { tokens }, { audit }, g] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(err => ({ grants: [], failed: err.message }))]);
   if (mine !== loads) return; // a newer load is drawing the page
-  KEYS = keys; TOKENS = tokens; GRANTS = g.grants; note();
+  KEYS = keys; TOKENS = tokens; GRANTS = g.failed ? null : g.grants; note();
   const due = keys.filter(k => daysLeft(k) <= 7).length;
   $('nKeys').replaceChildren(String(keys.length), ...(due ? [', ', Object.assign(document.createElement('span'), { className: 'warn', textContent: due + ' need you' })] : []));
   fill('keys', keys.map(k => { const what = k.scope + '/' + k.name, check = checkText(k);
@@ -320,8 +320,10 @@ putKey.onsubmit = e => { e.preventDefault();
   let config;
   if (raw) { try { config = JSON.parse(raw); } catch (err) { say('Config is not valid JSON (' + err.message + '); nothing was saved.', true); F(putKey, 'config').focus(); return; } }
   const prev = KEYS.find(x => x.name === name && x.scope === scope), existed = !!prev, check = checkOf(kind, config ?? (prev && cfgOf(prev).c));
-  const now = () => { const k = KEYS.find(x => x.name === name && x.scope === scope);
-    return !k ? 'It was not created; try again' : !prev ? 'It was created anyway' : k.rotated_at === prev.rotated_at ? 'It keeps its old value; try again' : 'Its new value was saved anyway'; };
+  // Saved anyway only if it was saved since this save was sent (a minute's leeway for clocks), not by a session since the page loaded.
+  const sentAt = Date.now() - 6e4, now = () => { const k = KEYS.find(x => x.name === name && x.scope === scope);
+    if (!k) return prev ? 'It is no longer stored' : 'It was not created; try again';
+    return Date.parse(k.rotated_at) < sentAt ? 'It keeps its old value; try again' : prev ? 'Its new value was saved anyway' : 'It was created anyway'; };
   busy($('putSave'), async () => {
   // Read once: the form may change (another row's Set value) while the check runs, and a retry sends this.
   const sent = { value: F(putKey, 'value').value, kind, config, description: F(putKey, 'description').value, expires_at: F(putKey, 'expires_at').value || null };
@@ -366,18 +368,18 @@ importEnv.onsubmit = e => { e.preventDefault(); const sent = { scope: F(importEn
 $('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = F(f, 'from').value, to = F(f, 'to').value;
   if (!confirm('Move every key in ' + from + ' to ' + to + '?\\n\\nMinted children on the moved keys stop working now, and tokens pinned to ' + from + ' are repinned to ' + to + '. A repo whose .tumbler names ' + from + ' needs its project line changed.')) return;
   busy(f.querySelector('button'), async () => { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from, to }) }).catch(fail('Could not move ' + from,
-    () => KEYS.some(x => x.scope === from) ? 'Its keys are still in ' + from + '; try again' : 'Nothing is left in ' + from));
+    () => (KEYS.some(x => x.scope === from) ? 'Keys are still in ' + from : 'Its keys are in ' + to) + '; move it again to finish the move'));
     say('Moved ' + r.moved.length + ' key(s) from ' + from + ' to ' + to + '; repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); f.reset(); await refresh(); }, 'Moving…'); };
 
 // --- grants and tokens ---
 async function revokeGrant(g) {
   if (!confirm('Revoke ' + g.name + ' for ' + g.caller + '? This child stops working now; the next run by its caller mints a new one within the scopes of that token. To cut the caller off, revoke its token or narrow its scopes.')) return;
   await api('grants/' + g.id, { method: 'DELETE' }).catch(fail('Could not revoke ' + g.name + ' for ' + g.caller,
-    () => GRANTS.some(x => x.id === g.id && (x.state === 'active' || x.state === 'pending')) ? 'It is still active; try again' : 'It has ended')); say('Revoked ' + g.name + ' for ' + g.caller + '.'); await refresh(); }
+    () => GRANTS && (GRANTS.some(x => x.id === g.id && (x.state === 'active' || x.state === 'pending')) ? 'It is still active; try again' : 'It has ended'))); say('Revoked ' + g.name + ' for ' + g.caller + '.'); await refresh(); }
 async function revokeToken(t) {
   if (!confirm('Revoke ' + t.name + '?\\n\\nEvery session using it loses access now, and the grants it holds end. A revoked token cannot be restored: to give access back, create a new token and replace the network secret that carries it.')) return;
   await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }).catch(fail('Could not revoke ' + t.name,
-    () => TOKENS.some(x => x.name === t.name && !x.revoked_at) ? 'It still works; try again' : 'It is revoked')); say('Revoked ' + t.name + '.'); await refresh(); }
+    () => { const x = TOKENS.find(y => y.name === t.name); return !x || x.revoked_at ? 'It is revoked' : past(x.expires_at) ? 'It has expired, so it no longer works' : 'It still works; try again'; })); say('Revoked ' + t.name + '.'); await refresh(); }
 const list = v => String(v).split(',').map(s => s.trim()).filter(Boolean);
 const same = (a, b) => (a ?? []).join(',') === (b ?? []).join(',');
 let edits = 0;
@@ -417,10 +419,10 @@ F(newToken, 'projects').oninput = F(newToken, 'scopes').oninput = presses;
 newToken.onsubmit = e => { e.preventDefault();
   if (unstored) { say('Copy the token for ' + unstored + ' and press "I have stored it" first; it is shown only once.', true); $('once').focus(); return; }
   busy($('tCreate'), async () => {
-  const name = F(newToken, 'name').value, hours = Number(F(newToken, 'hours').value), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
+  const name = F(newToken, 'name').value, hours = Number(F(newToken, 'hours').value), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null, taken = TOKENS.some(x => x.name === name);
   const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name, projects: list(F(newToken, 'projects').value), scopes: list(F(newToken, 'scopes').value),
     writes: list(F(newToken, 'writes').value), operator: F(newToken, 'operator').checked, expires_at }) }).catch(fail('Could not create ' + name,
-    () => TOKENS.some(x => x.name === name) ? 'It was created, but its token was never shown: revoke it and create another' : 'It was not created; try again'));
+    () => taken ? 'That name was already taken, so nothing was created' : TOKENS.some(x => x.name === name) ? 'It was created, but its token was never shown: revoke it and create another' : 'It was not created; try again'));
   newToken.reset(); presses(); $('createBox').open = false;
   // The box shows before the reload, so a failed reload can't hide the token; it scrolls once the table has grown.
   showOnce(name, r.token); await refresh(); if (unstored === name) $('once').scrollIntoView({ block: 'end', behavior: 'smooth' }); }, 'Creating…'); };
