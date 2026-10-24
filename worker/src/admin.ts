@@ -75,7 +75,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   table.rec td.acts{display:flex;gap:8px;text-align:left;margin-left:-8px}table.rec td.ended{text-align:left;padding:0}
   table.log tr{display:flex;flex-wrap:wrap;gap:2px 10px;padding:10px 0;border-bottom:1px solid var(--line)}
   table.log thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
-  table.log td{display:inline;padding:0;border:0;overflow-wrap:break-word}table.log td:nth-child(3){font-weight:600;order:-1}
+  table.log td{display:inline;padding:0;border:0;min-width:0;overflow-wrap:break-word}table.log td:nth-child(3){font-weight:600;order:-1}
   table.log td:last-child{flex-basis:100%}
 }
 </style></head><body><main>
@@ -194,11 +194,12 @@ const fill = (id, rows, empty) => { const body = $(id), heads = [...body.closest
   body.replaceChildren(...rows); };
 const code = t => Object.assign(document.createElement('code'), { textContent: t });
 // An audit name like KEY:scope+scope may break after the key's colon, a plus or a comma, never inside a scope.
+// The colon counts only after a key name, so a bare scope like workers:write stays whole.
 const names = t => { const c = td('', 'muted'), wbr = () => document.createElement('wbr');
-  t.split(', ').forEach((item, i) => { const at = item.indexOf(':');
+  t.split(', ').forEach((item, i) => { const at = item.indexOf(':'), key = at > 0 && /^[A-Z_][A-Z0-9_]*$/.test(item.slice(0, at));
     if (i) c.append(', ', wbr());
-    if (at < 0) { c.append(item); return; }
-    c.append(item.slice(0, at + 1), wbr()); item.slice(at + 1).split('+').forEach((scope, j) => { if (j) c.append('+', wbr()); c.append(scope); }); });
+    if (key) c.append(item.slice(0, at + 1), wbr());
+    (key ? item.slice(at + 1) : item).split('+').forEach((scope, j) => { if (j) c.append('+', wbr()); c.append(scope); }); });
   return c; };
 const row = (cells, cls) => { const tr = document.createElement('tr'); if (cls) tr.className = cls; tr.append(...cells); return tr; };
 // A pin in words: each project (or all of them) with what it reads, shared keys and environments.
@@ -318,9 +319,10 @@ const importCall = (sent, save) => api('import', { method: 'POST', body: JSON.st
 F(importEnv, 'text').oninput = F(importEnv, 'scope').oninput = () => importPlan.replaceChildren();
 importEnv.onsubmit = e => { e.preventDefault(); const sent = { scope: F(importEnv, 'scope').value, text: F(importEnv, 'text').value };
   busy(importEnv.querySelector('button'), async () => { const plan = await importCall(sent, false);
-  if (F(importEnv, 'text').value !== sent.text || F(importEnv, 'scope').value !== sent.scope) return; // edited while previewing: preview again
+  if (F(importEnv, 'text').value !== sent.text || F(importEnv, 'scope').value !== sent.scope) { say('The .env changed during the preview; preview it again.'); return; }
   showPlan(plan, async () => {
-    const r = await importCall(sent, true); showPlan(r); if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length) F(importEnv, 'text').value = '';
+    const r = await importCall(sent, true); showPlan(r);
+    if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length && F(importEnv, 'text').value === sent.text) F(importEnv, 'text').value = '';
     const failed = r.keys.filter(k => k.action === 'failed').length;
     say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + (failed ? '; ' + failed + ' failed their check and were not saved (marked failed above).' : '.'), failed > 0); await refresh(); }); }); };
 $('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = F(f, 'from').value, to = F(f, 'to').value;
@@ -378,19 +380,22 @@ newToken.onsubmit = e => { e.preventDefault();
   const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name, projects: list(F(newToken, 'projects').value), scopes: list(F(newToken, 'scopes').value),
     writes: list(F(newToken, 'writes').value), operator: F(newToken, 'operator').checked, expires_at }) }).catch(fail('Could not create ' + name));
   newToken.reset(); presses(); $('createBox').open = false;
-  // The table grows by the new row first, so the box lands where it is scrolled to.
-  await refresh(); showOnce(name, r.token); }); };
+  // The box shows before the reload, so a failed reload can't hide the token; it scrolls once the table has grown.
+  showOnce(name, r.token); await refresh(); if (unstored === name) $('once').scrollIntoView({ block: 'end', behavior: 'smooth' }); }); };
 // The new token is shown once, right where it was created, and stays until the owner says it's stored.
 function showOnce(name, token) { unstored = name; const once = $('once'), p = document.createElement('p'), field = document.createElement('textarea'), bar = document.createElement('div');
   const strong = document.createElement('strong'); strong.textContent = 'Copy the token for ' + name + ' now.';
   p.append(strong, ' It will not be shown again. Add it as a network secret on the environment: header Authorization, prefix Bearer.');
-  field.readOnly = true; field.rows = 1; field.spellcheck = false; field.value = token; field.setAttribute('aria-label', 'Token for ' + name); field.onfocus = () => field.select();
+  field.readOnly = true; field.rows = 1; field.spellcheck = false; field.autocomplete = 'off'; field.value = token; field.setAttribute('aria-label', 'Token for ' + name); field.onfocus = () => field.select();
   const copy = (label, text) => button(label, () => navigator.clipboard.writeText(text).then(() => say('Copied the token for ' + name + '.'), () => say('Copy failed; select the token and copy it by hand.', true)), label === 'Copy' ? 'primary' : '');
   const done = button('I have stored it', () => { unstored = ''; once.replaceChildren(); once.hidden = true; $('createBox').querySelector('summary').focus(); }, 'quiet');
   bar.className = 'bar'; bar.append(copy('Copy', token), copy('Copy as "Bearer …"', 'Bearer ' + token), done);
   once.setAttribute('role', 'region'); once.setAttribute('aria-label', 'New token'); once.replaceChildren(p, field, bar); once.hidden = false;
-  field.style.height = field.scrollHeight + 2 + 'px'; // every line of the token, where field-sizing isn't supported
-  once.scrollIntoView({ block: 'end', behavior: 'smooth' }); once.focus({ preventScroll: true }); say('Created ' + name + '. Copy it now; it will not be shown again.'); }
+  fitToken(); once.focus({ preventScroll: true }); say('Created ' + name + '. Copy it now; it will not be shown again.'); }
+// Every line of the token shows: field-sizing does it where supported, otherwise the height follows the text.
+const fitToken = () => { const f = $('once').querySelector('textarea'); if (!f || CSS.supports('field-sizing', 'content')) return;
+  f.style.height = 'auto'; f.style.height = f.scrollHeight + 2 + 'px'; };
+addEventListener('resize', fitToken);
 
 syncKind(); presses(); refresh();
 </script></body></html>`;
