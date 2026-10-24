@@ -805,3 +805,26 @@ test("cli: scope add/rm change a minted key's groups for an operator token; othe
   assert.deepEqual(JSON.parse((await cli(["scope", "CLOUDFLARE_API_TOKEN", "--json"])).stdout).scopes["workers:write"].extra, []);
   await s.catalog.updateToken("dev", { operator: false });
 });
+
+test("cli: under the wrangler shim a deploy asks for workers:write itself; reads and --local stay on the read child", async () => {
+  const bin = mkdtempSync(join(home, "bin-"));
+  writeFileSync(join(bin, "wrangler"), "#!/bin/sh\nprintf %s \"$CLOUDFLARE_API_TOKEN\"\n", { mode: 0o755 });
+  await cli(["shim", "wrangler"]);
+  const shims = join(home, ".local/share/tumbler/bin");
+  const wrangler = (args: string[]) => exec(join(shims, "wrangler"), args, { cwd: home, env: { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: join(home, "run"),
+    PATH: `${shims}:${bin}:${process.env.PATH}`, TUMBLER_URL: `http://127.0.0.1:${(server.address() as any).port}`, TUMBLER_TOKEN: s.dev, TUMBLER_TTL: "0", TUMBLER_AUTO: "off" } });
+  const lastScopes = () => s.fake.minted.at(-1).scopes;
+  await s.catalog.setScopes("dev", ["workers:write"]);
+  await wrangler(["deploy"]);
+  assert.deepEqual(lastScopes(), ["workers:read", "workers:write"]);
+  const n = s.fake.minted.length;
+  await wrangler(["d1", "migrations", "apply", "DB", "--local"]);
+  await wrangler(["whoami"]);
+  assert.equal(s.fake.minted.length, n, "no new child for a read or a local write");
+  // A token that can't hold workers:write still runs the deploy, on its read child, and says why.
+  await s.catalog.setScopes("dev", null);
+  const r = await wrangler(["secret", "put", "X"]);
+  assert.match(r.stdout, /^child-\d+$/);
+  assert.match(r.stderr, /workers:write not granted .*running on the read token/);
+  await s.catalog.setScopes("dev", ["workers:write"]);
+});

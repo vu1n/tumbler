@@ -5,7 +5,10 @@
 //   tumbler run [-p project] [-k A,B] [--scope a,b] [--retry] [--watch] [--clean [--pass A,B]] -- <cmd> [args...]
 //                                    --scope asks for more scopes on the set's minted keys
 //                                    (e.g. workers:write); granted at once within the token's
-//                                    scopes, refused outside them (the command doesn't start)
+//                                    scopes, refused outside them (the command doesn't start).
+//                                    Under the wrangler shim, a command that writes (deploy, secret
+//                                    put, d1 migrations apply...) asks for workers:write itself; if
+//                                    the token can't hold it, it runs on the read token and says so
 //                                    When the command fails, run refetches its keys and reports
 //                                    which changed and which fail their check (names, never values)
 //                                    --retry reruns it once with the new values, only if a key changed
@@ -70,7 +73,7 @@ import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { constants, homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -426,7 +429,7 @@ function realBinary(tool) {
 
 // Ask the broker for more scopes on the minted keys in the set. A refusal (a scope outside the
 // token's scopes) stops the run: the command never starts with a narrower token than it asked for.
-async function stepUp(project, keys, scopes) {
+async function stepUp(project, keys, scopes, implied = false) {
   let names = keys, failed = null;
   try {
     if (!names) names = (await brokerGet("/v1/keys" + (project ? `?project=${encodeURIComponent(project)}` : ""))).keys;
@@ -437,8 +440,20 @@ async function stepUp(project, keys, scopes) {
   // Reload even on a failure: the cached env holds the narrower child, which a step-up that failed
   // partway (a later key's mint) may already have deleted.
   try { await ask({ op: "reload" }); } catch {}
+  // An implied scope (below) never stops the command: it runs on the child it has, as it would have.
+  if (failed && implied) return void (/no minted key in this set has scope/.test(failed) || say(`${scopes.join(", ")} not granted (${failed}); running on the read token, so the write may be refused`));
   if (failed) die(failed);
 }
+
+// wrangler subcommands that change the account. Under the wrangler shim they ask for workers:write
+// themselves, so an agent's `wrangler deploy` doesn't run on the read child and 403.
+const WRANGLER_WRITES = new Set(["deploy", "publish", "upload", "put", "create", "delete", "apply", "push", "rollback",
+  "bulk", "insert", "upsert", "update", "execute", "import", "rename"]);
+const wranglerWrites = (argv) => {
+  if (argv.some((a) => a === "--local" || a === "--dry-run")) return false;
+  const words = argv.filter((a) => !a.startsWith("-"));
+  return words.some((w) => WRANGLER_WRITES.has(w)) || (words[0] === "containers" && words[1] === "build" && argv.some((a) => a === "-p" || a === "--push"));
+};
 
 async function run(args) {
   let { project, keys, rest, picked, scopes, retry, watch, clean, pass } = parseFlags(args);
@@ -463,7 +478,9 @@ async function run(args) {
       process.stderr.write(`tumbler: could not write ${path} (${e.code ?? e.message}); running with the ${keys.length} picked key(s) only\n`);
     }
   }
+  const implied = !!process.env.TUMBLER_SHIMMED && basename(rest[0]) === "wrangler" && !scopes.includes("workers:write") && wranglerWrites(rest.slice(1));
   if (scopes.length) await stepUp(project, picked ? keys : null, scopes);
+  if (implied) await stepUp(project, picked ? keys : null, ["workers:write"], true);
   // Why: an empty picked set means "none", not "everything" (which is what /v1/env does with no keys).
   const load = (fresh) => picked && !keys.length ? Promise.resolve({}) : fetchEnv(project, keys, fresh);
   const q = project ? `?project=${encodeURIComponent(project)}` : "";
