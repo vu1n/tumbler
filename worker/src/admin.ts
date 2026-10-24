@@ -320,10 +320,10 @@ putKey.onsubmit = e => { e.preventDefault();
   let config;
   if (raw) { try { config = JSON.parse(raw); } catch (err) { say('Config is not valid JSON (' + err.message + '); nothing was saved.', true); F(putKey, 'config').focus(); return; } }
   const prev = KEYS.find(x => x.name === name && x.scope === scope), existed = !!prev, check = checkOf(kind, config ?? (prev && cfgOf(prev).c));
-  // Saved anyway only if it was saved since this save was sent (a minute's leeway for clocks), not by a session since the page loaded.
+  // Saved anyway only if it changed since the page showed it and was saved since this save was sent (a minute's leeway for clocks).
   const sentAt = Date.now() - 6e4, now = () => { const k = KEYS.find(x => x.name === name && x.scope === scope);
     if (!k) return prev ? 'It is no longer stored' : 'It was not created; try again';
-    return Date.parse(k.rotated_at) < sentAt ? 'It keeps its old value; try again' : prev ? 'Its new value was saved anyway' : 'It was created anyway'; };
+    return k.rotated_at === prev?.rotated_at || Date.parse(k.rotated_at) < sentAt ? 'It keeps its old value; try again' : prev ? 'Its new value was saved anyway' : 'It was created anyway'; };
   busy($('putSave'), async () => {
   // Read once: the form may change (another row's Set value) while the check runs, and a retry sends this.
   const sent = { value: F(putKey, 'value').value, kind, config, description: F(putKey, 'description').value, expires_at: F(putKey, 'expires_at').value || null };
