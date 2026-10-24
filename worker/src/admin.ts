@@ -266,8 +266,9 @@ putKey.onsubmit = e => { e.preventDefault(); busy($('putSave'), async () => {
   let config;
   if (raw) { try { config = JSON.parse(raw); } catch (err) { say('Config is not valid JSON (' + err.message + '); nothing was saved.', true); F(putKey, 'config').focus(); return; } }
   const existed = KEYS.some(x => x.name === name && x.scope === scope);
-  const put = skip_check => api('keys/' + encodeURIComponent(scope) + '/' + encodeURIComponent(name), { method: 'PUT',
-    body: JSON.stringify({ value: F(putKey, 'value').value, kind, config, skip_check, description: F(putKey, 'description').value, expires_at: F(putKey, 'expires_at').value || null }) });
+  // Read once: the form may change (another row's Set value) while the check runs, and a retry sends this.
+  const sent = { value: F(putKey, 'value').value, kind, config, description: F(putKey, 'description').value, expires_at: F(putKey, 'expires_at').value || null };
+  const put = skip_check => api('keys/' + encodeURIComponent(scope) + '/' + encodeURIComponent(name), { method: 'PUT', body: JSON.stringify({ ...sent, skip_check }) });
   try { await put(false); } catch (err) {
     // The check couldn't run (the service is down): offer to save unchecked, e.g. to replace a leaked key.
     if (!err.canSkip) throw err.message.startsWith(name + ':') ? err : new Error('Could not save ' + what + ': ' + err.message);
