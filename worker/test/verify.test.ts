@@ -1,6 +1,7 @@
 // Key checks: a new value is tested against its service before it is saved, and a failure saves
 // nothing. /v1/check and /v1/revs report on keys without ever returning a value.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { handle } from "../src/app.ts";
 import { Catalog } from "../src/catalog.ts";
@@ -284,4 +285,16 @@ test("cloudflare: an unknown permission name is refused with the listed names it
   assert.deepEqual(all.find((g) => g.name === "DNS Read"), { name: "DNS Read", scopes: ["com.cloudflare.api.account.zone"], delegable: false });
   assert.equal(all.find((g) => g.name === "Workers Containers Write")!.delegable, true);
   assert.ok(!JSON.stringify(all).includes("0".repeat(32)), "ids stay inside the broker");
+});
+
+// Cloudflare's own list for this account, names and scopes only, written by
+// `tumbler scope groups CLOUDFLARE_API_TOKEN --json`. Refresh it the same way when Cloudflare renames.
+test("every default group name is one the account's real list has", async () => {
+  // Why: #36 shipped "Containers Read" from the docs and every mint failed until a deploy.
+  const listed = JSON.parse(readFileSync(new URL("./cloudflare-permission-groups.json", import.meta.url), "utf8")) as { name: string; scopes: string[] }[];
+  const account = new Set(listed.filter((g) => g.scopes.includes("com.cloudflare.api.account")).map((g) => g.name.toLowerCase()));
+  assert.deepEqual(Object.values(DEFAULT_SCOPES).flat().filter((n) => !account.has(n.toLowerCase())), []);
+  for (const [scope, entries] of Object.entries(OPTIONAL_DEFAULTS)) {
+    for (const names of entries) assert.ok(account.has(names[0].toLowerCase()), `${scope}: the first name of ${JSON.stringify(names)} isn't listed`);
+  }
 });
