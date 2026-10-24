@@ -27,9 +27,16 @@ export const DEFAULT_SCOPES: Record<string, string[]> = {
 // Why Containers: `wrangler deploy` of a Worker with `containers` pushes its image through
 // /accounts/{id}/containers/*, which Workers Scripts Write doesn't reach (403 on the push). The
 // Containers API names "Workers Containers"; older accounts may list it under the other names.
+// The rest are what wrangler commonly reaches beyond those, each under the names Cloudflare's docs
+// give it ("Write" and older "Edit"). workers:read is granted to every token, so it takes metadata
+// reads only; Workers Tail Read sits on workers:write because live logs can carry request data.
+// Secrets Store Edit stays out: it can delete MASTER_KEY.
 export const OPTIONAL_DEFAULTS: Record<string, string[][]> = {
-  "workers:read": [["Workers Containers Read", "Cloudchamber Read", "Containers Read"]],
-  "workers:write": [["Workers Containers Write", "Cloudchamber Write", "Containers Write"]],
+  "workers:read": [["Workers Containers Read", "Cloudchamber Read", "Containers Read"],
+    ["Queues Read"], ["Pages Read", "Cloudflare Pages Read"], ["Hyperdrive Read"], ["Vectorize Read"], ["Account Analytics Read"]],
+  "workers:write": [["Workers Containers Write", "Cloudchamber Write", "Containers Write"],
+    ["Queues Write", "Queues Edit"], ["Pages Write", "Cloudflare Pages Edit"], ["Hyperdrive Write", "Hyperdrive Edit"],
+    ["Vectorize Write", "Vectorize Edit"], ["Workers Tail Read"]],
 };
 
 // DEFAULT_SCOPES before Containers, which keys saved then hold as ids: a key whose scopes resolve to

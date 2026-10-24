@@ -150,7 +150,9 @@ test("a defaults key mints from DEFAULT_SCOPES as they are now, so workers:write
   // Stored ids from an older default set are ignored on a defaults key; a named config keeps its own.
   const stale = { "workers:read": [id("Workers Scripts Read")], "workers:write": [id("Workers Scripts Write")] };
   const cf = cloudflare(fetcher), at = new Date("2026-10-23T12:00:00Z");
-  const write = [...DEFAULT_SCOPES["workers:write"], "Workers Containers Write"].map((n) => ({ id: id(n) }));
+  // Each optional group comes in under the first name the account lists.
+  const firsts = (s: string) => OPTIONAL_DEFAULTS[s].map((names) => names[0]);
+  const write = [...DEFAULT_SCOPES["workers:write"], ...firsts("workers:write")].map((n) => ({ id: id(n) }));
   await cf.mint("good-parent", { account_id: ACCT, defaults: true, scopes: stale }, ["workers:write"], at, "t");
   assert.deepEqual(posted[0].policies[0].permission_groups, write);
   await cf.mint("good-parent", { account_id: ACCT, scopes: stale }, ["workers:write"], at, "t");
@@ -172,10 +174,19 @@ test("a defaults key mints from DEFAULT_SCOPES as they are now, so workers:write
   // An account that lists neither name still mints the rest: an optional group never blocks a mint.
   listed = GROUPS.filter((g) => g.name !== "Workers Containers Write");
   await cf.mint("good-parent", { account_id: ACCT, defaults: true, scopes: DEFAULT_SCOPES }, ["workers:write"], at, "t");
-  assert.deepEqual(posted.at(-1).policies[0].permission_groups.at(-1), { id: id("Cloudchamber Write") }); // the next name listed
-  listed = GROUPS.filter((g) => !/Cloudchamber|Containers/.test(g.name));
+  assert.ok(posted.at(-1).policies[0].permission_groups.some((g: any) => g.id === id("Cloudchamber Write"))); // the next name listed
+  // An older spelling counts too: "Queues Edit" where the account has no "Queues Write".
+  listed = GROUPS.filter((g) => g.name !== "Queues Write");
+  await cf.mint("good-parent", { account_id: ACCT, defaults: true, scopes: DEFAULT_SCOPES }, ["workers:write"], at, "t");
+  assert.ok(posted.at(-1).policies[0].permission_groups.some((g: any) => g.id === id("Queues Edit")));
+  // An account that lists none of the optional names still mints the required ones.
+  const optional = new Set(Object.values(OPTIONAL_DEFAULTS).flat(2));
+  listed = GROUPS.filter((g) => !optional.has(g.name));
   await cf.mint("good-parent", { account_id: ACCT, defaults: true, scopes: DEFAULT_SCOPES }, ["workers:read", "workers:write"], at, "t");
   assert.deepEqual(posted.at(-1).policies[0].permission_groups, Object.values(DEFAULT_SCOPES).flat().map((n) => ({ id: id(n) })));
+  // workers:read, which every token gets, carries reads only.
+  assert.ok(OPTIONAL_DEFAULTS["workers:read"].flat().every((n) => / read$/i.test(n)));
+  assert.ok(!Object.values(OPTIONAL_DEFAULTS).flat(2).some((n) => /secrets store/i.test(n)));
 });
 
 test("permission names Cloudflare doesn't list, or zone ones, are refused; so is a parent it won't list them for", async () => {

@@ -38,7 +38,7 @@ textarea.env{display:block;min-height:120px}
   <input name="description" placeholder="what it's for">
   <input name="expires_at" type="date" title="expires">
   <button>Save</button>
-  <textarea name="config" placeholder='Optional. Left empty: workers:read (Workers, D1, KV, R2, Containers read; granted on request) and workers:write (the same, write; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.'></textarea>
+  <textarea name="config" placeholder='Optional. Left empty: workers:read (Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize read and analytics; granted on request) and workers:write (the same, write, plus Workers Tail; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.'></textarea>
 </form>
 
 <form id="importEnv" method="post">
@@ -66,7 +66,7 @@ textarea.env{display:block;min-height:120px}
   <input name="projects" placeholder="huddles, huddles/prod, */dev (empty = global only)" title="A project reads its shared keys; project/env one environment (dev, staging, prod); * is every project, */env that environment of every project.">
   <span class="chips" title="Fill in a preset"><button type="button" data-pin="*, */dev, */staging, */prod">Everything</button><button type="button" data-pin="*, */dev">All projects, dev</button><button type="button" data-pin="">Global only</button></span>
   <input name="scopes" placeholder="may mint beyond reads: workers:write, or * (empty = reads only)" title="What this token's minted keys may carry beyond reads, without asking anyone. A scope outside this list is refused.">
-  <span class="chips" title="Fill in a preset"><button type="button" data-scopes="">Read only</button><button type="button" data-scopes="workers:write" title="workers:write: Workers, D1, KV, R2 and Containers writes, not just deploys">Read + deploy</button><button type="button" data-scopes="*" title="Every scope any key has, including ones added later">Any scope</button></span>
+  <span class="chips" title="Fill in a preset"><button type="button" data-scopes="">Read only</button><button type="button" data-scopes="workers:write" title="workers:write: Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive and Vectorize writes, not just deploys">Read + deploy</button><button type="button" data-scopes="*" title="Every scope any key has, including ones added later">Any scope</button></span>
   <input name="writes" placeholder="may write with tumbler put: global, huddles, */dev (empty = nothing)" title="Where this token may save static keys from the CLI (tumbler put). global must be named; a project or project/env as in a pin. Minted keys are changed here only.">
   <label title="May add or remove permission groups on the minted keys it reads with tumbler scope, on your word in chat. Never tokens, pins, ceilings, parents or token/member/billing groups."><input name="operator" type="checkbox"> operator</label>
   <input name="hours" type="number" min="1" step="1" placeholder="expires in hours (empty = never)" title="The token stops working then; grants it holds are ended by the next sweep.">
