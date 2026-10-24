@@ -19,7 +19,7 @@ h1{font-size:20px;margin:8px 0 4px}h2{font-size:16px;margin:40px 0 4px;scroll-ma
 p{max-width:60ch;margin:4px 0 12px;text-wrap:pretty}
 a{color:var(--accent);text-underline-offset:3px}
 code,.mono{font-family:ui-monospace,monospace}code{font-size:13px}
-.muted{color:var(--muted)}.warn{color:var(--warn)}.danger{color:var(--danger)}.nw{white-space:nowrap;font-variant-numeric:tabular-nums}
+.muted{color:var(--muted)}.warn{color:var(--warn)}.danger{color:var(--danger)}.nw{white-space:nowrap;font-variant-numeric:tabular-nums}.nb{white-space:nowrap}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 nav{display:flex;flex-wrap:wrap;gap:4px 20px;margin:12px 0 0;padding:8px 0;border-block:1px solid var(--line)}
 nav a{text-decoration:none}nav a:hover{text-decoration:underline}nav span{color:var(--muted)}
@@ -28,7 +28,7 @@ td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-a
 th{color:var(--muted);font-weight:500}
 td.acts{white-space:nowrap;text-align:right;padding-block:1px}td.ended{white-space:nowrap;text-align:right;padding-right:17px}
 tr.off td{color:var(--muted)}tr.empty td{color:var(--muted);padding:16px 8px}
-.wrap{overflow-x:auto}
+.wrap{overflow-x:auto;position:relative}
 button{font:inherit;padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);cursor:pointer;transition:background-color .15s ease-out,color .15s ease-out}
 button.primary{background:var(--accent);color:var(--on-accent)}
 button.quiet{border-color:transparent;padding-inline:8px}
@@ -42,7 +42,7 @@ form[inert] :is(.f,button:not([aria-busy=true])){opacity:.55}:has(>form[inert]){
 input,select,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--edge);border-radius:6px;padding:6px 8px;min-width:0;width:100%}
 input[readonly],textarea[readonly],select:disabled{border-style:dashed;color:inherit;opacity:1}
 input[type=checkbox]{width:16px;height:16px;margin:0;flex:none}
-textarea{font:12px/1.4 ui-monospace,monospace;min-height:96px;resize:vertical}
+textarea{font:12px/1.4 ui-monospace,monospace;min-height:96px;max-height:60vh;resize:vertical;field-sizing:content}#kConfig,#iText{max-width:80ch}
 ::placeholder{color:var(--muted);opacity:1}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 input:focus-visible,select:focus-visible,textarea:focus-visible{outline-offset:0;border-color:var(--accent)}
@@ -60,9 +60,9 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 .note{grid-column:1/-1;margin:0}
 .notice{border:1px solid var(--warn);border-radius:6px;padding:8px 12px;color:var(--warn);max-width:none}
 #once{border:1px solid var(--warn);border-radius:6px;padding:12px;margin:12px 0;scroll-margin-bottom:96px}
-#once p{margin:0 0 8px}#once textarea{font-size:13px;min-height:0;resize:none;overflow:hidden;word-break:break-all;field-sizing:content;margin-bottom:8px}
+#once p{margin:0 0 8px}#once textarea{font-size:13px;min-height:0;max-height:none;resize:none;overflow:hidden;word-break:break-all;field-sizing:content;margin-bottom:8px}
 #status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);width:min(600px,calc(100% - 32px));display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 8px 8px 12px;background:var(--bg);border:1px solid var(--edge);border-radius:6px;outline:8px solid var(--bg)}
-#status.error{border-color:var(--danger);color:var(--danger)}
+#status.error{border-color:var(--danger);color:var(--danger)}#statusText{text-wrap:pretty}
 @media (pointer:coarse){button,summary,input:not([type=checkbox]),select{min-height:44px}.chips button{min-height:40px}
   input[type=checkbox]{width:20px;height:20px}.check label{min-height:44px;display:flex;align-items:center}}
 @media (min-width:720px){.w2{grid-column:span 2}}
@@ -72,11 +72,16 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   table.rec thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
   table.rec tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 16px;padding:12px 0;border-bottom:1px solid var(--line)}
   table.rec td{display:block;padding:0;border:0;overflow-wrap:break-word}table.rec .at{white-space:normal}
+  .nb{display:inline-block;max-width:100%;white-space:normal}
   table.rec td::before{content:attr(data-label);display:block;color:var(--muted);font-size:12px}
   table.rec td:first-child,table.rec td.name,table.rec td.acts,table.rec td.ended,table.rec tr.empty td,table.rec tr.editor td{grid-column:1/-1}
   table.rec tr:not(.empty) td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec td.ended::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}
   table.rec td:empty{display:none}
   table.rec td.acts{display:flex;gap:8px;text-align:left;margin-left:-8px}table.rec td.ended{text-align:left;padding:0}
+  table.plan td.name{order:-1;font-weight:600}table.plan td.name::before{content:none}table.plan tr:not(.empty) td:first-child{grid-column:auto;font-weight:400}
+  table.plan td:first-child::before{content:attr(data-label)}table.plan td:last-child{grid-column:1/-1}
+  table.plan tr:has(td.name:empty) td:first-child{order:-1;grid-column:1/-1;font-weight:600;color:var(--fg)}
+  table.plan tr:has(td.name:empty) td:first-child::before{content:'Line ';display:inline;font-size:inherit;color:inherit}
   table.log tr{display:flex;flex-wrap:wrap;gap:0 10px;padding:10px 0;border-bottom:1px solid var(--line)}
   table.log tr::before{content:'';flex-basis:100%}table.log td:first-child{order:-1}
   table.log thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
@@ -202,6 +207,8 @@ const acts = (...bs) => { const c = document.createElement('td'); c.className = 
 // A date, then how far off it is; neither part breaks mid-value. On a phone a time may go under its date, and
 // "expired" before it, so a record's column never clips a stamp.
 const nw = t => Object.assign(document.createElement('span'), { className: 'nw', textContent: t });
+// A name that must not break, in the text's own figures (nw is for dates and times).
+const nb = t => Object.assign(document.createElement('span'), { className: 'nb', textContent: t });
 const when = (main, rel, cls) => { const c = document.createElement('td'), v = document.createElement('span'), a = document.createElement('span'); a.className = 'nw at';
   (main + (rel ? ',' : '')).split(/ (?=\\d{4}-|\\d\\d:)/).forEach((part, i) => a.append(...(i ? [' ', nw(part)] : [nw(part)]))); v.append(a);
   if (rel) { const b = document.createElement('span'); b.className = 'nw'; b.textContent = rel; v.append(' ', b); } c.append(v); c.className = 'when' + (cls ? ' ' + cls : ''); return c; };
@@ -223,13 +230,17 @@ const code = t => Object.assign(document.createElement('code'), { textContent: t
 // An audit name like KEY:scope+scope may break after the key's colon, a plus or a comma, never inside a scope.
 // The colon counts only after a key name, so a bare scope like workers:write stays whole.
 // A piece never breaks inside a word (huddles-prod/dev stays whole); a group name of several words may wrap between them.
-const words = t => t.split(' ').flatMap((w, i) => i ? [' ', nw(w)] : [nw(w)]);
-const names = t => { const c = td('', 'muted'), wbr = () => document.createElement('wbr');
+const words = t => t.split(' ').flatMap((w, i) => i ? [' ', nb(w)] : [nb(w)]);
+// A plus or comma joins the piece before it, so a line never starts with one.
+const names = t => { const c = td('', 'muted'), wbr = () => document.createElement('wbr'), join = s => c.lastChild.textContent += s;
   t.split(', ').forEach((item, i) => { const at = item.indexOf(':'), key = at > 0 && /^[A-Z_][A-Z0-9_]*$/.test(item.slice(0, at));
-    if (i) c.append(', ', wbr());
-    if (key) c.append(nw(item.slice(0, at + 1)), wbr());
-    (key ? item.slice(at + 1) : item).split('+').forEach((scope, j) => { if (j) c.append('+', wbr()); c.append(...words(scope)); }); });
+    if (i) { join(','); c.append(' '); }
+    if (key) c.append(nb(item.slice(0, at + 1)), wbr());
+    // Only a key's scopes are joined by a plus; elsewhere it marks a group added (+Workers Tail Read) and stays on it.
+    (key ? item.slice(at + 1).split('+') : [item]).forEach((scope, j) => { if (j) { join('+'); c.append(wbr()); } c.append(...words(scope)); }); });
   return c; };
+// A cell holding one name (a token, an actor) that never breaks inside it.
+const named = t => { const c = td(''); c.append(nb(t)); return c; };
 const row = (cells, cls) => { const tr = document.createElement('tr'); if (cls) tr.className = cls; tr.append(...cells); return tr; };
 // A pin in words: each project (or all of them) with what it reads, shared keys and environments.
 const reach = t => { if (!t.projects) return 'global only'; const by = new Map();
@@ -263,7 +274,7 @@ async function load(mine) {
     : g.revoke_pending ? g.revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
   note2.hidden = !note2.textContent;
   fill('grants', g.grants.map(x => { const on = x.state === 'active' || x.state === 'pending';
-    return row([td(x.name), td(x.caller), td(x.project ?? 'global'), td(x.state), td(x.scopes.join(', ')), when(stamp(x.expires_at)),
+    return row([td(x.name), named(x.caller), named(x.project ?? 'global'), td(x.state), td(x.scopes.join(', ')), when(stamp(x.expires_at)),
       on ? acts(button('Revoke', () => revokeGrant(x), 'del', 'Revoke ' + x.name + ' for ' + x.caller, 'Revoking…')) : td('')], on ? '' : 'off'); }),
     g.failed ? 'Grants could not be loaded.' : 'No grants. One appears when a token reads a minted key, and ends on its own when it expires.');
 
@@ -276,7 +287,7 @@ async function load(mine) {
     return tr; }),
     'No tokens yet. Create one below, then add it as a network secret on the environment that should read keys.');
 
-  fill('audit', audit.map(a => row([when(stamp(a.at)), td(a.actor), td(a.action), td(a.project ?? ''), names(String(a.names ?? '').split(',').join(', '))])), 'Nothing has happened yet.');
+  fill('audit', audit.map(a => row([when(stamp(a.at)), named(a.actor), named(a.action), a.project ? named(a.project) : td(''), names(String(a.names ?? '').split(',').join(', '))])), 'Nothing has happened yet.');
 }
 
 // --- keys ---
@@ -301,13 +312,16 @@ function note() { const n = F(putKey, 'name').value, s = F(putKey, 'scope').valu
   const check = k.kind === 'static' && !F(putKey, 'config').value.trim() && checkOf(k.kind, cfgOf(k).c);
   if (check) t += ' It keeps its check (' + check + '): the new value is tested before it is saved.';
   out.replaceChildren(...t.split(/(\\d{4}-\\d\\d-\\d\\d)/).map((part, i) => i % 2 ? nw(part) : part)); out.className = 'note warn'; }
+// The how-to hints under the scope and kind say nothing while Set value locks those fields, to the eye or a screen reader.
+const lockHints = on => { for (const [n, id] of [['scope', 'kScopeHint'], ['kind', 'kKindHint']]) { $(id).hidden = on;
+  if (on) F(putKey, n).removeAttribute('aria-describedby'); else F(putKey, n).setAttribute('aria-describedby', id); } };
 const resetKey = () => { putKey.reset(); F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = false; F(putKey, 'kind').disabled = false;
-  $('putSave').textContent = 'Save'; syncKind(); note(); };
+  lockHints(false); $('putSave').textContent = 'Save'; syncKind(); fit(F(putKey, 'config')); note(); };
 // Set value on a row: the key's name, scope and kind are fixed, and its description and expiry carry over.
 function rotate(k) { resetKey(); addKey.open = true;
   F(putKey, 'name').value = k.name; F(putKey, 'scope').value = k.scope; F(putKey, 'kind').value = k.kind;
   F(putKey, 'description').value = k.description || ''; F(putKey, 'expires_at').value = daysLeft(k) < 0 ? '' : day(k.expires_at);
-  F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = true; F(putKey, 'kind').disabled = true;
+  F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = true; F(putKey, 'kind').disabled = true; lockHints(true);
   $('putSave').textContent = 'Save new value'; syncKind(); F(putKey, 'config').placeholder = ''; note();
   addKey.scrollIntoView({ block: 'start', behavior: 'smooth' }); F(putKey, 'value').focus({ preventScroll: true }); }
 F(putKey, 'kind').onchange = () => { syncKind(); note(); };
@@ -347,11 +361,12 @@ async function deleteKey(k) { const what = k.scope + '/' + k.name;
 const importEnv = $('importEnv'), importPlan = $('importPlan');
 const showPlan = (r, onSave) => { const table = document.createElement('table'), head = document.createElement('thead');
   head.append(row(['Line', 'Key', 'Action', 'Note'].map(h => { const th = document.createElement('th'); th.textContent = h; return th; })));
-  const body = document.createElement('tbody'); table.className = 'rec'; table.append(head, body);
+  const body = document.createElement('tbody'), wrap = document.createElement('div'); table.className = 'rec plan'; table.append(head, body); wrap.className = 'wrap'; wrap.append(table);
   const rows = [...r.errors.map(e => [e.line, '', 'error', e.error]), ...r.keys.map(k => [k.line, k.name, k.action, k.reason || (k.checked ? 'tested before saving' : '')])].sort((a, b) => a[0] - b[0]);
-  body.replaceChildren(...rows.map(([line, name, action, why]) => { const tr = row([td(String(line), 'muted'), td(name, 'name'), td(action, ['error', 'failed', 'overwrite'].includes(action) ? 'warn' : action === 'skip' ? 'muted' : ''), td(why, 'muted')]);
+  body.replaceChildren(...rows.map(([line, name, action, why]) => { const tr = row([td(String(line), 'muted'), td(name, 'name'), td(action, ['error', 'failed', 'overwrite'].includes(action) ? 'warn' : action === 'skip' ? 'muted' : ''), td('', 'muted')]);
+    tr.lastChild.append(...words(why || 'none'));
     [...tr.children].forEach((c, i) => { c.dataset.label = ['Line', 'Key', 'Action', 'Note'][i]; }); return tr; }));
-  const parts = [table], n = r.keys.filter(k => k.action === 'create' || k.action === 'overwrite').length;
+  const parts = [wrap], n = r.keys.filter(k => k.action === 'create' || k.action === 'overwrite').length;
   if (r.saved) parts.push(Object.assign(document.createElement('p'), { textContent: 'Saved ' + r.saved.length + ' key(s) to ' + r.scope + '.' }));
   else if (r.errors.length) parts.push(Object.assign(document.createElement('p'), { className: 'warn', textContent: 'Fix the lines marked error, then preview again.' }));
   else if (n) { const b = button('Save ' + n + ' key(s) to ' + r.scope, onSave, 'primary', '', 'Saving…'); const p = document.createElement('p'); p.append(b); parts.push(p); }
@@ -362,7 +377,7 @@ importEnv.onsubmit = e => { e.preventDefault(); const sent = { scope: F(importEn
   busy(importEnv.querySelector('button'), async () => { const plan = await importCall(sent, false);
   showPlan(plan, async () => {
     const r = await importCall(sent, true); showPlan(r);
-    if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length && F(importEnv, 'text').value === sent.text) F(importEnv, 'text').value = '';
+    if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length && F(importEnv, 'text').value === sent.text) { F(importEnv, 'text').value = ''; fit(F(importEnv, 'text')); }
     const failed = r.keys.filter(k => k.action === 'failed').length;
     say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + (failed ? '; ' + failed + ' failed their check and were not saved (marked failed above).' : '.'), failed > 0); await refresh(); }); }, 'Previewing…'); };
 $('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = F(f, 'from').value, to = F(f, 'to').value;
@@ -435,11 +450,12 @@ function showOnce(name, token) { unstored = name; const once = $('once'), p = do
   const done = button('I have stored it', () => { unstored = ''; once.replaceChildren(); once.hidden = true; $('createBox').querySelector('summary').focus(); }, 'quiet');
   bar.className = 'bar'; bar.append(copy('Copy', token), copy('Copy as "Bearer …"', 'Bearer ' + token), done);
   once.setAttribute('role', 'region'); once.setAttribute('aria-label', 'New token'); once.replaceChildren(p, field, bar); once.hidden = false;
-  fitToken(); once.focus({ preventScroll: true }); say('Created ' + name + '. Copy it now; it will not be shown again.'); }
-// Every line of the token shows: field-sizing does it where supported, otherwise the height follows the text.
-const fitToken = () => { const f = $('once').querySelector('textarea'); if (!f || CSS.supports('field-sizing', 'content')) return;
-  f.style.height = 'auto'; f.style.height = f.scrollHeight + 2 + 'px'; };
-addEventListener('resize', fitToken);
+  fit(field); once.focus({ preventScroll: true }); say('Created ' + name + '. Copy it now; it will not be shown again.'); }
+// Every line of a textarea shows: field-sizing does it where supported; elsewhere the height follows the text.
+const fit = f => { if (!f || !f.offsetParent || CSS.supports('field-sizing', 'content')) return; f.style.height = 'auto'; f.style.height = f.scrollHeight + 2 + 'px'; };
+addEventListener('resize', () => document.querySelectorAll('textarea').forEach(fit));
+addEventListener('input', e => { if (e.target.matches('textarea')) fit(e.target); });
+addEventListener('toggle', e => { if (e.target.open) e.target.querySelectorAll('textarea').forEach(fit); }, true);
 
 syncKind(); presses(); refresh();
 </script></body></html>`;
