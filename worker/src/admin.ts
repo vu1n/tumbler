@@ -63,11 +63,11 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 #once p{margin:0 0 8px}#once textarea{font-size:13px;min-height:0;max-height:none;resize:none;overflow:hidden;word-break:break-all;field-sizing:content;margin-bottom:8px}
 #status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);width:min(600px,calc(100% - 32px));display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 8px 8px 12px;background:var(--bg);border:1px solid var(--edge);border-radius:6px;outline:8px solid var(--bg)}
 #status.error{border-color:var(--danger);color:var(--danger)}#statusText{text-wrap:pretty}
-@media (pointer:coarse){button,summary,input:not([type=checkbox]),select{min-height:44px}.chips button{min-height:40px}
+@media (pointer:coarse){button,summary,input:not([type=checkbox]),select{min-height:44px}nav a{min-height:44px;display:inline-flex;align-items:center;gap:4px}.chips button{min-height:40px}
   input[type=checkbox]{width:20px;height:20px}.check label{min-height:44px;display:flex;align-items:center}}
 @media (min-width:720px){.w2{grid-column:span 2}}
 @media (min-width:641px){th,table.rec tr:not(.editor,.empty) td:first-child,td.when{white-space:nowrap}
-  #newToken{grid-template-columns:minmax(0,1fr) minmax(0,1fr);max-width:62ch}#newToken .hint{max-width:none}}
+  #newToken,tr.editor .fields{grid-template-columns:minmax(0,1fr) minmax(0,1fr);max-width:62ch}:is(#newToken,tr.editor) .hint{max-width:none}}
 @media (max-width:640px){
   table.rec thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
   table.rec tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 16px;padding:12px 0;border-bottom:1px solid var(--line)}
@@ -75,7 +75,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   .nb{display:inline-block;max-width:100%;white-space:normal}
   table.rec td::before{content:attr(data-label);display:block;color:var(--muted);font-size:12px}
   table.rec td:first-child,table.rec td.name,table.rec td.acts,table.rec td.ended,table.rec tr.empty td,table.rec tr.editor td{grid-column:1/-1}
-  table.rec tr:not(.empty) td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec td.ended::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}
+  table.rec tr:not(.empty,.editor) td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec td.ended::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}table.rec tr.editor td{padding-inline:4px}
   table.rec td:empty{display:none}
   table.rec td.acts{display:flex;gap:8px;text-align:left;margin-left:-8px}table.rec td.ended{text-align:left;padding:0}
   table.plan td.name{order:-1;font-weight:600}table.plan td.name::before{content:none}table.plan tr:not(.empty) td:first-child{grid-column:auto;font-weight:400}
@@ -91,10 +91,10 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 </style></head><body><main>
 <h1>Tumbler</h1>
 <p class="muted">One store for env vars and keys. Values are never shown after they're saved. A key with a check is tested before a new value is saved; if the test fails, nothing is saved. Sessions work through the CLI (<code>tumbler run</code>, <code>tumbler put</code>); this page is for reviewing what's stored and for what only you may do.</p>
-<nav aria-label="Sections"><a href="#s-keys">Keys <span id="nKeys"></span></a><a href="#s-grants">Grants <span id="nGrants"></span></a><a href="#s-tokens">Tokens <span id="nTokens"></span></a><a href="#s-audit">Audit</a></nav>
+<nav aria-label="Sections"><a href="#s-keys">Keys <span id="nKeys">…</span></a><a href="#s-grants">Grants <span id="nGrants">…</span></a><a href="#s-tokens">Tokens <span id="nTokens">…</span></a><a href="#s-audit">Audit</a></nav>
 
 <section aria-labelledby="s-keys"><h2 id="s-keys">Keys</h2>
-<div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Check</th><th>Description</th><th>Rotated</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="keys"></tbody></table></div>
+<div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Check</th><th>Description</th><th>Rotated</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="keys"><tr class="empty loading"><td colspan="8">Loading keys…</td></tr></tbody></table></div>
 <div class="acts-group">
 <details class="act" id="addKey"><summary>Add a key or replace a value</summary>
 <form id="putKey" method="post" class="fields">
@@ -128,11 +128,11 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 <section aria-labelledby="s-grants"><h2 id="s-grants">Grants</h2>
 <p class="muted">Short-lived children of minted keys. Each is minted at once within its token's scopes; nothing waits for you here.</p>
 <p id="grantsNote" class="notice" hidden></p>
-<div class="wrap"><table class="rec"><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="grants"></tbody></table></div>
+<div class="wrap"><table class="rec"><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="grants"><tr class="empty loading"><td colspan="7">Loading grants…</td></tr></tbody></table></div>
 </section>
 
 <section aria-labelledby="s-tokens"><h2 id="s-tokens">Tokens</h2>
-<div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Reads</th><th>May mint</th><th>May write</th><th>Operator</th><th>Created</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="tokens"></tbody></table></div>
+<div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Reads</th><th>May mint</th><th>May write</th><th>Operator</th><th>Created</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="tokens"><tr class="empty loading"><td colspan="8">Loading tokens…</td></tr></tbody></table></div>
 <div class="acts-group">
 <details class="act" id="createBox"><summary>Create a token</summary>
 <form id="newToken" method="post" class="fields">
@@ -152,7 +152,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 </div></section>
 
 <section aria-labelledby="s-audit"><h2 id="s-audit">Audit</h2>
-<div class="wrap"><table class="log"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Project</th><th>Names</th></tr></thead><tbody id="audit"></tbody></table></div>
+<div class="wrap"><table class="log"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Project</th><th>Names</th></tr></thead><tbody id="audit"><tr class="empty loading"><td colspan="5">Loading the audit…</td></tr></tbody></table></div>
 </section>
 </main>
 <div id="status" hidden><span id="statusText"></span><button type="button" class="quiet" id="statusClose">Dismiss</button></div>
@@ -175,8 +175,8 @@ const say = (text, error) => { clearTimeout(statusTimer); const live = $('live')
   live.setAttribute('aria-live', error ? 'assertive' : 'polite'); live.textContent = text;
   if (!error) statusTimer = setTimeout(() => { $('status').hidden = true; }, 6000); };
 $('statusClose').onclick = () => { $('status').hidden = true; };
-// A button stays disabled while its request runs, so nothing is sent twice. Once the request is on its way (after any
-// confirm, which comes before the first await), the button says what is running and its form is inert until the reply.
+// A button stays disabled while its request runs, so nothing is sent twice. Once its work starts (after any confirm,
+// which comes before the first await), the button says what is running and its form is inert until the reply.
 const busy = async (b, fn, doing) => { const label = b.textContent, form = b.closest('form');
   b.disabled = true; b.setAttribute('aria-busy', 'true');
   let back = b;
@@ -198,7 +198,11 @@ const after = async err => '. ' + ((await refresh() && err.now())
 // and every caller waits for it, so what runs after a refresh sees the page as drawn. True when it drew.
 let loads = 0, newest;
 const refresh = async () => { const mine = ++loads;
-  newest = load(mine).then(() => true, err => { if (mine === loads) say('Could not load the page: ' + err.message + (unstored ? '. Copy the new token before you reload.' : '. Reload to try again.'), true); return false; });
+  newest = load(mine).then(() => true, err => { if (mine !== loads) return false;
+    // A table never drawn says so, rather than loading for ever.
+    for (const c of document.querySelectorAll('tr.loading td')) c.textContent = 'Not loaded.';
+    for (const n of ['nKeys', 'nGrants', 'nTokens']) if ($(n).textContent === '…') $(n).textContent = '';
+    say('Could not load the page: ' + err.message + (unstored ? '. Copy the new token before you reload.' : '. Reload to try again.'), true); return false; });
   let seen, drawn; do { seen = newest; drawn = await seen; } while (seen !== newest); return drawn; };
 const td = (t, cls) => { const e = document.createElement('td'); e.textContent = t ?? ''; if (cls) e.className = cls; return e; };
 const button = (label, fn, cls, aria, doing) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
@@ -397,6 +401,14 @@ async function revokeToken(t) {
     () => { const x = TOKENS.find(y => y.name === t.name); return !x || x.revoked_at ? 'It is revoked' : past(x.expires_at) ? 'It has expired, so it no longer works' : 'It still works; try again'; })); say('Revoked ' + t.name + '.'); await refresh(); }
 const list = v => String(v).split(',').map(s => s.trim()).filter(Boolean);
 const same = (a, b) => (a ?? []).join(',') === (b ?? []).join(',');
+const isLive = g => g.state === 'active' || g.state === 'pending';
+// The live grants an edit of t ends at once, as the server closes them: a changed pin ends those for a project it
+// no longer reaches (catalog.ts pinReaches), changed scopes those holding a scope it no longer allows (machine.ts allowedBy).
+const reaches = (projects, p) => p == null || projects.includes(p) || projects.includes(p.includes('/') ? '*/' + p.split('/')[1] : '*');
+const allows = (scopes, s) => s.endsWith(':read') || scopes.includes(s) || scopes.includes('*');
+const ends = (grants, t, projects, scopes) => (grants ?? []).filter(g => g.caller === t.name && isLive(g)
+  && (!same(projects, t.projects) && !reaches(projects, g.project) || !same(scopes, t.scopes) && !g.scopes.every(s => allows(scopes, s))));
+const grantText = g => g.name + ' in ' + (g.project ?? 'global') + (g.scopes.length ? ' (' + g.scopes.join(', ') + ')' : '');
 let edits = 0;
 // Edit a token in place, so reaching one more project never means a new token. Only what changed is sent;
 // narrowing its scopes or pin ends the children it holds beyond them.
@@ -407,10 +419,23 @@ function editToken(t, tr) {
   f.innerHTML = '<div class="f full"><label for="' + id + 'p">Reads</label><input id="' + id + 'p" name="projects" autocomplete="off" spellcheck="false"><span class="hint">Comma-separated: a project, project/env, * or */env. Empty: global keys only.</span></div>'
     + '<div class="f"><label for="' + id + 's">May mint</label><input id="' + id + 's" name="scopes" autocomplete="off" spellcheck="false"><span class="hint">workers:write, or * for any. Empty: reads only.</span></div>'
     + '<div class="f"><label for="' + id + 'w">May write</label><input id="' + id + 'w" name="writes" autocomplete="off" spellcheck="false"><span class="hint">A project, project/env, * or */env; global only when named. Empty: nothing.</span></div>'
-    + '<div class="f check"><input id="' + id + 'o" name="operator" type="checkbox"><label for="' + id + 'o">Operator</label></div>'
-    + '<div class="bar"><button class="primary">Save changes</button><button type="button" class="quiet">Cancel</button></div>';
+    + '<div class="f check full"><input id="' + id + 'o" name="operator" type="checkbox"><label for="' + id + 'o">Operator</label></div>'
+    + '<p class="note warn" aria-live="polite"></p><div class="bar"><button class="primary">Save changes</button><button type="button" class="quiet">Cancel</button></div>';
   F(f, 'projects').value = (t.projects ?? []).join(', '); F(f, 'scopes').value = (t.scopes ?? []).join(', '); F(f, 'writes').value = (t.writes ?? []).join(', '); F(f, 'operator').checked = !!t.operator;
-  const [save, cancel] = f.querySelectorAll('.bar button');
+  const [save, cancel] = f.querySelectorAll('.bar button'), out = f.querySelector('.note');
+  // The note reads the grants as they are when the editor opens, not as the page last drew them. GET /grants lists
+  // at most 200, live first, so the live ones are all there unless the 200th is live too.
+  let seen = GRANTS; const fresh = api('grants').then(g => { seen = g.grants; warn(); }, () => { seen = null; warn(); });
+  const known = () => seen && !(seen.length >= 200 && isLive(seen[199])) ? seen : null;
+  // Narrowing: an old entry the new list no longer covers (huddles/dev to */dev is not; */dev to * is).
+  const narrows = (projects, scopes) => (t.projects ?? []).some(p => !reaches(projects, p)) || (t.scopes ?? []).some(s => !allows(scopes, s));
+  const warn = () => { const projects = list(F(f, 'projects').value), scopes = list(F(f, 'scopes').value), gone = ends(known(), t, projects, scopes);
+    out.textContent = !known() && narrows(projects, scopes)
+      ? (seen ? 'There may be more live grants than this page lists, so this cannot name them' : 'Grants could not be loaded, so this cannot list them')
+        + ': narrowing Reads or May mint ends any grant left outside them now.'
+      : gone.length ? 'Saving ends ' + (gone.length === 1 ? 'a live grant' : gone.length + ' live grants') + ' now: ' + gone.map(grantText).join('; ')
+        + '. ' + t.name + ' mints again only within what it keeps.' : ''; };
+  F(f, 'projects').oninput = F(f, 'scopes').oninput = warn;
   cancel.onclick = () => { ed.remove(); tr.querySelector('.acts button').focus(); };
   f.onsubmit = e => { e.preventDefault(); busy(save, async () => {
     const body = {}, projects = list(F(f, 'projects').value), scopes = list(F(f, 'scopes').value), writes = list(F(f, 'writes').value), operator = F(f, 'operator').checked;
@@ -420,8 +445,18 @@ function editToken(t, tr) {
     if (operator !== !!t.operator) body.operator = operator;
     if (!Object.keys(body).length) { say('Nothing changed for ' + t.name + '.'); ed.remove(); return; }
     if ('operator' in body && !confirm((operator ? 'Let ' + t.name + ' add and remove' : 'Stop ' + t.name + ' changing') + ' permission groups on the minted keys it reads (tumbler scope)?')) { say('Nothing was saved for ' + t.name + '.'); return; }
+    // A save sent before the editor's grants arrived could end grants the note never named: wait for them first.
+    const shown = out.textContent; await fresh;
+    if (!ed.isConnected) { say('Nothing was saved for ' + t.name + '.'); return; }
+    if (out.textContent !== shown) { say('The grants changed while the editor opened' + (out.textContent ? '. Read the note above Save changes' : ', and saving no longer ends any')
+      + '. Nothing was saved; save again.'); return; }
+    // The grants the note named; after the reload, the count is how many of them were revoked.
+    const listed = ends(known(), t, projects, scopes).map(g => g.id);
     await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify(body) }).catch(fail('Could not update ' + t.name));
-    say('Updated ' + t.name + ': ' + Object.keys(body).map(k => ({ projects: 'reads', scopes: 'may mint', writes: 'may write', operator: 'operator' })[k]).join(', ') + '.'); await refresh(); }, 'Saving…'); };
+    const done = 'Updated ' + t.name + ': ' + Object.keys(body).map(k => ({ projects: 'reads', scopes: 'may mint', writes: 'may write', operator: 'operator' })[k]).join(', ');
+    say(done + '.'); if (!await refresh() || !GRANTS) return;
+    const n = GRANTS.filter(g => listed.includes(g.id) && g.state === 'revoked').length;
+    if (n) say(done + '; ended ' + (n === 1 ? 'a grant' : n + ' grants') + '.'); }, 'Saving…'); };
   c.append(f); ed.append(c); tr.after(ed); F(f, 'projects').focus(); }
 
 // Presets fill the field, which stays editable; the preset matching the field shows as pressed.
