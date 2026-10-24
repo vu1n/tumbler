@@ -43,7 +43,7 @@ rounded:
   control: "6px"
   chip: "999px"
 spacing:
-  cell: "6px 8px"
+  cell: "8px"
   gap: "8px"
   block: "12px"
   page: "16px"

@@ -14,6 +14,9 @@ test("every admin form posts, so a value never lands in a URL", () => {
   const forms = ADMIN_HTML.match(/<form[^>]*>/g) ?? [];
   assert.ok(forms.length > 0);
   for (const f of forms) assert.match(f, /method="post"/);
+  // Forms the script builds (the token editor) set it too.
+  const script = ADMIN_HTML.split("<script>")[1];
+  assert.equal((script.match(/\.method = 'post'/g) ?? []).length, (script.match(/createElement\('form'\)/g) ?? []).length);
 });
 
 test("every field on the page has a visible label", () => {

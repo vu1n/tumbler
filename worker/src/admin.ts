@@ -61,7 +61,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 #once p{margin:0 0 8px}#once input{font:13px ui-monospace,monospace;margin-bottom:8px}
 #status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);width:min(600px,calc(100% - 32px));display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 8px 8px 12px;background:var(--bg);border:1px solid var(--edge);border-radius:6px}
 #status.error{border-color:var(--danger);color:var(--danger)}
-@media (pointer:coarse){button,summary,input,select{min-height:44px}.chips button{min-height:40px}}
+@media (pointer:coarse){button,summary,input:not([type=checkbox]),select{min-height:44px}.chips button{min-height:40px}}
 @media (min-width:720px){.w2{grid-column:span 2}}
 @media (max-width:640px){
   table.rec thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
@@ -94,7 +94,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   <div class="f w2"><label for="kDesc">What it's for</label><input id="kDesc" name="description" autocomplete="off"></div>
   <div class="f"><label for="kExp">Expires</label><input id="kExp" name="expires_at" type="date" aria-describedby="kExpHint"><span class="hint" id="kExpHint">Optional. Turns amber a week before.</span></div>
   <div class="f full"><label for="kConfig">Config <span class="muted">(optional)</span></label><textarea id="kConfig" name="config" spellcheck="false" autocomplete="off" aria-describedby="kConfigHint"></textarea>
-    <span class="hint" id="kConfigHint"><span data-for="static">A check that runs before a new value is saved, so a bad value saves nothing: {"check": "openai"} (or anthropic, github, stripe, cloudflare), or your own endpoint: {"check": {"url": "https://…", "header": "authorization", "prefix": "Bearer "}}.</span><span data-for="mint">Left empty: workers:read (Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize read and analytics; granted on request) and workers:write (the same, write, plus Workers Tail; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.</span></span></div>
+    <span class="hint" id="kConfigHint"><span data-for="static">A check that runs before a new value is saved, so a bad value saves nothing: {"check": "openai"} (or anthropic, github, stripe, cloudflare), or your own endpoint: {"check": {"url": "https://…", "header": "authorization", "prefix": "Bearer "}}.</span><span data-for="mint">Left empty, an existing key keeps its config and a new one gets workers:read (Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize read and analytics; granted on request) and workers:write (the same, write, plus Workers Tail; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: {"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}, with Cloudflare permission names or ids.</span></span></div>
   <p class="note hint" id="putNote" aria-live="polite"></p>
   <div class="bar"><button class="primary" id="putSave">Save</button><button type="button" class="quiet" id="putCancel">Cancel</button></div>
 </form></details>
@@ -125,7 +125,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 <div class="acts-group">
 <details class="act" id="createBox"><summary>Create a token</summary>
 <form id="newToken" method="post" class="fields">
-  <div class="f"><label for="tName">Name</label><input id="tName" name="name" required pattern="[a-z0-9][a-z0-9._-]{0,63}" title="lowercase letters, digits, dot, dash or underscore" placeholder="pillbox-agent" autocomplete="off" spellcheck="false"></div>
+  <div class="f"><label for="tName">Name</label><input id="tName" name="name" required pattern="[a-z0-9][a-z0-9._\\-]{0,63}" title="lowercase letters, digits, dot, dash or underscore" placeholder="pillbox-agent" autocomplete="off" spellcheck="false"></div>
   <div class="f full"><label for="tProjects">Reads</label><input id="tProjects" name="projects" autocomplete="off" spellcheck="false" placeholder="huddles, huddles/prod, */dev" aria-describedby="tProjectsHint">
     <span class="chips" role="group" aria-label="Reads presets"><button type="button" data-pin="*, */dev, */staging, */prod">Everything</button><button type="button" data-pin="*, */dev">All projects, dev</button><button type="button" data-pin="">Global only</button></span>
     <span class="hint" id="tProjectsHint">A project reads its shared keys; project/env one environment (dev, staging, prod); * every project; */env that environment of every project. Empty: global keys only.</span></div>
@@ -151,7 +151,9 @@ const $ = id => document.getElementById(id);
 // A form's own properties (form.name) shadow its fields, so fields are always looked up by name.
 const F = (form, name) => form.elements.namedItem(name);
 const api = (p, o = {}) => fetch('/admin/api/' + p, { ...o, headers: { 'content-type': 'application/json', 'x-tumbler-admin': '1' } })
-  .then(async r => { const b = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(b.error || 'request failed (' + r.status + ')'), { canSkip: !!b.can_skip }); return b; });
+  .then(async r => { const b = await r.json().catch(() => null);
+    if (!r.ok) throw Object.assign(new Error(b?.error || 'request failed (' + r.status + ')'), { canSkip: !!b?.can_skip });
+    if (!b) throw new Error('the reply was not JSON (' + r.status + ')'); return b; });
 // One place every action reports what happened: a line at the bottom of the screen, read out too.
 let statusTimer;
 const say = (text, error) => { clearTimeout(statusTimer); const live = $('live');
@@ -174,7 +176,8 @@ const when = (main, rel, cls) => { const c = document.createElement('td'), v = d
   if (rel) { const b = document.createElement('span'); b.className = 'nw'; b.textContent = rel; v.append(', ', b); } c.append(v); if (cls) c.className = cls; return c; };
 const day = s => s ? s.slice(0, 10) : '';
 const stamp = s => s ? s.slice(0, 16).replace('T', ' ') + ' UTC' : '';
-const until = s => { const ms = Date.parse(s) - Date.now(), h = Math.round(ms / 36e5); return h < 48 ? 'in ' + h + ' h' : 'in ' + Math.round(ms / 864e5) + ' days'; };
+const until = s => { const ms = Date.parse(s) - Date.now(), m = Math.max(1, Math.round(ms / 6e4)), h = Math.round(ms / 36e5);
+  return m < 60 ? 'in ' + m + ' min' : h < 48 ? 'in ' + h + ' h' : 'in ' + Math.round(ms / 864e5) + ' days'; };
 const soon = s => s && Date.parse(s) < Date.now() + 7 * 864e5;
 const past = s => s && Date.parse(s) <= Date.now();
 // Rows carry their column names, so a phone shows each row as a labelled record.
@@ -187,8 +190,9 @@ const row = (cells, cls) => { const tr = document.createElement('tr'); if (cls) 
 const reach = t => { if (!t.projects) return 'global only'; const by = new Map();
   for (const p of t.projects) { const [proj, env] = p.split('/'), k = proj === '*' ? 'all projects' : proj; by.set(k, [...(by.get(k) ?? []), env ?? 'shared']); }
   return [...by].map(([k, v]) => k + ' (' + v.join(', ') + ')').join(', '); };
-const checkText = k => { let c = {}; try { c = JSON.parse(k.config || '{}'); } catch (err) { c = {}; }
-  if (k.kind !== 'static') return k.checked ? 'parent passed' : 'none';
+const checkText = k => { let c;
+  try { c = JSON.parse(k.config || '{}'); } catch (err) { return 'config unreadable (' + err.message + ')'; }
+  if (k.kind !== 'static') return k.checked ? 'parent passed' : 'parent not checked';
   if (!c.check) return 'none';
   return (typeof c.check === 'string' ? c.check : 'custom') + (k.checked ? ', passed' : ', saved unchecked'); };
 let KEYS = [];
@@ -204,7 +208,7 @@ async function load() {
     'No keys yet. Add one below, paste a .env, or run tumbler put NAME from a session.');
 
   const live = g.grants.filter(x => x.state === 'active' || x.state === 'pending');
-  $('nGrants').textContent = live.length + ' active';
+  $('nGrants').textContent = g.failed ? '' : live.length + ' active';
   const note2 = $('grantsNote');
   note2.textContent = g.failed ? 'Could not load grants (' + g.failed + '). Keys, tokens and audit below are current.'
     : g.revoke_pending ? g.revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
@@ -218,7 +222,8 @@ async function load() {
   fill('tokens', tokens.map(t => { const gone = !!t.revoked_at, done = gone || past(t.expires_at);
     const exp = !t.expires_at ? when('never', '', 'muted') : past(t.expires_at) ? when('expired ' + stamp(t.expires_at)) : when(stamp(t.expires_at), soon(t.expires_at) ? until(t.expires_at) : '', soon(t.expires_at) ? 'warn' : '');
     const tr = row([td(t.name), td(reach(t)), td(t.scopes ? t.scopes.join(', ') : 'reads only'), td(t.writes ? t.writes.join(', ') : 'nothing'), td(t.operator ? 'yes' : 'no'), when(day(t.created_at)), exp], done ? 'off' : '');
-    tr.append(gone ? td('revoked ' + day(t.revoked_at)) : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name)));
+    const ended = Object.assign(document.createElement('span'), { className: 'nw', textContent: day(t.revoked_at) });
+    tr.append(gone ? acts('revoked ', ended) : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name)));
     return tr; }),
     'No tokens yet. Create one below, then add it as a network secret on the environment that should read keys.');
 
@@ -240,18 +245,20 @@ function note() { const n = F(putKey, 'name').value, s = F(putKey, 'scope').valu
   let t = 'Replaces the value of ' + s + '/' + n + '; the old value can not be recovered.';
   if (k.kind !== 'static') t += ' Children minted from the old parent stop working.';
   if (k.kind !== kind) t += ' It is ' + k.kind + ': set Kind to match.';
-  if (k.expires_at && !F(putKey, 'expires_at').value) t += ' Saving with no date clears its expiry (' + day(k.expires_at) + ').';
+  if (k.expires_at && !F(putKey, 'expires_at').value) t += past(k.expires_at) ? ' It expired ' + day(k.expires_at) + ': set a new date, or save with none.' : ' Saving with no date clears its expiry (' + day(k.expires_at) + ').';
   out.textContent = t; out.className = 'note warn'; }
 const resetKey = () => { putKey.reset(); F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = false; F(putKey, 'kind').disabled = false;
   $('putSave').textContent = 'Save'; syncKind(); note(); };
 // Set value on a row: the key's name, scope and kind are fixed, and its description and expiry carry over.
 function rotate(k) { resetKey(); addKey.open = true;
   F(putKey, 'name').value = k.name; F(putKey, 'scope').value = k.scope; F(putKey, 'kind').value = k.kind;
-  F(putKey, 'description').value = k.description || ''; F(putKey, 'expires_at').value = day(k.expires_at);
+  F(putKey, 'description').value = k.description || ''; F(putKey, 'expires_at').value = past(k.expires_at) ? '' : day(k.expires_at);
   F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = true; F(putKey, 'kind').disabled = true;
   $('putSave').textContent = 'Save new value'; syncKind(); note();
   addKey.scrollIntoView({ block: 'start', behavior: 'smooth' }); F(putKey, 'value').focus({ preventScroll: true }); }
 F(putKey, 'kind').onchange = () => { syncKind(); note(); };
+// Closing the form any way ends a Set value, so the next open adds a key instead of replacing this one.
+addKey.addEventListener('toggle', () => { if (!addKey.open && F(putKey, 'name').readOnly) resetKey(); });
 for (const n of ['name', 'scope', 'expires_at']) F(putKey, n).addEventListener('input', note);
 $('putCancel').onclick = () => { resetKey(); addKey.open = false; addKey.querySelector('summary').focus(); };
 putKey.onsubmit = e => { e.preventDefault(); busy($('putSave'), async () => {
@@ -264,7 +271,7 @@ putKey.onsubmit = e => { e.preventDefault(); busy($('putSave'), async () => {
   try { await put(false); } catch (err) {
     // The check couldn't run (the service is down): offer to save unchecked, e.g. to replace a leaked key.
     if (!err.canSkip) throw err.message.startsWith(name + ':') ? err : new Error('Could not save ' + what + ': ' + err.message);
-    if (!confirm(err.message + '\\n\\nSave it unchecked anyway? Commands running with --watch will not get it pushed.')) { say('Nothing was saved; ' + what + ' keeps its old value.'); return; }
+    if (!confirm(err.message + '\\n\\nSave it unchecked anyway? Commands running with --watch will not get it pushed.')) { say(existed ? 'Nothing was saved; ' + what + ' keeps its old value.' : 'Nothing was saved; ' + what + ' was not created.'); return; }
     await put(true).catch(fail('Could not save ' + what)); }
   resetKey(); addKey.open = false; addKey.querySelector('summary').focus();
   say((existed ? 'Saved a new value for ' : 'Created ') + what + '.'); await refresh(); }); };
@@ -293,7 +300,8 @@ F(importEnv, 'text').oninput = F(importEnv, 'scope').oninput = () => importPlan.
 importEnv.onsubmit = e => { e.preventDefault(); busy(importEnv.querySelector('button'), async () => {
   showPlan(await importCall(false), async () => {
     const r = await importCall(true); showPlan(r); if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length) F(importEnv, 'text').value = '';
-    say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + '.'); await refresh(); }); }); };
+    const failed = r.keys.filter(k => k.action === 'failed').length;
+    say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + (failed ? '; ' + failed + ' failed their check and were not saved (marked failed above).' : '.'), failed > 0); await refresh(); }); }); };
 $('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = F(f, 'from').value, to = F(f, 'to').value;
   if (!confirm('Move every key in ' + from + ' to ' + to + '?\\n\\nMinted children on the moved keys stop working now, and tokens pinned to ' + from + ' are repinned to ' + to + '. A repo whose .tumbler names ' + from + ' needs its project line changed.')) return;
   busy(f.querySelector('button'), async () => { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from, to }) }).catch(fail('Could not move ' + from));
@@ -330,7 +338,7 @@ function editToken(t, tr) {
     if (!same(writes, t.writes)) body.writes = writes;
     if (operator !== !!t.operator) body.operator = operator;
     if (!Object.keys(body).length) { say('Nothing changed for ' + t.name + '.'); ed.remove(); return; }
-    if ('operator' in body && !confirm((operator ? 'Let ' + t.name + ' add and remove' : 'Stop ' + t.name + ' changing') + ' permission groups on the minted keys it reads (tumbler scope)?')) return;
+    if ('operator' in body && !confirm((operator ? 'Let ' + t.name + ' add and remove' : 'Stop ' + t.name + ' changing') + ' permission groups on the minted keys it reads (tumbler scope)?')) { say('Nothing was saved for ' + t.name + '.'); return; }
     await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify(body) }).catch(fail('Could not update ' + t.name));
     say('Updated ' + t.name + ': ' + Object.keys(body).map(k => ({ projects: 'reads', scopes: 'may mint', writes: 'may write', operator: 'operator' })[k]).join(', ') + '.'); await refresh(); }); };
   c.append(f); ed.append(c); tr.after(ed); F(f, 'projects').focus(); }
@@ -342,18 +350,21 @@ const presses = () => { for (const b of newToken.querySelectorAll('[data-pin]'))
 for (const b of newToken.querySelectorAll('[data-pin]')) b.onclick = () => { F(newToken, 'projects').value = b.dataset.pin; presses(); };
 for (const b of newToken.querySelectorAll('[data-scopes]')) b.onclick = () => { F(newToken, 'scopes').value = b.dataset.scopes; presses(); };
 F(newToken, 'projects').oninput = F(newToken, 'scopes').oninput = presses;
-newToken.onsubmit = e => { e.preventDefault(); busy($('tCreate'), async () => {
+let unstored = '';
+newToken.onsubmit = e => { e.preventDefault();
+  if (unstored) { say('Copy the token for ' + unstored + ' and press "I have stored it" first; it is shown only once.', true); $('once').focus(); return; }
+  busy($('tCreate'), async () => {
   const name = F(newToken, 'name').value, hours = Number(F(newToken, 'hours').value), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
   const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name, projects: list(F(newToken, 'projects').value), scopes: list(F(newToken, 'scopes').value),
     writes: list(F(newToken, 'writes').value), operator: F(newToken, 'operator').checked, expires_at }) }).catch(fail('Could not create ' + name));
   newToken.reset(); presses(); $('createBox').open = false; showOnce(name, r.token); await refresh(); }); };
 // The new token is shown once, right where it was created, and stays until the owner says it's stored.
-function showOnce(name, token) { const once = $('once'), p = document.createElement('p'), field = document.createElement('input'), bar = document.createElement('div');
+function showOnce(name, token) { unstored = name; const once = $('once'), p = document.createElement('p'), field = document.createElement('input'), bar = document.createElement('div');
   const strong = document.createElement('strong'); strong.textContent = 'Copy the token for ' + name + ' now.';
   p.append(strong, ' It will not be shown again. Add it as a network secret on the environment: header Authorization, prefix Bearer.');
   field.readOnly = true; field.value = token; field.setAttribute('aria-label', 'Token for ' + name); field.onfocus = () => field.select();
   const copy = (label, text) => button(label, () => navigator.clipboard.writeText(text).then(() => say('Copied the token for ' + name + '.'), () => say('Copy failed; select the token and copy it by hand.', true)), label === 'Copy' ? 'primary' : '');
-  const done = button('I have stored it', () => { once.replaceChildren(); once.hidden = true; $('createBox').querySelector('summary').focus(); }, 'quiet');
+  const done = button('I have stored it', () => { unstored = ''; once.replaceChildren(); once.hidden = true; $('createBox').querySelector('summary').focus(); }, 'quiet');
   bar.className = 'bar'; bar.append(copy('Copy', token), copy('Copy as "Bearer …"', 'Bearer ' + token), done);
   once.setAttribute('role', 'region'); once.setAttribute('aria-label', 'New token'); once.replaceChildren(p, field, bar); once.hidden = false;
   once.scrollIntoView({ block: 'center', behavior: 'smooth' }); once.focus({ preventScroll: true }); say('Created ' + name + '. Copy it now; it will not be shown again.'); }
