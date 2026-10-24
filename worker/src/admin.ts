@@ -203,11 +203,13 @@ const fill = (id, rows, empty) => { const body = $(id), heads = [...body.closest
 const code = t => Object.assign(document.createElement('code'), { textContent: t });
 // An audit name like KEY:scope+scope may break after the key's colon, a plus or a comma, never inside a scope.
 // The colon counts only after a key name, so a bare scope like workers:write stays whole.
+// A piece never breaks inside a word (huddles-prod/dev stays whole); a group name of several words may wrap between them.
+const words = t => t.split(' ').flatMap((w, i) => i ? [' ', nw(w)] : [nw(w)]);
 const names = t => { const c = td('', 'muted'), wbr = () => document.createElement('wbr');
   t.split(', ').forEach((item, i) => { const at = item.indexOf(':'), key = at > 0 && /^[A-Z_][A-Z0-9_]*$/.test(item.slice(0, at));
     if (i) c.append(', ', wbr());
     if (key) c.append(nw(item.slice(0, at + 1)), wbr());
-    (key ? item.slice(at + 1) : item).split('+').forEach((scope, j) => { if (j) c.append('+', wbr()); c.append(nw(scope)); }); });
+    (key ? item.slice(at + 1) : item).split('+').forEach((scope, j) => { if (j) c.append('+', wbr()); c.append(...words(scope)); }); });
   return c; };
 const row = (cells, cls) => { const tr = document.createElement('tr'); if (cls) tr.className = cls; tr.append(...cells); return tr; };
 // A pin in words: each project (or all of them) with what it reads, shared keys and environments.

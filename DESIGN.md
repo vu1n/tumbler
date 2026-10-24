@@ -176,7 +176,8 @@ disclosure's top line, so no two rules ever stack. Forms are a grid of labelled 
 Below 640px each table row becomes a labelled record: the name on its own line, then label-over-value
 pairs in two equal columns, then the row's actions. A key name elsewhere in a record takes the full
 width, and words never break mid-name: a long audit name breaks after the key name's colon, a plus or a
-comma, never inside a scope such as `workers:write`. An empty
+comma, never inside a scope such as `workers:write` or a name such as `huddles-prod/dev`; a permission
+group of several words may wrap between them. An empty
 cell says "none" rather than disappearing, so every record keeps its fields on the same side. The audit becomes log lines (action first, then when,
 who and project, then the names). Above 640px a table that is still too wide scrolls inside its own
 container; the page itself never scrolls sideways.
