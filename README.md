@@ -23,7 +23,8 @@ cd worker && npm install
 # 1. Set up and deploy, from your own machine. The first run creates the master key in the
 #    account's Secrets Store and saves a backup to ~/tumbler-master-key.txt: move that into your
 #    password manager and delete the file. It also creates the D1 database and applies migrations.
-#    Run the same command again for every later deploy.
+#    Run the same command again for every later deploy. From an agent session, run it on a
+#    workers:write child: tumbler run --scope workers:write -- npm run deploy
 npm run deploy
 # 2. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,
 #    path /admin*, allow your email), then set the Worker's vars:
@@ -250,8 +251,8 @@ Set one up in `/admin`:
    Profile) with **Account API Tokens: Edit**: it can create other tokens and nothing else.
 3. Save it as `CLOUDFLARE_API_TOKEN` with kind `mint:cloudflare`. Just the token: with no config,
    callers get `workers:read` (Workers Scripts, D1, KV, R2, Containers, Queues, Pages, Hyperdrive and Vectorize read, and account analytics) and `workers:write`
-   (the same, write, plus Workers Tail, so `wrangler deploy` can push a Worker's container image or
-   wire a queue; for tokens whose scopes allow it; a group the account doesn't list is left out), children last 30 minutes, and the token is used to look up each permission's id
+   (the same, write, plus Workers Tail and Secrets Store, so `wrangler deploy` can push a Worker's
+   container image, wire a queue or bind a Secrets Store secret; for tokens whose scopes allow it; a group the account doesn't list is left out), children last 30 minutes, and the token is used to look up each permission's id
    on your account as it's saved. A key saved this way follows the defaults: each mint looks them up
    by name again, so a later change to them reaches it with nothing to re-save.
 
@@ -268,7 +269,7 @@ permissions, by name (as the dashboard shows them) or by id:
 the account refuses the save, and names are stored as ids, which don't change.
 
 **A token's scopes are its approval.** When you create a token in `/admin`, besides its pin you
-say what it may mint beyond reads: nothing (Read only), `workers:write` (Read + deploy: Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive and Vectorize writes, and Workers Tail), or `*` (any
+say what it may mint beyond reads: nothing (Read only), `workers:write` (Read + deploy: Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize and Secrets Store writes, and Workers Tail), or `*` (any
 scope a key has, including ones added to a key later). You decide once, there. After that nothing waits for you:
 
 - Reads are minted on request, for every token.
