@@ -38,7 +38,7 @@ button.del:focus-visible{color:var(--danger);background:color-mix(in srgb,var(--
   button.primary:hover{background:color-mix(in srgb,var(--accent) 85%,var(--fg))}
   button.del:hover{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,transparent)}}
 button:disabled{opacity:.55;cursor:not-allowed}button[aria-busy=true]{cursor:progress;opacity:1}
-form[inert] :is(.f,.note,button:not([aria-busy=true])){opacity:.55}
+form[inert] :is(.f,button:not([aria-busy=true])){opacity:.55}:has(>form[inert]){cursor:progress}
 input,select,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--edge);border-radius:6px;padding:6px 8px;min-width:0;width:100%}
 input[readonly],textarea[readonly],select:disabled{border-style:dashed;color:inherit;opacity:1}
 input[type=checkbox]{width:16px;height:16px;margin:0;flex:none}
@@ -66,7 +66,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 @media (pointer:coarse){button,summary,input:not([type=checkbox]),select{min-height:44px}.chips button{min-height:40px}
   input[type=checkbox]{width:20px;height:20px}.check label{min-height:44px;display:flex;align-items:center}}
 @media (min-width:720px){.w2{grid-column:span 2}}
-@media (min-width:641px){th,table.rec td:first-child{white-space:nowrap}
+@media (min-width:641px){th,table.rec tr:not(.editor,.empty) td:first-child,td.when{white-space:nowrap}
   #newToken{grid-template-columns:minmax(0,1fr) minmax(0,1fr);max-width:62ch}#newToken .hint{max-width:none}}
 @media (max-width:640px){
   table.rec thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
@@ -178,14 +178,17 @@ const busy = async (b, fn, doing) => { const label = b.textContent, form = b.clo
   try { const run = fn(); if (doing) b.textContent = doing;
     if (form) { if (document.activeElement !== document.body) back = document.activeElement; form.inert = true; }
     return await run; }
-  catch (err) { say(err.message + (err.changed ? await after(err) : ''), true); }
+  catch (err) { say(err.message + (err.now ? await after(err) : ''), true); }
   finally { b.disabled = false; b.removeAttribute('aria-busy'); if (doing && b.textContent === doing) b.textContent = label;
     if (form) { form.inert = false; if (document.activeElement === document.body && back.isConnected) back.focus(); } } };
-// Errors say which action failed, then what the server said. A failed change may have half-happened, so the tables
-// reload and the status line says what is stored now, and to try again when the server, not the request, failed.
-const fail = (what, change = true) => err => { throw Object.assign(new Error(what + ': ' + err.message), { canSkip: err.canSkip, status: err.status, changed: change }); };
-const after = async err => (await refresh() ? '. The tables show what is stored now' : '. Reload to see what is stored')
-  + (!err.status || err.status >= 500 ? '; try again.' : '.');
+// Errors say which action failed, then what the server said. A refusal (4xx) changed nothing and its reason says
+// what to fix, and an open editor stays as typed. A server or network failure may have half-happened, so the tables
+// reload and the status line says what is stored now (now() reads the reloaded tables) and to try again if nothing
+// changed. A preview changes nothing, so it passes now = null.
+const fail = (what, now = () => 'The tables show what is stored now; try again') => err => {
+  throw Object.assign(new Error(what + ': ' + err.message), { canSkip: err.canSkip, status: err.status, now: err.status < 500 ? null : now }); };
+const after = async err => '. ' + (await refresh() ? err.now()
+  : (unstored ? 'Copy the new token for ' + unstored + ', then reload' : 'Reload') + ' to see what is stored and try again') + '.';
 // Loads can overlap when two actions finish close together: only the newest draws or reports a failure,
 // and every caller waits for it, so what runs after a refresh sees the page as drawn. True when it drew.
 let loads = 0, newest;
@@ -201,7 +204,7 @@ const acts = (...bs) => { const c = document.createElement('td'); c.className = 
 const nw = t => Object.assign(document.createElement('span'), { className: 'nw', textContent: t });
 const when = (main, rel, cls) => { const c = document.createElement('td'), v = document.createElement('span'), a = document.createElement('span'); a.className = 'nw at';
   (main + (rel ? ',' : '')).split(/ (?=\\d{4}-|\\d\\d:)/).forEach((part, i) => a.append(...(i ? [' ', nw(part)] : [nw(part)]))); v.append(a);
-  if (rel) { const b = document.createElement('span'); b.className = 'nw'; b.textContent = rel; v.append(' ', b); } c.append(v); if (cls) c.className = cls; return c; };
+  if (rel) { const b = document.createElement('span'); b.className = 'nw'; b.textContent = rel; v.append(' ', b); } c.append(v); c.className = 'when' + (cls ? ' ' + cls : ''); return c; };
 const day = s => s ? s.slice(0, 10) : '';
 const stamp = s => s ? s.slice(0, 16).replace('T', ' ') + ' UTC' : '';
 const until = s => { const ms = Date.parse(s) - Date.now(), m = Math.max(1, Math.round(ms / 6e4)), h = Math.round(ms / 36e5);
@@ -239,12 +242,12 @@ const checkText = k => { const { c, error } = cfgOf(k); if (error) return 'confi
   if (k.kind !== 'static') return k.checked ? 'parent passed' : 'parent not checked';
   if (!c.check) return 'none';
   return (typeof c.check === 'string' ? c.check : 'custom') + (k.checked ? ', passed' : ', saved unchecked'); };
-let KEYS = [];
+let KEYS = [], TOKENS = [], GRANTS = [];
 
 async function load(mine) {
   const [{ keys }, { tokens }, { audit }, g] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(err => ({ grants: [], failed: err.message }))]);
   if (mine !== loads) return; // a newer load is drawing the page
-  KEYS = keys; note();
+  KEYS = keys; TOKENS = tokens; GRANTS = g.grants; note();
   const due = keys.filter(k => daysLeft(k) <= 7).length;
   $('nKeys').replaceChildren(String(keys.length), ...(due ? [', ', Object.assign(document.createElement('span'), { className: 'warn', textContent: due + ' need you' })] : []));
   fill('keys', keys.map(k => { const what = k.scope + '/' + k.name, check = checkText(k);
@@ -292,11 +295,12 @@ function note() { const n = F(putKey, 'name').value, s = F(putKey, 'scope').valu
   if (k.kind !== 'static') t += ' Children minted from the old parent stop working.';
   if (k.kind !== kind) t += ' It is ' + k.kind + ': set Kind to match.';
   const exp = F(putKey, 'expires_at').value, left = daysLeft(k);
-  if (k.expires_at && !exp) t += left < 0 ? ' It expired ' + day(k.expires_at) + ': set a new date, or save with none.' : ' Saving with no date clears its expiry (' + day(k.expires_at) + ').';
+  if (k.expires_at && left < 0 && (!exp || exp === day(k.expires_at))) t += ' It expired ' + day(k.expires_at) + ': set a new date, or save with none.';
+  else if (k.expires_at && !exp) t += ' Saving with no date clears its expiry (' + day(k.expires_at) + ').';
   else if (k.expires_at && exp === day(k.expires_at)) t += ' It keeps its expiry, ' + day(k.expires_at) + (left <= 7 ? ' (' + inDays(left) + ')' : '') + ': change the date if the new value lasts longer.';
   const check = k.kind === 'static' && !F(putKey, 'config').value.trim() && checkOf(k.kind, cfgOf(k).c);
   if (check) t += ' It keeps its check (' + check + '): the new value is tested before it is saved.';
-  out.textContent = t; out.className = 'note warn'; }
+  out.replaceChildren(...t.split(/(\\d{4}-\\d\\d-\\d\\d)/).map((part, i) => i % 2 ? nw(part) : part)); out.className = 'note warn'; }
 const resetKey = () => { putKey.reset(); F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = false; F(putKey, 'kind').disabled = false;
   $('putSave').textContent = 'Save'; syncKind(); note(); };
 // Set value on a row: the key's name, scope and kind are fixed, and its description and expiry carry over.
@@ -316,22 +320,25 @@ putKey.onsubmit = e => { e.preventDefault();
   let config;
   if (raw) { try { config = JSON.parse(raw); } catch (err) { say('Config is not valid JSON (' + err.message + '); nothing was saved.', true); F(putKey, 'config').focus(); return; } }
   const prev = KEYS.find(x => x.name === name && x.scope === scope), existed = !!prev, check = checkOf(kind, config ?? (prev && cfgOf(prev).c));
+  const now = () => { const k = KEYS.find(x => x.name === name && x.scope === scope);
+    return !k ? 'It was not created; try again' : !prev ? 'It was created anyway' : k.rotated_at === prev.rotated_at ? 'It keeps its old value; try again' : 'Its new value was saved anyway'; };
   busy($('putSave'), async () => {
   // Read once: the form may change (another row's Set value) while the check runs, and a retry sends this.
   const sent = { value: F(putKey, 'value').value, kind, config, description: F(putKey, 'description').value, expires_at: F(putKey, 'expires_at').value || null };
   const put = skip_check => api('keys/' + encodeURIComponent(scope) + '/' + encodeURIComponent(name), { method: 'PUT', body: JSON.stringify({ ...sent, skip_check }) });
   try { await put(false); } catch (err) {
     // The check couldn't run (the service is down): offer to save unchecked, e.g. to replace a leaked key.
-    if (!err.canSkip) { if (err.message.startsWith(name + ':')) throw err; fail('Could not save ' + what)(err); }
+    if (!err.canSkip) { if (err.message.startsWith(name + ':')) throw err; fail('Could not save ' + what, now)(err); }
     if (!confirm(err.message + '\\n\\nSave it unchecked anyway? Commands running with --watch will not get it pushed.')) { say(existed ? 'Nothing was saved; ' + what + ' keeps its old value.' : 'Nothing was saved; ' + what + ' was not created.'); return; }
-    await put(true).catch(fail('Could not save ' + what)); }
+    await put(true).catch(fail('Could not save ' + what, now)); }
   resetKey(); addKey.open = false; addKey.querySelector('summary').focus();
   say((existed ? 'Saved a new value for ' : 'Created ') + what + '.'); await refresh(); }, check ? 'Checking with ' + check + '…' : 'Saving…'); };
 async function deleteKey(k) { const what = k.scope + '/' + k.name;
   if (!confirm(k.kind === 'static'
     ? 'Delete ' + what + '?\\n\\nThe value is gone for good: tumbler never shows a saved value, so there is no copy here. Sessions that read it stop getting it on their next run.'
     : 'Delete ' + what + '?\\n\\nIts parent credential is gone for good, and every child it minted stops working now. Sessions can mint again only after a new parent is saved.')) return;
-  await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }).catch(fail('Could not delete ' + what));
+  await api('keys/' + encodeURIComponent(k.scope) + '/' + encodeURIComponent(k.name), { method: 'DELETE' }).catch(fail('Could not delete ' + what,
+    () => KEYS.some(x => x.scope === k.scope && x.name === k.name) ? 'It is still stored; try again' : 'It is gone'));
   say('Deleted ' + what + '.'); await refresh(); }
 
 // Paste a .env: preview what each line does, then save. The text goes in a POST body only.
@@ -347,7 +354,7 @@ const showPlan = (r, onSave) => { const table = document.createElement('table'),
   else if (r.errors.length) parts.push(Object.assign(document.createElement('p'), { className: 'warn', textContent: 'Fix the lines marked error, then preview again.' }));
   else if (n) { const b = button('Save ' + n + ' key(s) to ' + r.scope, onSave, 'primary', '', 'Saving…'); const p = document.createElement('p'); p.append(b); parts.push(p); }
   importPlan.replaceChildren(...parts); };
-const importCall = (sent, save) => api('import', { method: 'POST', body: JSON.stringify({ ...sent, save }) }).catch(fail(save ? 'Could not save the .env' : 'Could not preview the .env', save));
+const importCall = (sent, save) => api('import', { method: 'POST', body: JSON.stringify({ ...sent, save }) }).catch(fail(save ? 'Could not save the .env' : 'Could not preview the .env', save ? undefined : null));
 F(importEnv, 'text').oninput = F(importEnv, 'scope').oninput = () => importPlan.replaceChildren();
 importEnv.onsubmit = e => { e.preventDefault(); const sent = { scope: F(importEnv, 'scope').value, text: F(importEnv, 'text').value };
   busy(importEnv.querySelector('button'), async () => { const plan = await importCall(sent, false);
@@ -358,16 +365,19 @@ importEnv.onsubmit = e => { e.preventDefault(); const sent = { scope: F(importEn
     say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + (failed ? '; ' + failed + ' failed their check and were not saved (marked failed above).' : '.'), failed > 0); await refresh(); }); }, 'Previewing…'); };
 $('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = F(f, 'from').value, to = F(f, 'to').value;
   if (!confirm('Move every key in ' + from + ' to ' + to + '?\\n\\nMinted children on the moved keys stop working now, and tokens pinned to ' + from + ' are repinned to ' + to + '. A repo whose .tumbler names ' + from + ' needs its project line changed.')) return;
-  busy(f.querySelector('button'), async () => { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from, to }) }).catch(fail('Could not move ' + from));
+  busy(f.querySelector('button'), async () => { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from, to }) }).catch(fail('Could not move ' + from,
+    () => KEYS.some(x => x.scope === from) ? 'Its keys are still in ' + from + '; try again' : 'Nothing is left in ' + from));
     say('Moved ' + r.moved.length + ' key(s) from ' + from + ' to ' + to + '; repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); f.reset(); await refresh(); }, 'Moving…'); };
 
 // --- grants and tokens ---
 async function revokeGrant(g) {
   if (!confirm('Revoke ' + g.name + ' for ' + g.caller + '? This child stops working now; the next run by its caller mints a new one within the scopes of that token. To cut the caller off, revoke its token or narrow its scopes.')) return;
-  await api('grants/' + g.id, { method: 'DELETE' }).catch(fail('Could not revoke ' + g.name + ' for ' + g.caller)); say('Revoked ' + g.name + ' for ' + g.caller + '.'); await refresh(); }
+  await api('grants/' + g.id, { method: 'DELETE' }).catch(fail('Could not revoke ' + g.name + ' for ' + g.caller,
+    () => GRANTS.some(x => x.id === g.id && (x.state === 'active' || x.state === 'pending')) ? 'It is still active; try again' : 'It has ended')); say('Revoked ' + g.name + ' for ' + g.caller + '.'); await refresh(); }
 async function revokeToken(t) {
   if (!confirm('Revoke ' + t.name + '?\\n\\nEvery session using it loses access now, and the grants it holds end. A revoked token cannot be restored: to give access back, create a new token and replace the network secret that carries it.')) return;
-  await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }).catch(fail('Could not revoke ' + t.name)); say('Revoked ' + t.name + '.'); await refresh(); }
+  await api('tokens/' + encodeURIComponent(t.name), { method: 'DELETE' }).catch(fail('Could not revoke ' + t.name,
+    () => TOKENS.some(x => x.name === t.name && !x.revoked_at) ? 'It still works; try again' : 'It is revoked')); say('Revoked ' + t.name + '.'); await refresh(); }
 const list = v => String(v).split(',').map(s => s.trim()).filter(Boolean);
 const same = (a, b) => (a ?? []).join(',') === (b ?? []).join(',');
 let edits = 0;
@@ -409,7 +419,8 @@ newToken.onsubmit = e => { e.preventDefault();
   busy($('tCreate'), async () => {
   const name = F(newToken, 'name').value, hours = Number(F(newToken, 'hours').value), expires_at = hours > 0 ? new Date(Date.now() + hours * 3600_000).toISOString() : null;
   const r = await api('tokens', { method: 'POST', body: JSON.stringify({ name, projects: list(F(newToken, 'projects').value), scopes: list(F(newToken, 'scopes').value),
-    writes: list(F(newToken, 'writes').value), operator: F(newToken, 'operator').checked, expires_at }) }).catch(fail('Could not create ' + name));
+    writes: list(F(newToken, 'writes').value), operator: F(newToken, 'operator').checked, expires_at }) }).catch(fail('Could not create ' + name,
+    () => TOKENS.some(x => x.name === name) ? 'It was created, but its token was never shown: revoke it and create another' : 'It was not created; try again'));
   newToken.reset(); presses(); $('createBox').open = false;
   // The box shows before the reload, so a failed reload can't hide the token; it scrolls once the table has grown.
   showOnce(name, r.token); await refresh(); if (unstored === name) $('once').scrollIntoView({ block: 'end', behavior: 'smooth' }); }, 'Creating…'); };

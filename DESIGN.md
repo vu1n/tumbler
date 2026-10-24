@@ -208,8 +208,8 @@ rounded.
   focus. Every destructive control names its target for assistive tech ("Delete global/GITHUB_PAT").
 - **Busy:** once its request is on its way (after any confirm), the button says what is running
   ("Saving…", "Checking with openai…", "Previewing…", "Creating…", "Deleting…") at full color with a
-  progress cursor, and its form is inert (its fields and other buttons faded) until the reply, so
-  nothing sends twice and Cancel can't look like it stops a save that is already sent.
+  progress cursor, and its form is inert (its fields and other buttons faded; its note stays readable)
+  until the reply, so nothing sends twice and Cancel can't look like it stops a save that is already sent.
 - **Hover:** a 10% teal tint (primary: teal deepened 15% toward ink), only where the pointer can
   hover, so a tap never leaves a control tinted (or a Delete red). **Focus:** a 2px teal ring,
   2px offset.
@@ -232,8 +232,8 @@ rounded.
 ### Tables
 - **Style:** full width, collapsed borders, a hairline under each row, Faded Ink column labels; the
   action column has a hidden "Actions" header. Ended rows (revoked, expired) are Faded Ink.
-- **Wrapping:** above 640px column labels and the name column never wrap; the other columns take
-  the wrapping. Row actions sit on the row's first line of text.
+- **Wrapping:** above 640px column labels, the name column and a date with how far off it is
+  ("2026-10-26 01:25 UTC, in 36 h") never wrap; the other columns take the wrapping. Row actions sit on the row's first line of text.
 - **Empty:** one row that says what will appear there and how to add the first one.
 
 ### Status line
@@ -241,10 +241,11 @@ rounded.
   8px Stone Paper margin (an outline, not a shadow) so rows behind it end cleanly; Delete Red border and
   text for a failure. Success clears itself after six seconds; a failure stays until dismissed. The
   same text goes to a polite (failure: assertive) live region.
-- **A failure** names the action and what the server said, then what is stored now (a failed change
-  reloads the tables) and what to do: "Could not delete global/AWS_REGION: internal error. The tables
-  show what is stored now; try again." It says "try again" only when the server, not the request,
-  failed.
+- **A failure** names the action and what the server said. A refusal (the request was wrong) changed
+  nothing, so its reason is the next step and an open editor keeps what was typed. A server or network
+  failure may have half-happened, so the tables reload and the line says the state it left and what to
+  do: "Could not delete global/AWS_REGION: internal error. It is still stored; try again." If the reload
+  fails too, it says to reload, after copying a token still shown once.
 
 ### Shown-once box
 - **Style:** 12px padding, 1px Expiry Amber border, 6px radius, placed right under "Create a token".
