@@ -158,9 +158,13 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
   if (url.pathname.startsWith("/v1/mint/") && (request.method === "GET" || request.method === "PATCH")) {
     if (!caller.operator) return json({ error: `token ${caller.name} is not an operator; an admin turns that on for it in /admin or with \`tumbler admin token edit ${caller.name} --operator on\`` }, 403);
     if (!grants) return json({ error: "minting is off" }, 501);
-    const { row } = await catalog.rowFor(caller, url.searchParams.get("project"), decodeURIComponent(url.pathname.slice("/v1/mint/".length)));
+    // GET /v1/mint/NAME/groups: every group the key's parent lists, names only, for `tumbler scope groups`.
+    const [keyName, sub] = url.pathname.slice("/v1/mint/".length).split("/");
+    if (sub !== undefined && (sub !== "groups" || request.method !== "GET")) return json({ error: "not found" }, 404);
+    const { row } = await catalog.rowFor(caller, url.searchParams.get("project"), decodeURIComponent(keyName));
     if (row.kind === "static") return json({ error: `${row.scope}/${row.name} is a static key; it has no scopes` }, 400);
     let cfg = grants.config(row);
+    if (sub === "groups") return json({ scope: row.scope, name: row.name, groups: await grants.listGroups(row.kind, await catalog.value(row), cfg) });
     if (request.method === "PATCH") {
       const b = await request.json().catch(() => ({})) as Record<string, unknown>;
       const scope = String(b.scope ?? ""), add = list(b.add) ?? [], remove = list(b.remove) ?? [];

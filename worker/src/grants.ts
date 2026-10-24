@@ -37,7 +37,12 @@ export interface Provider {
   // The provider's own spelling of each group an operator adds, after checking it exists and may be
   // delegated. Optional: without it a key's scopes can't be changed from the CLI.
   groups?(parent: string, config: MintConfig, names: string[]): Promise<string[]>;
+  // Every group the provider lists for this parent, so an agent picks real names instead of
+  // guessing them from docs. Optional: without it `tumbler scope groups` is refused.
+  listGroups?(parent: string, config: MintConfig): Promise<GroupInfo[]>;
 }
+// `delegable`: whether an operator may add it with `tumbler scope add`.
+export interface GroupInfo { name: string; scopes: string[]; delegable: boolean }
 
 export const DEFAULT_TTL_MIN = 30, MIN_TTL_MIN = 15, MAX_TTL_MIN = 24 * 60;
 // A child is handed out again only while it has this long left, so a CLI cache (5 minutes by
@@ -83,6 +88,12 @@ export class Grants {
     const p = this.provider(kind);
     if (!p.groups) throw new Refused(400, `${kind} keys' scopes can't be changed from the CLI`);
     return p.groups(parent, config, names);
+  }
+
+  async listGroups(kind: string, parent: string, config: MintConfig) {
+    const p = this.provider(kind);
+    if (!p.listGroups) throw new Refused(400, `${kind} keys can't list their groups`);
+    return p.listGroups(parent, config);
   }
 
   // Checks a mint key's config before it is saved: known scopes, a sane TTL, start scopes that exist.

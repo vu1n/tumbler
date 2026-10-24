@@ -32,6 +32,10 @@
 //                                    delete a static key, within the token's writes; same default scope
 //   tumbler scope NAME [-p project] [--json]
 //                                    a minted key's scopes and their permission groups (names/ids)
+//   tumbler scope groups NAME [WORD...] [-p project] [--json]
+//                                    every permission group the key's provider lists, with its
+//                                    scopes (only names with every WORD, if given): the real names
+//                                    to use with scope add, never guesses from the docs
 //   tumbler scope add|rm NAME SCOPE GROUP... [-p project]
 //                                    add or remove permission groups on a minted key's scope (a new
 //                                    scope name makes a new scope), for an operator token (set in
@@ -746,7 +750,7 @@ async function sshKeygen(args) {
 
 // --- scope: an operator token's changes to a minted key's scopes --------------------------------
 
-const SCOPE_USAGE = "usage: tumbler scope NAME [-p project] [--json] | tumbler scope add|rm NAME SCOPE GROUP... [-p project]";
+const SCOPE_USAGE = "usage: tumbler scope NAME [-p project] [--json] | tumbler scope add|rm NAME SCOPE GROUP... [-p project] | tumbler scope groups NAME [WORD...] [-p project] [--json]";
 
 async function scope(args) {
   let project = process.env.TUMBLER_PROJECT || manifest().project || null, json = false;
@@ -758,10 +762,23 @@ async function scope(args) {
     else if (a.startsWith("-")) die(`unexpected ${a}\n${SCOPE_USAGE}`, 2);
     else pos.push(a);
   }
-  const verb = pos[0] === "add" || pos[0] === "rm" ? pos.shift() : null;
+  const verb = ["add", "rm", "groups"].includes(pos[0]) ? pos.shift() : null;
   const [name, scopeName, ...groups] = pos;
+  const q = project ? `?project=${encodeURIComponent(project)}` : "";
+  if (verb === "groups") {
+    if (!name) die(SCOPE_USAGE, 2);
+    let r;
+    try { r = await brokerGet(`/v1/mint/${encodeURIComponent(name)}/groups${q}`); } catch (e) { die(e.message); }
+    const words = pos.slice(1).map((w) => w.toLowerCase());
+    const hits = r.groups.filter((g) => words.every((w) => g.name.toLowerCase().includes(w)));
+    if (json) return void process.stdout.write(JSON.stringify({ ...r, groups: hits }) + "\n");
+    const short = (s) => s.replace(/^com\.cloudflare\.(api\.)?/, "");
+    process.stdout.write(hits.map((g) => `${g.name}\t${g.scopes.map(short).join(", ")}${g.delegable ? "" : "\t(not addable with scope add)"}`).join("\n") + (hits.length ? "\n" : ""));
+    if (!hits.length) say(`no group${words.length ? ` with ${words.join(" ")}` : ""} on ${r.name} (${r.scope})`);
+    return;
+  }
   if (!name || (verb ? !scopeName || !groups.length : pos.length > 1)) die(SCOPE_USAGE, 2);
-  const path = `/v1/mint/${encodeURIComponent(name)}${project ? `?project=${encodeURIComponent(project)}` : ""}`;
+  const path = `/v1/mint/${encodeURIComponent(name)}${q}`;
   let r;
   try { r = verb ? await brokerCall("PATCH", path, { scope: scopeName, [verb === "add" ? "add" : "remove"]: groups }) : await brokerGet(path); }
   catch (e) { die(e.message); }

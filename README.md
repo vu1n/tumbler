@@ -309,9 +309,14 @@ fixes it from the CLI on your word in chat, instead of you going to `/admin` or 
 
 ```sh
 tumbler scope CLOUDFLARE_API_TOKEN                                   # its scopes and groups
+tumbler scope groups CLOUDFLARE_API_TOKEN containers                 # the names Cloudflare lists
 tumbler scope add CLOUDFLARE_API_TOKEN workers:write "Containers Write"
 tumbler scope rm  CLOUDFLARE_API_TOKEN workers:write "Containers Write"
 ```
+
+Take group names from `tumbler scope groups`, which asks Cloudflare with the key's parent, not from
+Cloudflare's docs: the docs have listed names (`Containers Read`) that an account doesn't. A name
+Cloudflare doesn't list is refused with the listed names nearest to it.
 
 That needs an **operator** token, which you turn on once per token (`/admin`, or
 `tumbler admin token edit NAME --operator on`). An operator only adds or removes permission groups
