@@ -26,7 +26,7 @@ nav a{text-decoration:none}nav a:hover{text-decoration:underline}nav span{color:
 table{width:100%;border-collapse:collapse}
 td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:500}
-td.acts{white-space:nowrap;text-align:right;padding-block:4px}td.ended{white-space:nowrap;text-align:right;padding-right:17px}
+td.acts{white-space:nowrap;text-align:right;padding-block:1px}td.ended{white-space:nowrap;text-align:right;padding-right:17px}
 tr.off td{color:var(--muted)}tr.empty td{color:var(--muted);padding:16px 8px}
 .wrap{overflow-x:auto}
 button{font:inherit;padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);cursor:pointer;transition:background-color .15s ease-out,color .15s ease-out}
@@ -37,10 +37,11 @@ button.del:focus-visible{color:var(--danger);background:color-mix(in srgb,var(--
 @media (hover:hover){button:hover{background:color-mix(in srgb,var(--accent) 10%,transparent)}
   button.primary:hover{background:color-mix(in srgb,var(--accent) 85%,var(--fg))}
   button.del:hover{color:var(--danger);background:color-mix(in srgb,var(--danger) 10%,transparent)}}
-button:disabled{opacity:.55;cursor:not-allowed}button[aria-busy=true]{cursor:progress}
+button:disabled{opacity:.55;cursor:not-allowed}button[aria-busy=true]{cursor:progress;opacity:1}
+form[inert] :is(.f,.note,button:not([aria-busy=true])){opacity:.55}
 input,select,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--edge);border-radius:6px;padding:6px 8px;min-width:0;width:100%}
 input[readonly],textarea[readonly],select:disabled{border-style:dashed;color:inherit;opacity:1}
-input[type=checkbox]{width:16px;height:16px;margin:0}
+input[type=checkbox]{width:16px;height:16px;margin:0;flex:none}
 textarea{font:12px/1.4 ui-monospace,monospace;min-height:96px;resize:vertical}
 ::placeholder{color:var(--muted);opacity:1}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -51,7 +52,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 .fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin:4px 0 16px;align-items:start}
 .f{display:flex;flex-direction:column;gap:4px}.f>label{font-weight:500}.full{grid-column:1/-1}
 .hint{color:var(--muted);font-size:13px;max-width:62ch}
-.check{flex-direction:row;align-items:center;gap:8px;padding-top:24px}.check label{font-weight:500}
+.check{flex-direction:row;flex-wrap:wrap;align-items:center;gap:4px 8px;padding-top:24px}.check label{font-weight:500}.check .hint{flex-basis:100%}.check.full{padding-top:0}
 .bar{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .chips{display:flex;gap:6px;flex-wrap:wrap}
 .chips button{padding:2px 10px;border-radius:999px;font-size:12px}
@@ -60,10 +61,13 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 .notice{border:1px solid var(--warn);border-radius:6px;padding:8px 12px;color:var(--warn);max-width:none}
 #once{border:1px solid var(--warn);border-radius:6px;padding:12px;margin:12px 0;scroll-margin-bottom:96px}
 #once p{margin:0 0 8px}#once textarea{font-size:13px;min-height:0;resize:none;overflow:hidden;word-break:break-all;field-sizing:content;margin-bottom:8px}
-#status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);width:min(600px,calc(100% - 32px));display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 8px 8px 12px;background:var(--bg);border:1px solid var(--edge);border-radius:6px}
+#status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);width:min(600px,calc(100% - 32px));display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 8px 8px 12px;background:var(--bg);border:1px solid var(--edge);border-radius:6px;outline:8px solid var(--bg)}
 #status.error{border-color:var(--danger);color:var(--danger)}
-@media (pointer:coarse){button,summary,input:not([type=checkbox]),select{min-height:44px}.chips button{min-height:40px}}
+@media (pointer:coarse){button,summary,input:not([type=checkbox]),select{min-height:44px}.chips button{min-height:40px}
+  input[type=checkbox]{width:20px;height:20px}.check label{min-height:44px;display:flex;align-items:center}}
 @media (min-width:720px){.w2{grid-column:span 2}}
+@media (min-width:641px){th,table.rec td:first-child{white-space:nowrap}
+  #newToken{grid-template-columns:minmax(0,1fr) minmax(0,1fr);max-width:62ch}#newToken .hint{max-width:none}}
 @media (max-width:640px){
   table.rec thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
   table.rec tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 16px;padding:12px 0;border-bottom:1px solid var(--line)}
@@ -73,9 +77,10 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   table.rec tr:not(.empty) td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec td.ended::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}
   table.rec td:empty{display:none}
   table.rec td.acts{display:flex;gap:8px;text-align:left;margin-left:-8px}table.rec td.ended{text-align:left;padding:0}
-  table.log tr{display:flex;flex-wrap:wrap;gap:2px 10px;padding:10px 0;border-bottom:1px solid var(--line)}
+  table.log tr{display:flex;flex-wrap:wrap;gap:0 10px;padding:10px 0;border-bottom:1px solid var(--line)}
+  table.log tr::before{content:'';flex-basis:100%}table.log td:first-child{order:-1}
   table.log thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
-  table.log td{display:inline;padding:0;border:0;min-width:0;overflow-wrap:break-word}table.log td:nth-child(3){font-weight:600;order:-1}
+  table.log td{display:inline;padding:0;border:0;min-width:0;overflow-wrap:break-word}table.log td:nth-child(3){font-weight:600;order:-2}table.log td:nth-child(4):not(:empty)::before{content:'in ';color:var(--muted)}
   table.log td:last-child{flex-basis:100%}
 }
 </style></head><body><main>
@@ -95,7 +100,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   <div class="f w2"><label for="kDesc">What it's for</label><input id="kDesc" name="description" autocomplete="off"></div>
   <div class="f"><label for="kExp">Expires</label><input id="kExp" name="expires_at" type="date" aria-describedby="kExpHint"><span class="hint" id="kExpHint">Optional. Turns amber a week before.</span></div>
   <div class="f full"><label for="kConfig">Config <span class="muted">(optional)</span></label><textarea id="kConfig" name="config" spellcheck="false" autocomplete="off" aria-describedby="kConfigHint"></textarea>
-    <span class="hint" id="kConfigHint"><span data-for="static">A check that runs before a new value is saved, so a bad value saves nothing: <code>{"check": "openai"}</code> (or anthropic, github, stripe, cloudflare), or your own endpoint: <code>{"check": {"url": "https://…", "header": "authorization", "prefix": "Bearer "}}</code>.</span><span data-for="mint">Left empty, an existing key keeps its config and a new one gets workers:read (Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize read and analytics; granted on request) and workers:write (the same, write, plus Workers Tail; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: <code>{"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}</code>, with Cloudflare permission names or ids.</span></span></div>
+    <span class="hint" id="kConfigHint"><span data-for="static">A check that runs before a new value is saved, so a bad value saves nothing: <code>{"check": "openai"}</code> (or anthropic, github, stripe, cloudflare), or your own endpoint: <code>{"check": {"url": "https://…", "header": "authorization", "prefix": "Bearer "}}</code>. Left empty, an existing key keeps its check; <code>{}</code> removes it.</span><span data-for="mint">Left empty, an existing key keeps its config and a new one gets workers:read (Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive, Vectorize read and analytics; granted on request) and workers:write (the same, write, plus Workers Tail; minted for tokens whose scopes allow it), on the account in CLOUDFLARE_ACCOUNT_ID. To choose: <code>{"scopes": {"pages:write": ["Pages Write"]}, "start": [], "ttl_minutes": 30}</code>, with Cloudflare permission names or ids.</span></span></div>
   <p class="note hint" id="putNote" aria-live="polite"></p>
   <div class="bar"><button class="primary" id="putSave">Save</button><button type="button" class="quiet" id="putCancel">Cancel</button></div>
 </form></details>
@@ -127,14 +132,14 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 <details class="act" id="createBox"><summary>Create a token</summary>
 <form id="newToken" method="post" class="fields">
   <div class="f"><label for="tName">Name</label><input id="tName" name="name" required pattern="[a-z0-9][a-z0-9._\\-]{0,63}" title="lowercase letters, digits, dot, dash or underscore" placeholder="pillbox-agent" autocomplete="off" spellcheck="false"></div>
+  <div class="f"><label for="tHours">Expires in hours</label><input id="tHours" name="hours" type="number" min="1" step="1" aria-describedby="tHoursHint"><span class="hint" id="tHoursHint">Empty: never. Its grants end at the next sweep after it expires.</span></div>
   <div class="f full"><label for="tProjects">Reads</label><input id="tProjects" name="projects" autocomplete="off" spellcheck="false" placeholder="huddles, huddles/prod, */dev" aria-describedby="tProjectsHint">
     <span class="chips" role="group" aria-label="Reads presets"><button type="button" data-pin="*, */dev, */staging, */prod">Everything</button><button type="button" data-pin="*, */dev">All projects, dev</button><button type="button" data-pin="">Global only</button></span>
     <span class="hint" id="tProjectsHint">A project reads its shared keys; project/env one environment (dev, staging, prod); * every project; */env that environment of every project. Empty: global keys only.</span></div>
   <div class="f full"><label for="tScopes">May mint</label><input id="tScopes" name="scopes" autocomplete="off" spellcheck="false" placeholder="workers:write" aria-describedby="tScopesHint">
     <span class="chips" role="group" aria-label="May mint presets"><button type="button" data-scopes="">Read only</button><button type="button" data-scopes="workers:write">Read + deploy</button><button type="button" data-scopes="*">Any scope</button></span>
     <span class="hint" id="tScopesHint">What its minted keys may carry beyond reads, with no one asked; anything else is refused. workers:write covers Workers, D1, KV, R2, Containers, Queues, Pages, Hyperdrive and Vectorize writes; * is every scope, including ones added later. Empty: reads only.</span></div>
-  <div class="f"><label for="tWrites">May write</label><input id="tWrites" name="writes" autocomplete="off" spellcheck="false" placeholder="*/dev" aria-describedby="tWritesHint"><span class="hint" id="tWritesHint">Where tumbler put may save static keys: a project, project/env, * or */env, and global only when named. Empty: nothing.</span></div>
-  <div class="f"><label for="tHours">Expires in hours</label><input id="tHours" name="hours" type="number" min="1" step="1" aria-describedby="tHoursHint"><span class="hint" id="tHoursHint">Empty: never. Its grants end at the next sweep after it expires.</span></div>
+  <div class="f full"><label for="tWrites">May write</label><input id="tWrites" name="writes" autocomplete="off" spellcheck="false" placeholder="*/dev" aria-describedby="tWritesHint"><span class="hint" id="tWritesHint">Where tumbler put may save static keys: a project, project/env, * or */env, and global only when named. Empty: nothing.</span></div>
   <div class="f full check"><input id="tOperator" name="operator" type="checkbox" aria-describedby="tOperatorHint"><label for="tOperator">Operator</label><span class="hint" id="tOperatorHint">May add or remove permission groups on the minted keys it reads (tumbler scope), on your word in chat. Never tokens, pins, ceilings, parents or token, member or billing groups.</span></div>
   <div class="bar"><button class="primary" id="tCreate">Create token</button></div>
 </form></details>
@@ -156,8 +161,8 @@ addEventListener('beforeunload', e => { if (unstored) { e.preventDefault(); e.re
 const F = (form, name) => form.elements.namedItem(name);
 const api = (p, o = {}) => fetch('/admin/api/' + p, { ...o, headers: { 'content-type': 'application/json', 'x-tumbler-admin': '1' } })
   .then(async r => { const b = await r.json().catch(() => null);
-    if (!r.ok) throw Object.assign(new Error(b?.error || 'request failed (' + r.status + ')'), { canSkip: !!b?.can_skip });
-    if (!b) throw new Error('the reply was not JSON (' + r.status + ')'); return b; });
+    if (!r.ok) throw Object.assign(new Error(b?.error || 'request failed (' + r.status + ')'), { canSkip: !!b?.can_skip, status: r.status });
+    if (!b) throw Object.assign(new Error('the reply was not JSON (' + r.status + ')'), { status: r.status }); return b; });
 // One place every action reports what happened: a line at the bottom of the screen, read out too.
 let statusTimer;
 const say = (text, error) => { clearTimeout(statusTimer); const live = $('live');
@@ -165,20 +170,31 @@ const say = (text, error) => { clearTimeout(statusTimer); const live = $('live')
   live.setAttribute('aria-live', error ? 'assertive' : 'polite'); live.textContent = text;
   if (!error) statusTimer = setTimeout(() => { $('status').hidden = true; }, 6000); };
 $('statusClose').onclick = () => { $('status').hidden = true; };
-// A button stays disabled while its request runs, so nothing is sent twice.
-const busy = async (b, fn) => { if (b) { b.disabled = true; b.setAttribute('aria-busy', 'true'); }
-  try { return await fn(); } catch (err) { say(err.message, true); } finally { if (b) { b.disabled = false; b.removeAttribute('aria-busy'); } } };
-// Errors say which action failed, then what the server said.
-const fail = what => err => { throw Object.assign(new Error(what + ': ' + err.message), { canSkip: err.canSkip }); };
+// A button stays disabled while its request runs, so nothing is sent twice. Once the request is on its way (after any
+// confirm, which comes before the first await), the button says what is running and its form is inert until the reply.
+const busy = async (b, fn, doing) => { const label = b.textContent, form = b.closest('form');
+  b.disabled = true; b.setAttribute('aria-busy', 'true');
+  let back = b;
+  try { const run = fn(); if (doing) b.textContent = doing;
+    if (form) { if (document.activeElement !== document.body) back = document.activeElement; form.inert = true; }
+    return await run; }
+  catch (err) { say(err.message + (err.changed ? await after(err) : ''), true); }
+  finally { b.disabled = false; b.removeAttribute('aria-busy'); if (doing && b.textContent === doing) b.textContent = label;
+    if (form) { form.inert = false; if (document.activeElement === document.body && back.isConnected) back.focus(); } } };
+// Errors say which action failed, then what the server said. A failed change may have half-happened, so the tables
+// reload and the status line says what is stored now, and to try again when the server, not the request, failed.
+const fail = (what, change = true) => err => { throw Object.assign(new Error(what + ': ' + err.message), { canSkip: err.canSkip, status: err.status, changed: change }); };
+const after = async err => (await refresh() ? '. The tables show what is stored now' : '. Reload to see what is stored')
+  + (!err.status || err.status >= 500 ? '; try again.' : '.');
 // Loads can overlap when two actions finish close together: only the newest draws or reports a failure,
-// and every caller waits for it, so what runs after a refresh sees the page as drawn.
+// and every caller waits for it, so what runs after a refresh sees the page as drawn. True when it drew.
 let loads = 0, newest;
 const refresh = async () => { const mine = ++loads;
-  newest = load(mine).catch(err => { if (mine === loads) say('Could not load the page: ' + err.message + (unstored ? '. Copy the new token before you reload.' : '. Reload to try again.'), true); });
-  let seen; do { seen = newest; await seen; } while (seen !== newest); };
+  newest = load(mine).then(() => true, err => { if (mine === loads) say('Could not load the page: ' + err.message + (unstored ? '. Copy the new token before you reload.' : '. Reload to try again.'), true); return false; });
+  let seen, drawn; do { seen = newest; drawn = await seen; } while (seen !== newest); return drawn; };
 const td = (t, cls) => { const e = document.createElement('td'); e.textContent = t ?? ''; if (cls) e.className = cls; return e; };
-const button = (label, fn, cls, aria) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
-  if (cls) b.className = cls; if (aria) b.setAttribute('aria-label', aria); b.onclick = () => busy(b, fn); return b; };
+const button = (label, fn, cls, aria, doing) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+  if (cls) b.className = cls; if (aria) b.setAttribute('aria-label', aria); b.onclick = () => busy(b, fn, doing); return b; };
 const acts = (...bs) => { const c = document.createElement('td'); c.className = 'acts'; c.append(...bs); return c; };
 // A date, then how far off it is; neither part breaks mid-value. On a phone a time may go under its date, and
 // "expired" before it, so a record's column never clips a stamp.
@@ -216,8 +232,10 @@ const row = (cells, cls) => { const tr = document.createElement('tr'); if (cls) 
 const reach = t => { if (!t.projects) return 'global only'; const by = new Map();
   for (const p of t.projects) { const [proj, env] = p.split('/'), k = proj === '*' ? 'all projects' : proj; by.set(k, [...(by.get(k) ?? []), env ?? 'shared']); }
   return [...by].map(([k, v]) => k + ' (' + v.join(', ') + ')').join(', '); };
-const checkText = k => { let c;
-  try { c = JSON.parse(k.config || '{}'); } catch (err) { return 'config unreadable (' + err.message + ')'; }
+const cfgOf = k => { try { return { c: JSON.parse(k.config || '{}') }; } catch (err) { return { error: err.message }; } };
+// What a save tests the value with first: a mint key's provider, or the check its static config names.
+const checkOf = (kind, c) => kind !== 'static' ? kind.slice(5) : !c?.check ? '' : typeof c.check === 'string' ? c.check : 'your endpoint';
+const checkText = k => { const { c, error } = cfgOf(k); if (error) return 'config unreadable (' + error + ')';
   if (k.kind !== 'static') return k.checked ? 'parent passed' : 'parent not checked';
   if (!c.check) return 'none';
   return (typeof c.check === 'string' ? c.check : 'custom') + (k.checked ? ', passed' : ', saved unchecked'); };
@@ -232,7 +250,7 @@ async function load(mine) {
   fill('keys', keys.map(k => { const what = k.scope + '/' + k.name, check = checkText(k);
     const left = daysLeft(k), exp = !k.expires_at ? when('no date', '', 'muted') : left < 0 ? when('expired ' + day(k.expires_at), '', 'warn') : when(day(k.expires_at), left <= 7 ? inDays(left) : '', left <= 7 ? 'warn' : '');
     return row([td(k.name), td(k.scope), td(k.kind), td(check, check === 'none' ? 'muted' : ''), td(k.description || 'none', 'muted'), when(day(k.rotated_at)), exp,
-      acts(button('Set value', () => rotate(k), 'quiet', 'Set a new value for ' + what), button('Delete', () => deleteKey(k), 'del', 'Delete ' + what))]); }),
+      acts(button('Set value', () => rotate(k), 'quiet', 'Set a new value for ' + what), button('Delete', () => deleteKey(k), 'del', 'Delete ' + what, 'Deleting…'))]); }),
     ['No keys yet. Add one below, paste a .env, or run ', code('tumbler put NAME'), ' from a session.']);
 
   const live = g.grants.filter(x => x.state === 'active' || x.state === 'pending');
@@ -243,7 +261,7 @@ async function load(mine) {
   note2.hidden = !note2.textContent;
   fill('grants', g.grants.map(x => { const on = x.state === 'active' || x.state === 'pending';
     return row([td(x.name), td(x.caller), td(x.project ?? 'global'), td(x.state), td(x.scopes.join(', ')), when(stamp(x.expires_at)),
-      on ? acts(button('Revoke', () => revokeGrant(x), 'del', 'Revoke ' + x.name + ' for ' + x.caller)) : td('')], on ? '' : 'off'); }),
+      on ? acts(button('Revoke', () => revokeGrant(x), 'del', 'Revoke ' + x.name + ' for ' + x.caller, 'Revoking…')) : td('')], on ? '' : 'off'); }),
     g.failed ? 'Grants could not be loaded.' : 'No grants. One appears when a token reads a minted key, and ends on its own when it expires.');
 
   $('nTokens').textContent = tokens.filter(t => !t.revoked_at && !past(t.expires_at)).length + ' live';
@@ -251,7 +269,7 @@ async function load(mine) {
     const exp = !t.expires_at ? when('never', '', 'muted') : past(t.expires_at) ? when('expired ' + stamp(t.expires_at)) : when(stamp(t.expires_at), soon(t.expires_at) ? until(t.expires_at) : '', soon(t.expires_at) ? 'warn' : '');
     const tr = row([td(t.name), td(reach(t)), td(t.scopes ? t.scopes.join(', ') : 'reads only'), td(t.writes ? t.writes.join(', ') : 'nothing'), td(t.operator ? 'yes' : 'no'), when(day(t.created_at)), exp], done ? 'off' : '');
     const ended = td('revoked ', 'ended'); ended.append(nw(day(t.revoked_at)));
-    tr.append(gone ? ended : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name)));
+    tr.append(gone ? ended : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name, 'Revoking…')));
     return tr; }),
     'No tokens yet. Create one below, then add it as a network secret on the environment that should read keys.');
 
@@ -273,7 +291,11 @@ function note() { const n = F(putKey, 'name').value, s = F(putKey, 'scope').valu
   let t = 'Replaces the value of ' + s + '/' + n + '; the old value cannot be recovered.';
   if (k.kind !== 'static') t += ' Children minted from the old parent stop working.';
   if (k.kind !== kind) t += ' It is ' + k.kind + ': set Kind to match.';
-  if (k.expires_at && !F(putKey, 'expires_at').value) t += daysLeft(k) < 0 ? ' It expired ' + day(k.expires_at) + ': set a new date, or save with none.' : ' Saving with no date clears its expiry (' + day(k.expires_at) + ').';
+  const exp = F(putKey, 'expires_at').value, left = daysLeft(k);
+  if (k.expires_at && !exp) t += left < 0 ? ' It expired ' + day(k.expires_at) + ': set a new date, or save with none.' : ' Saving with no date clears its expiry (' + day(k.expires_at) + ').';
+  else if (k.expires_at && exp === day(k.expires_at)) t += ' It keeps its expiry, ' + day(k.expires_at) + (left <= 7 ? ' (' + inDays(left) + ')' : '') + ': change the date if the new value lasts longer.';
+  const check = k.kind === 'static' && !F(putKey, 'config').value.trim() && checkOf(k.kind, cfgOf(k).c);
+  if (check) t += ' It keeps its check (' + check + '): the new value is tested before it is saved.';
   out.textContent = t; out.className = 'note warn'; }
 const resetKey = () => { putKey.reset(); F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = false; F(putKey, 'kind').disabled = false;
   $('putSave').textContent = 'Save'; syncKind(); note(); };
@@ -282,28 +304,29 @@ function rotate(k) { resetKey(); addKey.open = true;
   F(putKey, 'name').value = k.name; F(putKey, 'scope').value = k.scope; F(putKey, 'kind').value = k.kind;
   F(putKey, 'description').value = k.description || ''; F(putKey, 'expires_at').value = daysLeft(k) < 0 ? '' : day(k.expires_at);
   F(putKey, 'name').readOnly = F(putKey, 'scope').readOnly = true; F(putKey, 'kind').disabled = true;
-  $('putSave').textContent = 'Save new value'; syncKind(); note();
+  $('putSave').textContent = 'Save new value'; syncKind(); F(putKey, 'config').placeholder = ''; note();
   addKey.scrollIntoView({ block: 'start', behavior: 'smooth' }); F(putKey, 'value').focus({ preventScroll: true }); }
 F(putKey, 'kind').onchange = () => { syncKind(); note(); };
 // Closing the form any way ends a Set value, so the next open adds a key instead of replacing this one.
 addKey.addEventListener('toggle', () => { if (!addKey.open && F(putKey, 'name').readOnly) resetKey(); });
-for (const n of ['name', 'scope', 'expires_at']) F(putKey, n).addEventListener('input', note);
+for (const n of ['name', 'scope', 'expires_at', 'config']) F(putKey, n).addEventListener('input', note);
 $('putCancel').onclick = () => { resetKey(); addKey.open = false; addKey.querySelector('summary').focus(); };
-putKey.onsubmit = e => { e.preventDefault(); busy($('putSave'), async () => {
+putKey.onsubmit = e => { e.preventDefault();
   const name = F(putKey, 'name').value, scope = F(putKey, 'scope').value, kind = F(putKey, 'kind').value, raw = F(putKey, 'config').value.trim(), what = scope + '/' + name;
   let config;
   if (raw) { try { config = JSON.parse(raw); } catch (err) { say('Config is not valid JSON (' + err.message + '); nothing was saved.', true); F(putKey, 'config').focus(); return; } }
-  const existed = KEYS.some(x => x.name === name && x.scope === scope);
+  const prev = KEYS.find(x => x.name === name && x.scope === scope), existed = !!prev, check = checkOf(kind, config ?? (prev && cfgOf(prev).c));
+  busy($('putSave'), async () => {
   // Read once: the form may change (another row's Set value) while the check runs, and a retry sends this.
   const sent = { value: F(putKey, 'value').value, kind, config, description: F(putKey, 'description').value, expires_at: F(putKey, 'expires_at').value || null };
   const put = skip_check => api('keys/' + encodeURIComponent(scope) + '/' + encodeURIComponent(name), { method: 'PUT', body: JSON.stringify({ ...sent, skip_check }) });
   try { await put(false); } catch (err) {
     // The check couldn't run (the service is down): offer to save unchecked, e.g. to replace a leaked key.
-    if (!err.canSkip) throw err.message.startsWith(name + ':') ? err : new Error('Could not save ' + what + ': ' + err.message);
+    if (!err.canSkip) { if (err.message.startsWith(name + ':')) throw err; fail('Could not save ' + what)(err); }
     if (!confirm(err.message + '\\n\\nSave it unchecked anyway? Commands running with --watch will not get it pushed.')) { say(existed ? 'Nothing was saved; ' + what + ' keeps its old value.' : 'Nothing was saved; ' + what + ' was not created.'); return; }
     await put(true).catch(fail('Could not save ' + what)); }
   resetKey(); addKey.open = false; addKey.querySelector('summary').focus();
-  say((existed ? 'Saved a new value for ' : 'Created ') + what + '.'); await refresh(); }); };
+  say((existed ? 'Saved a new value for ' : 'Created ') + what + '.'); await refresh(); }, check ? 'Checking with ' + check + '…' : 'Saving…'); };
 async function deleteKey(k) { const what = k.scope + '/' + k.name;
   if (!confirm(k.kind === 'static'
     ? 'Delete ' + what + '?\\n\\nThe value is gone for good: tumbler never shows a saved value, so there is no copy here. Sessions that read it stop getting it on their next run.'
@@ -322,22 +345,21 @@ const showPlan = (r, onSave) => { const table = document.createElement('table'),
   const parts = [table], n = r.keys.filter(k => k.action === 'create' || k.action === 'overwrite').length;
   if (r.saved) parts.push(Object.assign(document.createElement('p'), { textContent: 'Saved ' + r.saved.length + ' key(s) to ' + r.scope + '.' }));
   else if (r.errors.length) parts.push(Object.assign(document.createElement('p'), { className: 'warn', textContent: 'Fix the lines marked error, then preview again.' }));
-  else if (n) { const b = button('Save ' + n + ' key(s) to ' + r.scope, onSave, 'primary'); const p = document.createElement('p'); p.append(b); parts.push(p); }
+  else if (n) { const b = button('Save ' + n + ' key(s) to ' + r.scope, onSave, 'primary', '', 'Saving…'); const p = document.createElement('p'); p.append(b); parts.push(p); }
   importPlan.replaceChildren(...parts); };
-const importCall = (sent, save) => api('import', { method: 'POST', body: JSON.stringify({ ...sent, save }) }).catch(fail(save ? 'Could not save the .env' : 'Could not preview the .env'));
+const importCall = (sent, save) => api('import', { method: 'POST', body: JSON.stringify({ ...sent, save }) }).catch(fail(save ? 'Could not save the .env' : 'Could not preview the .env', save));
 F(importEnv, 'text').oninput = F(importEnv, 'scope').oninput = () => importPlan.replaceChildren();
 importEnv.onsubmit = e => { e.preventDefault(); const sent = { scope: F(importEnv, 'scope').value, text: F(importEnv, 'text').value };
   busy(importEnv.querySelector('button'), async () => { const plan = await importCall(sent, false);
-  if (F(importEnv, 'text').value !== sent.text || F(importEnv, 'scope').value !== sent.scope) { say('The .env changed during the preview; preview it again.'); return; }
   showPlan(plan, async () => {
     const r = await importCall(sent, true); showPlan(r);
     if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length && F(importEnv, 'text').value === sent.text) F(importEnv, 'text').value = '';
     const failed = r.keys.filter(k => k.action === 'failed').length;
-    say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + (failed ? '; ' + failed + ' failed their check and were not saved (marked failed above).' : '.'), failed > 0); await refresh(); }); }); };
+    say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + (failed ? '; ' + failed + ' failed their check and were not saved (marked failed above).' : '.'), failed > 0); await refresh(); }); }, 'Previewing…'); };
 $('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = F(f, 'from').value, to = F(f, 'to').value;
   if (!confirm('Move every key in ' + from + ' to ' + to + '?\\n\\nMinted children on the moved keys stop working now, and tokens pinned to ' + from + ' are repinned to ' + to + '. A repo whose .tumbler names ' + from + ' needs its project line changed.')) return;
   busy(f.querySelector('button'), async () => { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from, to }) }).catch(fail('Could not move ' + from));
-    say('Moved ' + r.moved.length + ' key(s) from ' + from + ' to ' + to + '; repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); f.reset(); await refresh(); }); };
+    say('Moved ' + r.moved.length + ' key(s) from ' + from + ' to ' + to + '; repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); f.reset(); await refresh(); }, 'Moving…'); };
 
 // --- grants and tokens ---
 async function revokeGrant(g) {
@@ -372,7 +394,7 @@ function editToken(t, tr) {
     if (!Object.keys(body).length) { say('Nothing changed for ' + t.name + '.'); ed.remove(); return; }
     if ('operator' in body && !confirm((operator ? 'Let ' + t.name + ' add and remove' : 'Stop ' + t.name + ' changing') + ' permission groups on the minted keys it reads (tumbler scope)?')) { say('Nothing was saved for ' + t.name + '.'); return; }
     await api('tokens/' + encodeURIComponent(t.name), { method: 'PATCH', body: JSON.stringify(body) }).catch(fail('Could not update ' + t.name));
-    say('Updated ' + t.name + ': ' + Object.keys(body).map(k => ({ projects: 'reads', scopes: 'may mint', writes: 'may write', operator: 'operator' })[k]).join(', ') + '.'); await refresh(); }); };
+    say('Updated ' + t.name + ': ' + Object.keys(body).map(k => ({ projects: 'reads', scopes: 'may mint', writes: 'may write', operator: 'operator' })[k]).join(', ') + '.'); await refresh(); }, 'Saving…'); };
   c.append(f); ed.append(c); tr.after(ed); F(f, 'projects').focus(); }
 
 // Presets fill the field, which stays editable; the preset matching the field shows as pressed.
@@ -390,7 +412,7 @@ newToken.onsubmit = e => { e.preventDefault();
     writes: list(F(newToken, 'writes').value), operator: F(newToken, 'operator').checked, expires_at }) }).catch(fail('Could not create ' + name));
   newToken.reset(); presses(); $('createBox').open = false;
   // The box shows before the reload, so a failed reload can't hide the token; it scrolls once the table has grown.
-  showOnce(name, r.token); await refresh(); if (unstored === name) $('once').scrollIntoView({ block: 'end', behavior: 'smooth' }); }); };
+  showOnce(name, r.token); await refresh(); if (unstored === name) $('once').scrollIntoView({ block: 'end', behavior: 'smooth' }); }, 'Creating…'); };
 // The new token is shown once, right where it was created, and stays until the owner says it's stored.
 function showOnce(name, token) { unstored = name; const once = $('once'), p = document.createElement('p'), field = document.createElement('textarea'), bar = document.createElement('div');
   const strong = document.createElement('strong'); strong.textContent = 'Copy the token for ' + name + ' now.';

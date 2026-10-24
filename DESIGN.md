@@ -171,15 +171,17 @@ Tokens, Audit, with a section nav under the title that carries the live counts. 
 table, then its actions as a stack of named disclosures ("Add a key or replace a value", "Import a
 .env", "Move a scope", "Create a token") separated by hairlines; the table's last rule is the first
 disclosure's top line, so no two rules ever stack. Forms are a grid of labelled fields
-(min 200px columns, 12px gap) with a hint under each field and the buttons last.
+(min 200px columns, 12px gap) with a hint under each field and the buttons last. The token form is one
+column 62ch wide above 640px: Name and Expires side by side, then Reads, May mint and May write, each
+with its chips and hint at the field's width, then Operator and the button.
 
 Below 640px each table row becomes a labelled record: the name on its own line, then label-over-value
 pairs in two equal columns, then the row's actions. A key name elsewhere in a record takes the full
 width, and words never break mid-name: a long audit name breaks after the key name's colon, a plus or a
 comma, never inside a scope such as `workers:write` or a name such as `huddles-prod/dev`; a permission
 group of several words may wrap between them. An empty
-cell says "none" rather than disappearing, so every record keeps its fields on the same side. The audit becomes log lines (action first, then when,
-who and project, then the names). Above 640px a table that is still too wide scrolls inside its own
+cell says "none" rather than disappearing, so every record keeps its fields on the same side. The audit becomes log lines: the action and when;
+then who, and the project after a muted "in"; then the names. Above 640px a table that is still too wide scrolls inside its own
 container; the page itself never scrolls sideways.
 
 ## Elevation & Depth
@@ -204,10 +206,15 @@ rounded.
 - **Quiet:** teal text, no border; row actions that open an editor (Set value, Edit) and Cancel.
 - **Destructive:** Faded Ink text, no border at rest; Delete Red text on a red tint under hover or
   focus. Every destructive control names its target for assistive tech ("Delete global/GITHUB_PAT").
+- **Busy:** once its request is on its way (after any confirm), the button says what is running
+  ("Saving…", "Checking with openai…", "Previewing…", "Creating…", "Deleting…") at full color with a
+  progress cursor, and its form is inert (its fields and other buttons faded) until the reply, so
+  nothing sends twice and Cancel can't look like it stops a save that is already sent.
 - **Hover:** a 10% teal tint (primary: teal deepened 15% toward ink), only where the pointer can
   hover, so a tap never leaves a control tinted (or a Delete red). **Focus:** a 2px teal ring,
-  2px offset. **Busy:** disabled with `aria-busy` while its request runs, so nothing sends twice.
-- **Touch:** on coarse pointers buttons, fields and disclosures are at least 44px tall, chips 40px.
+  2px offset.
+- **Touch:** on coarse pointers buttons, fields and disclosures are at least 44px tall, chips 40px,
+  and a checkbox is 20px with a 44px label row. A checkbox never shrinks; its hint goes under it.
 
 ### Chips
 - **Style:** the default button as a pill (2px 10px, 12px text). They fill a field with a preset;
@@ -216,18 +223,28 @@ rounded.
 ### Inputs / Fields
 - **Style:** transparent ground, 1px Field Edge border, 6px radius, 6px 8px padding, a visible label
   above and a hint below; placeholders are examples, never the label.
+- **Set value** says what carries over before it saves: the expiry (with how far off it is, and that
+  the date can change) and the check that will test the new value. Left empty, Config keeps an
+  existing key's check.
 - **Focus:** the border turns teal with a 2px teal ring. **Read-only** (a locked name, scope or kind
   while replacing a value, the shown-once token): dashed border, ink text.
 
 ### Tables
 - **Style:** full width, collapsed borders, a hairline under each row, Faded Ink column labels; the
   action column has a hidden "Actions" header. Ended rows (revoked, expired) are Faded Ink.
+- **Wrapping:** above 640px column labels and the name column never wrap; the other columns take
+  the wrapping. Row actions sit on the row's first line of text.
 - **Empty:** one row that says what will appear there and how to add the first one.
 
 ### Status line
-- **Style:** fixed at the bottom center, max 600px, Stone Paper ground, 1px Field Edge border; Delete
-  Red border and text for a failure. Success clears itself after six seconds; a failure stays until
-  dismissed. The same text goes to a polite (failure: assertive) live region.
+- **Style:** fixed at the bottom center, max 600px, Stone Paper ground, 1px Field Edge border, and an
+  8px Stone Paper margin (an outline, not a shadow) so rows behind it end cleanly; Delete Red border and
+  text for a failure. Success clears itself after six seconds; a failure stays until dismissed. The
+  same text goes to a polite (failure: assertive) live region.
+- **A failure** names the action and what the server said, then what is stored now (a failed change
+  reloads the tables) and what to do: "Could not delete global/AWS_REGION: internal error. The tables
+  show what is stored now; try again." It says "try again" only when the server, not the request,
+  failed.
 
 ### Shown-once box
 - **Style:** 12px padding, 1px Expiry Amber border, 6px radius, placed right under "Create a token".
