@@ -26,7 +26,7 @@ nav a{text-decoration:none}nav a:hover{text-decoration:underline}nav span{color:
 table{width:100%;border-collapse:collapse}
 td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:500}
-td.acts{white-space:nowrap;text-align:right;padding-block:4px}
+td.acts{white-space:nowrap;text-align:right;padding-block:4px}td.ended{white-space:nowrap;text-align:right;padding-right:17px}
 tr.off td{color:var(--muted)}tr.empty td{color:var(--muted);padding:16px 8px}
 .wrap{overflow-x:auto}
 button{font:inherit;padding:6px 12px;border:1px solid var(--accent);border-radius:6px;background:transparent;color:var(--accent);cursor:pointer;transition:background-color .15s ease-out,color .15s ease-out}
@@ -69,10 +69,10 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   table.rec tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 16px;padding:12px 0;border-bottom:1px solid var(--line)}
   table.rec td{display:block;padding:0;border:0;overflow-wrap:break-word}
   table.rec td::before{content:attr(data-label);display:block;color:var(--muted);font-size:12px}
-  table.rec td:first-child,table.rec td.name,table.rec td.acts,table.rec tr.empty td,table.rec tr.editor td{grid-column:1/-1}
-  table.rec tr:not(.empty) td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}
+  table.rec td:first-child,table.rec td.name,table.rec td.acts,table.rec td.ended,table.rec tr.empty td,table.rec tr.editor td{grid-column:1/-1}
+  table.rec tr:not(.empty) td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec td.ended::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}
   table.rec td:empty{display:none}
-  table.rec td.acts{display:flex;gap:8px;text-align:left;margin-left:-8px}table.rec td.ended{margin-left:0}
+  table.rec td.acts{display:flex;gap:8px;text-align:left;margin-left:-8px}table.rec td.ended{text-align:left;padding:0}
   table.log tr{display:flex;flex-wrap:wrap;gap:2px 10px;padding:10px 0;border-bottom:1px solid var(--line)}
   table.log thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
   table.log td{display:inline;padding:0;border:0;overflow-wrap:break-word}table.log td:nth-child(3){font-weight:600;order:-1}
@@ -193,8 +193,13 @@ const fill = (id, rows, empty) => { const body = $(id), heads = [...body.closest
   for (const tr of rows) [...tr.children].forEach((c, i) => { if (heads[i]) c.dataset.label = heads[i]; });
   body.replaceChildren(...rows); };
 const code = t => Object.assign(document.createElement('code'), { textContent: t });
-// An audit name like KEY:scope+scope may break after a colon, plus or comma, never inside a word.
-const names = t => { const c = td('', 'muted'); for (const p of t.split(/([:+]|, )/)) { c.append(p); if (/^([:+]|, )$/.test(p)) c.append(document.createElement('wbr')); } return c; };
+// An audit name like KEY:scope+scope may break after the key's colon, a plus or a comma, never inside a scope.
+const names = t => { const c = td('', 'muted'), wbr = () => document.createElement('wbr');
+  t.split(', ').forEach((item, i) => { const at = item.indexOf(':');
+    if (i) c.append(', ', wbr());
+    if (at < 0) { c.append(item); return; }
+    c.append(item.slice(0, at + 1), wbr()); item.slice(at + 1).split('+').forEach((scope, j) => { if (j) c.append('+', wbr()); c.append(scope); }); });
+  return c; };
 const row = (cells, cls) => { const tr = document.createElement('tr'); if (cls) tr.className = cls; tr.append(...cells); return tr; };
 // A pin in words: each project (or all of them) with what it reads, shared keys and environments.
 const reach = t => { if (!t.projects) return 'global only'; const by = new Map();
@@ -235,8 +240,8 @@ async function load() { const mine = ++loads;
   fill('tokens', tokens.map(t => { const gone = !!t.revoked_at, done = gone || past(t.expires_at);
     const exp = !t.expires_at ? when('never', '', 'muted') : past(t.expires_at) ? when('expired ' + stamp(t.expires_at)) : when(stamp(t.expires_at), soon(t.expires_at) ? until(t.expires_at) : '', soon(t.expires_at) ? 'warn' : '');
     const tr = row([td(t.name), td(reach(t)), td(t.scopes ? t.scopes.join(', ') : 'reads only'), td(t.writes ? t.writes.join(', ') : 'nothing'), td(t.operator ? 'yes' : 'no'), when(day(t.created_at)), exp], done ? 'off' : '');
-    const ended = Object.assign(document.createElement('span'), { className: 'nw', textContent: day(t.revoked_at) });
-    tr.append(gone ? Object.assign(acts('revoked ', ended), { className: 'acts ended' }) : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name)));
+    const ended = td('revoked ', 'ended'); ended.append(Object.assign(document.createElement('span'), { className: 'nw', textContent: day(t.revoked_at) }));
+    tr.append(gone ? ended : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name)));
     return tr; }),
     'No tokens yet. Create one below, then add it as a network secret on the environment that should read keys.');
 
