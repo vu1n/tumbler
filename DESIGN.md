@@ -176,7 +176,8 @@ table, then its actions as a stack of named disclosures ("Add a key or replace a
 disclosure's top line, so no two rules ever stack. Forms are a grid of labelled fields
 (min 200px columns, 12px gap) with a hint under each field and the buttons last. The token form is one
 column 62ch wide above 640px: Name and Expires side by side, then Reads, May mint and May write, each
-with its chips and hint at the field's width, then Operator and the button.
+with its chips and hint at the field's width, then Operator and the button. A token's row editor takes
+the same 62ch column: Reads, then May mint and May write side by side, then Operator.
 
 Below 640px each table row becomes a labelled record: the name on its own line, then label-over-value
 pairs in two equal columns, then the row's actions. A key name elsewhere in a record takes the full
@@ -211,14 +212,14 @@ rounded.
 - **Quiet:** teal text, no border; row actions that open an editor (Set value, Edit) and Cancel.
 - **Destructive:** Faded Ink text, no border at rest; Delete Red text on a red tint under hover or
   focus. Every destructive control names its target for assistive tech ("Delete global/GITHUB_PAT").
-- **Busy:** once its request is on its way (after any confirm), the button says what is running
+- **Busy:** once its work starts (after any confirm), the button says what is running
   ("Saving…", "Checking with openai…", "Previewing…", "Creating…", "Deleting…") at full color with a
   progress cursor, and its form is inert (its fields and other buttons faded; its note stays readable)
   until the reply, so nothing sends twice and Cancel can't look like it stops a save that is already sent.
 - **Hover:** a 10% teal tint (primary: teal deepened 15% toward ink), only where the pointer can
   hover, so a tap never leaves a control tinted (or a Delete red). **Focus:** a 2px teal ring,
   2px offset.
-- **Touch:** on coarse pointers buttons, fields and disclosures are at least 44px tall, chips 40px,
+- **Touch:** on coarse pointers buttons, fields, disclosures and nav links are at least 44px tall, chips 40px,
   and a checkbox is 20px with a 44px label row. A checkbox never shrinks; its hint goes under it.
 
 ### Chips
@@ -233,6 +234,12 @@ rounded.
   existing key's check. The how-to hints under the fields it locks are hidden.
 - **Text boxes** (Config, `.env` text) grow with what is typed or pasted, showing it from its first
   line, up to 60% of the screen before they scroll, and stop at 80ch wide.
+- **Editing a token** says before saving which live grants a change to Reads or May mint ends now
+  (those left outside them), naming each (key, project, scopes) from the grants as they are when the
+  editor opens. If it can't read them all, a narrowing says so instead. A save waits for those grants (the
+  button already busy); if they change the note, or the editor closes, nothing is sent and the status line
+  says so. The status line after a save counts how many of the named grants the reload shows revoked:
+  "ended a grant".
 - **Focus:** the border turns teal with a 2px teal ring. **Read-only** (a locked name, scope or kind
   while replacing a value, the shown-once token): dashed border, ink text.
 
@@ -243,6 +250,9 @@ rounded.
   ("2026-10-26 01:25 UTC, in 36 h") and the names the Unbroken Date Rule lists (a grant's caller and
   project; the audit's who, action and project) never wrap; the other columns take the wrapping. Row actions sit on the row's first line of text.
 - **Empty:** one row that says what will appear there and how to add the first one.
+- **Loading:** until its rows arrive, a table holds one row that says so ("Loading keys…") and the nav
+  counts read "…". If the page's load fails, those rows say "Not loaded." and the status line says why;
+  grants that alone fail to load say so under their heading.
 
 ### Status line
 - **Style:** fixed at the bottom center, max 600px, Stone Paper ground, 1px Field Edge border, and an
