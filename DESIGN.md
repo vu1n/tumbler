@@ -136,7 +136,12 @@ follow the theme, and `accent-color`, caret and selection come from teal.
 
 **The Attention Rule.** Amber means "needs you soon" and always comes with words ("in 3 days",
 "expired 2026-10-22"), never color alone. An expired key is amber because it still needs rotating; an
-expired or revoked token is faded, because nothing is left to do.
+expired or revoked token is faded, because nothing is left to do. The nav says it before the tables
+do: "Keys 10, 2 need you", the count in amber.
+
+A key's expiry is a calendar date, good through that day: it counts in whole days where the owner
+is ("today", "tomorrow", "in 3 days"). It turns amber, and counts in the nav, a week before: at "in 7
+days". A token's expiry is a moment, so it counts in hours and minutes.
 
 ## Typography
 
@@ -152,21 +157,28 @@ not a brochure.
 - **Body** (400, 14px, 1.5): table cells, help text, controls. Prose stops at 60ch.
 - **Column label** (500, 14px, Faded Ink): table headers and field labels (field labels in Ink).
 - **Hint** (400, 13px, Faded Ink): the line under a field that says what it takes.
-- **Mono** (400, 12–13px): pasted `.env` text, config JSON, a new token.
+- **Mono** (400, 12–13px): pasted `.env` text, config JSON (in the fields and in the hints), commands
+  such as `tumbler put NAME`, a new token.
 
 **The Unbroken Date Rule.** Dates and times never wrap inside the value and use tabular numerals.
-Times are always `YYYY-MM-DD HH:MM UTC`; dates are `YYYY-MM-DD`.
+Times are always `YYYY-MM-DD HH:MM UTC`; dates are `YYYY-MM-DD`. In a phone record, where a column is
+narrow, the time may go under its date (and "expired" before it), but no part breaks.
 
 ## Layout
 
 A single centered column (max 1120px, 16px padding) of sections in a fixed order, Keys, Grants,
 Tokens, Audit, with a section nav under the title that carries the live counts. Each section is a
 table, then its actions as a stack of named disclosures ("Add a key or replace a value", "Import a
-.env", "Move a scope", "Create a token") separated by hairlines. Forms are a grid of labelled fields
+.env", "Move a scope", "Create a token") separated by hairlines; the table's last rule is the first
+disclosure's top line, so no two rules ever stack. Forms are a grid of labelled fields
 (min 200px columns, 12px gap) with a hint under each field and the buttons last.
 
 Below 640px each table row becomes a labelled record: the name on its own line, then label-over-value
-pairs in two columns, then the row's actions. The audit becomes log lines (action first, then when,
+pairs in two equal columns, then the row's actions. A key name elsewhere in a record takes the full
+width, and words never break mid-name: a long audit name breaks after the key name's colon, a plus or a
+comma, never inside a scope such as `workers:write` or a name such as `huddles-prod/dev`; a permission
+group of several words may wrap between them. An empty
+cell says "none" rather than disappearing, so every record keeps its fields on the same side. The audit becomes log lines (action first, then when,
 who and project, then the names). Above 640px a table that is still too wide scrolls inside its own
 container; the page itself never scrolls sideways.
 
@@ -192,7 +204,8 @@ rounded.
 - **Quiet:** teal text, no border; row actions that open an editor (Set value, Edit) and Cancel.
 - **Destructive:** Faded Ink text, no border at rest; Delete Red text on a red tint under hover or
   focus. Every destructive control names its target for assistive tech ("Delete global/GITHUB_PAT").
-- **Hover:** a 10% teal tint (primary: teal deepened 15% toward ink). **Focus:** a 2px teal ring,
+- **Hover:** a 10% teal tint (primary: teal deepened 15% toward ink), only where the pointer can
+  hover, so a tap never leaves a control tinted (or a Delete red). **Focus:** a 2px teal ring,
   2px offset. **Busy:** disabled with `aria-busy` while its request runs, so nothing sends twice.
 - **Touch:** on coarse pointers buttons, fields and disclosures are at least 44px tall, chips 40px.
 
@@ -203,8 +216,8 @@ rounded.
 ### Inputs / Fields
 - **Style:** transparent ground, 1px Field Edge border, 6px radius, 6px 8px padding, a visible label
   above and a hint below; placeholders are examples, never the label.
-- **Focus:** the border turns teal with a 2px teal ring. **Read-only** (a locked name or scope while
-  replacing a value): dashed border.
+- **Focus:** the border turns teal with a 2px teal ring. **Read-only** (a locked name, scope or kind
+  while replacing a value, the shown-once token): dashed border, ink text.
 
 ### Tables
 - **Style:** full width, collapsed borders, a hairline under each row, Faded Ink column labels; the
@@ -218,8 +231,10 @@ rounded.
 
 ### Shown-once box
 - **Style:** 12px padding, 1px Expiry Amber border, 6px radius, placed right under "Create a token".
-  It names the token, holds it in a read-only mono field, offers Copy and Copy as "Bearer …", and
-  stays until "I have stored it". On create it scrolls into view and takes focus.
+  It names the token, holds it in a read-only mono field that wraps to show all of it, offers Copy and
+  Copy as "Bearer …", and stays until "I have stored it"; until then a second token can't be created
+  and leaving the page asks first. On create it scrolls into view above the status line and takes
+  focus.
 
 ## Do's and Don'ts
 
