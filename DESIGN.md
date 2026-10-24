@@ -140,7 +140,8 @@ expired or revoked token is faded, because nothing is left to do. The nav says i
 do: "Keys 10, 2 need you", the count in amber.
 
 A key's expiry is a calendar date, good through that day: it counts in whole days where the owner
-is ("today", "tomorrow", "in 3 days"). A token's expiry is a moment, so it counts in hours and minutes.
+is ("today", "tomorrow", "in 3 days"). It turns amber, and counts in the nav, a week before: at "in 7
+days". A token's expiry is a moment, so it counts in hours and minutes.
 
 ## Typography
 
@@ -160,7 +161,8 @@ not a brochure.
   such as `tumbler put NAME`, a new token.
 
 **The Unbroken Date Rule.** Dates and times never wrap inside the value and use tabular numerals.
-Times are always `YYYY-MM-DD HH:MM UTC`; dates are `YYYY-MM-DD`.
+Times are always `YYYY-MM-DD HH:MM UTC`; dates are `YYYY-MM-DD`. In a phone record, where a column is
+narrow, the time may go under its date (and "expired" before it), but no part breaks.
 
 ## Layout
 

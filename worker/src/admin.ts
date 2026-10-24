@@ -67,7 +67,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 @media (max-width:640px){
   table.rec thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
   table.rec tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px 16px;padding:12px 0;border-bottom:1px solid var(--line)}
-  table.rec td{display:block;padding:0;border:0;overflow-wrap:break-word}
+  table.rec td{display:block;padding:0;border:0;overflow-wrap:break-word}table.rec .at{white-space:normal}
   table.rec td::before{content:attr(data-label);display:block;color:var(--muted);font-size:12px}
   table.rec td:first-child,table.rec td.name,table.rec td.acts,table.rec td.ended,table.rec tr.empty td,table.rec tr.editor td{grid-column:1/-1}
   table.rec tr:not(.empty) td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec td.ended::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}
@@ -170,13 +170,21 @@ const busy = async (b, fn) => { if (b) { b.disabled = true; b.setAttribute('aria
   try { return await fn(); } catch (err) { say(err.message, true); } finally { if (b) { b.disabled = false; b.removeAttribute('aria-busy'); } } };
 // Errors say which action failed, then what the server said.
 const fail = what => err => { throw Object.assign(new Error(what + ': ' + err.message), { canSkip: err.canSkip }); };
-const refresh = () => load().catch(err => say('Could not load the page: ' + err.message + (unstored ? '. Copy the new token before you reload.' : '. Reload to try again.'), true));
+// Loads can overlap when two actions finish close together: only the newest draws or reports a failure,
+// and every caller waits for it, so what runs after a refresh sees the page as drawn.
+let loads = 0, newest;
+const refresh = async () => { const mine = ++loads;
+  newest = load(mine).catch(err => { if (mine === loads) say('Could not load the page: ' + err.message + (unstored ? '. Copy the new token before you reload.' : '. Reload to try again.'), true); });
+  let seen; do { seen = newest; await seen; } while (seen !== newest); };
 const td = (t, cls) => { const e = document.createElement('td'); e.textContent = t ?? ''; if (cls) e.className = cls; return e; };
 const button = (label, fn, cls, aria) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
   if (cls) b.className = cls; if (aria) b.setAttribute('aria-label', aria); b.onclick = () => busy(b, fn); return b; };
 const acts = (...bs) => { const c = document.createElement('td'); c.className = 'acts'; c.append(...bs); return c; };
-// A date, then how far off it is; neither part breaks mid-value.
-const when = (main, rel, cls) => { const c = document.createElement('td'), v = document.createElement('span'), a = document.createElement('span'); a.className = 'nw'; a.textContent = main + (rel ? ',' : ''); v.append(a);
+// A date, then how far off it is; neither part breaks mid-value. On a phone a time may go under its date, and
+// "expired" before it, so a record's column never clips a stamp.
+const nw = t => Object.assign(document.createElement('span'), { className: 'nw', textContent: t });
+const when = (main, rel, cls) => { const c = document.createElement('td'), v = document.createElement('span'), a = document.createElement('span'); a.className = 'nw at';
+  (main + (rel ? ',' : '')).split(/ (?=\\d{4}-|\\d\\d:)/).forEach((part, i) => a.append(...(i ? [' ', nw(part)] : [nw(part)]))); v.append(a);
   if (rel) { const b = document.createElement('span'); b.className = 'nw'; b.textContent = rel; v.append(' ', b); } c.append(v); if (cls) c.className = cls; return c; };
 const day = s => s ? s.slice(0, 10) : '';
 const stamp = s => s ? s.slice(0, 16).replace('T', ' ') + ' UTC' : '';
@@ -198,8 +206,8 @@ const code = t => Object.assign(document.createElement('code'), { textContent: t
 const names = t => { const c = td('', 'muted'), wbr = () => document.createElement('wbr');
   t.split(', ').forEach((item, i) => { const at = item.indexOf(':'), key = at > 0 && /^[A-Z_][A-Z0-9_]*$/.test(item.slice(0, at));
     if (i) c.append(', ', wbr());
-    if (key) c.append(item.slice(0, at + 1), wbr());
-    (key ? item.slice(at + 1) : item).split('+').forEach((scope, j) => { if (j) c.append('+', wbr()); c.append(scope); }); });
+    if (key) c.append(nw(item.slice(0, at + 1)), wbr());
+    (key ? item.slice(at + 1) : item).split('+').forEach((scope, j) => { if (j) c.append('+', wbr()); c.append(nw(scope)); }); });
   return c; };
 const row = (cells, cls) => { const tr = document.createElement('tr'); if (cls) tr.className = cls; tr.append(...cells); return tr; };
 // A pin in words: each project (or all of them) with what it reads, shared keys and environments.
@@ -213,15 +221,14 @@ const checkText = k => { let c;
   return (typeof c.check === 'string' ? c.check : 'custom') + (k.checked ? ', passed' : ', saved unchecked'); };
 let KEYS = [];
 
-let loads = 0;
-async function load() { const mine = ++loads;
+async function load(mine) {
   const [{ keys }, { tokens }, { audit }, g] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(err => ({ grants: [], failed: err.message }))]);
   if (mine !== loads) return; // a newer load is drawing the page
   KEYS = keys; note();
-  const due = keys.filter(k => daysLeft(k) < 7).length;
+  const due = keys.filter(k => daysLeft(k) <= 7).length;
   $('nKeys').replaceChildren(String(keys.length), ...(due ? [', ', Object.assign(document.createElement('span'), { className: 'warn', textContent: due + ' need you' })] : []));
   fill('keys', keys.map(k => { const what = k.scope + '/' + k.name, check = checkText(k);
-    const left = daysLeft(k), exp = !k.expires_at ? when('no date', '', 'muted') : left < 0 ? when('expired ' + day(k.expires_at), '', 'warn') : when(day(k.expires_at), left < 7 ? inDays(left) : '', left < 7 ? 'warn' : '');
+    const left = daysLeft(k), exp = !k.expires_at ? when('no date', '', 'muted') : left < 0 ? when('expired ' + day(k.expires_at), '', 'warn') : when(day(k.expires_at), left <= 7 ? inDays(left) : '', left <= 7 ? 'warn' : '');
     return row([td(k.name), td(k.scope), td(k.kind), td(check, check === 'none' ? 'muted' : ''), td(k.description || 'none', 'muted'), when(day(k.rotated_at)), exp,
       acts(button('Set value', () => rotate(k), 'quiet', 'Set a new value for ' + what), button('Delete', () => deleteKey(k), 'del', 'Delete ' + what))]); }),
     ['No keys yet. Add one below, paste a .env, or run ', code('tumbler put NAME'), ' from a session.']);
@@ -241,7 +248,7 @@ async function load() { const mine = ++loads;
   fill('tokens', tokens.map(t => { const gone = !!t.revoked_at, done = gone || past(t.expires_at);
     const exp = !t.expires_at ? when('never', '', 'muted') : past(t.expires_at) ? when('expired ' + stamp(t.expires_at)) : when(stamp(t.expires_at), soon(t.expires_at) ? until(t.expires_at) : '', soon(t.expires_at) ? 'warn' : '');
     const tr = row([td(t.name), td(reach(t)), td(t.scopes ? t.scopes.join(', ') : 'reads only'), td(t.writes ? t.writes.join(', ') : 'nothing'), td(t.operator ? 'yes' : 'no'), when(day(t.created_at)), exp], done ? 'off' : '');
-    const ended = td('revoked ', 'ended'); ended.append(Object.assign(document.createElement('span'), { className: 'nw', textContent: day(t.revoked_at) }));
+    const ended = td('revoked ', 'ended'); ended.append(nw(day(t.revoked_at)));
     tr.append(gone ? ended : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name)));
     return tr; }),
     'No tokens yet. Create one below, then add it as a network secret on the environment that should read keys.');
