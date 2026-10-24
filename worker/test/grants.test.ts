@@ -34,6 +34,12 @@ function fakeProvider() {
       const known: Record<string, string> = { "containers write": "Containers Write", "pages write": "Pages Write" };
       return names.map((n) => known[n.toLowerCase()] ?? (() => { throw new Refused(400, `no group ${n}`); })());
     },
+    async listGroups(parent) {
+      if (parent !== PARENT) throw new Error("listGroups got the wrong parent");
+      return [{ name: "Containers Write", scopes: ["com.cloudflare.api.account"], delegable: true },
+        { name: "Workers Containers Write", scopes: ["com.cloudflare.api.account"], delegable: true },
+        { name: "Account API Tokens Write", scopes: ["com.cloudflare.api.account"], delegable: false }];
+    },
   };
   return Object.assign(p, { provider });
 }
@@ -773,6 +779,13 @@ test("an operator token adds and removes groups on the minted key it reads; the 
   assert.ok(!JSON.stringify(await (await scope(s.dev)).json()).includes(PARENT));
   // Another project's key is out of reach: the token reads only its pin.
   assert.equal((await scope(s.dev, "GET", undefined, "?project=kypp")).status, 403);
+  // The live list of groups, under the same gate; nothing else hangs off the path.
+  const listed = await (await s.call("GET", "/v1/mint/CLOUDFLARE_API_TOKEN/groups", s.dev)).json();
+  assert.deepEqual(listed.groups.map((g: any) => g.name), ["Containers Write", "Workers Containers Write", "Account API Tokens Write"]);
+  assert.ok(!JSON.stringify(listed).includes(PARENT));
+  assert.equal((await s.call("GET", "/v1/mint/CLOUDFLARE_API_TOKEN/other", s.dev)).status, 404);
+  assert.equal((await s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN/groups", s.dev, {})).status, 404);
+  assert.equal((await s.call("GET", "/v1/mint/CLOUDFLARE_API_TOKEN/groups", s.other)).status, 403);
 });
 
 test("cli: scope add/rm change a minted key's groups for an operator token; others are told who turns it on", async () => {
@@ -783,6 +796,11 @@ test("cli: scope add/rm change a minted key's groups for an operator token; othe
   assert.match(add.stderr, /added Containers Write to CLOUDFLARE_API_TOKEN workers:write \(dev\)/);
   assert.match(add.stdout, /workers:write\t.*\+Containers Write/);
   assert.deepEqual(JSON.parse((await cli(["scope", "CLOUDFLARE_API_TOKEN", "--json"])).stdout).scopes["workers:write"].extra, ["Containers Write"]);
+  const groups = await cli(["scope", "groups", "CLOUDFLARE_API_TOKEN", "containers"]);
+  assert.equal(groups.stdout, "Containers Write\taccount\nWorkers Containers Write\taccount\n");
+  assert.match((await cli(["scope", "groups", "CLOUDFLARE_API_TOKEN", "tokens"])).stdout, /Account API Tokens Write\taccount\t\(not addable with scope add\)/);
+  assert.equal(JSON.parse((await cli(["scope", "groups", "CLOUDFLARE_API_TOKEN", "workers", "--json"])).stdout).groups.length, 1);
+  assert.match((await cli(["scope", "groups", "CLOUDFLARE_API_TOKEN", "pages"])).stderr, /no group with pages/);
   await cli(["scope", "rm", "CLOUDFLARE_API_TOKEN", "workers:write", "Containers Write"]);
   assert.deepEqual(JSON.parse((await cli(["scope", "CLOUDFLARE_API_TOKEN", "--json"])).stdout).scopes["workers:write"].extra, []);
   await s.catalog.updateToken("dev", { operator: false });

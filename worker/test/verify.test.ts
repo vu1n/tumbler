@@ -184,7 +184,7 @@ test("permission names Cloudflare doesn't list, or zone ones, are refused; so is
     s.save("CLOUDFLARE_API_TOKEN", { value, kind: "mint:cloudflare", config: { account_id: ACCT, start: [], scopes } });
   const bad = await save("good-parent", { "dns:read": ["DNS Read"], "x:write": ["Workers Scripts Write", "Nope Write"] });
   assert.equal(bad.status, 400);
-  assert.equal((await bad.json()).error, 'Cloudflare has no account permission named "DNS Read", "Nope Write"');
+  assert.equal((await bad.json()).error, 'Cloudflare has no account permission named "DNS Read", "Nope Write"; `tumbler scope groups KEY` lists them');
   const refused = await save("bad-parent", { "workers:read": ["Workers Scripts Read"] });
   assert.equal(refused.status, 400);
   const msg = (await refused.json()).error;
@@ -258,4 +258,19 @@ test("cloudflare: an operator can't add token, member or billing groups, nor wri
   const id = (name: string) => GROUPS.find((g) => g.name === name)!.id;
   await cf.mint("good-parent", { ...cfg, extra: { "workers:write": ["Containers Write"] } }, ["workers:write"], new Date("2026-10-23T12:00:00Z"), "t");
   assert.deepEqual(posted[0].policies[0].permission_groups, [{ id: READ }, { id: id("Containers Write") }]);
+});
+
+test("cloudflare: an unknown permission name is refused with the listed names it is near, and every group can be listed", async () => {
+  const fetcher = (async () => new Response(JSON.stringify({ success: true, result: GROUPS }))) as unknown as typeof fetch;
+  const cf = cloudflare(fetcher), cfg = { account_id: ACCT, scopes: { "workers:read": [READ] } };
+  // Why: #36 copied "Containers Read" from the docs, which the account didn't list; the refusal names the real one.
+  await assert.rejects(cf.prepare!("good-parent", { account_id: ACCT, scopes: { "x:read": ["Containers Reed"] } }, async () => undefined),
+    /no account permission named "Containers Reed" \(for "Containers Reed" it lists "Containers Read", "Containers Write", "Workers Containers Read"\); `tumbler scope groups KEY` lists them/);
+  await assert.rejects(cf.groups!("good-parent", cfg, ["Nope Write"]), (e: any) => !/it lists/.test(e.message));
+  const all = await cf.listGroups!("good-parent", cfg);
+  assert.equal(all.length, GROUPS.length);
+  assert.deepEqual(all.map((g) => g.name), [...all.map((g) => g.name)].sort((a, b) => a.localeCompare(b)));
+  assert.deepEqual(all.find((g) => g.name === "DNS Read"), { name: "DNS Read", scopes: ["com.cloudflare.api.account.zone"], delegable: false });
+  assert.equal(all.find((g) => g.name === "Workers Containers Write")!.delegable, true);
+  assert.ok(!JSON.stringify(all).includes("0".repeat(32)), "ids stay inside the broker");
 });

@@ -10,7 +10,7 @@
 // A defaults key mints from DEFAULT_SCOPES as the code has them now, looked up by name at each mint,
 // so a change to them reaches saved keys with no re-save.
 import { Refused } from "./catalog.ts";
-import type { MintConfig, Provider } from "./grants.ts";
+import type { GroupInfo, MintConfig, Provider } from "./grants.ts";
 import { byStatus, TIMEOUT_MS } from "./verify.ts";
 
 const API = "https://api.cloudflare.com/client/v4";
@@ -42,6 +42,16 @@ const LEGACY_DEFAULTS: Record<string, string[]> = {
 // Groups an operator may never add (`tumbler scope add`): a child holding one could make tokens,
 // members or billing changes, which would let an agent widen its own reach past this broker.
 const UNDELEGABLE = /api tokens|memberships?|account settings|billing/i;
+const ACCOUNT_SCOPE = "com.cloudflare.api.account";
+
+// Up to three listed names that share a product word with `name`, so a refusal names the real group.
+// Why: Cloudflare's docs list names an account may not (#36 took "Containers Read" from them).
+const near = (name: string, listed: string[]) => {
+  const words = (s: string) => s.toLowerCase().split(/\s+/).filter((w) => w && !/^(read|write|edit|run)$/.test(w));
+  const want = new Set(words(name)), level = name.toLowerCase().split(/\s+/).at(-1);
+  return listed.map((n) => ({ n, score: words(n).filter((w) => want.has(w)).length * 2 + (n.toLowerCase().endsWith(` ${level}`) ? 1 : 0) }))
+    .filter((c) => c.score >= 2).sort((a, b) => b.score - a.score || a.n.localeCompare(b.n)).slice(0, 3).map((c) => c.n);
+};
 
 export function cloudflare(fetcher: typeof fetch = fetch): Provider {
   const call = async (method: string, path: string, parent: string, body?: unknown) => {
@@ -58,21 +68,27 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
     }
     return j.result;
   };
-  // Permission group ids by lowercase name: the account-scoped groups the parent can list.
-  const groupIds = async (parent: string, account: unknown) => {
+  // Every permission group the parent can list, with its scopes.
+  const listed = async (parent: string, account: unknown) => {
     // Why the parent: Account API Tokens Edit can list the account's permission groups, and an id
     // looked up here is one Cloudflare will accept when minting.
     const list = await call("GET", `/accounts/${account}/tokens/permission_groups`, parent).catch((e) => {
       if (e.cfStatus === 401 || e.cfStatus === 403) throw new Refused(400, `Cloudflare refused this token (${e.cfStatus}); paste an account-owned token with Account API Tokens: Edit on account ${account}`);
       throw e;
     }) as { id: string; name: string; scopes?: string[] }[];
-    return new Map((Array.isArray(list) ? list : [])
-      .filter((g) => !g.scopes || g.scopes.includes("com.cloudflare.api.account"))
-      .map((g) => [String(g.name).toLowerCase(), String(g.id)]));
+    return (Array.isArray(list) ? list : []).map((g) => ({ id: String(g.id), name: String(g.name), scopes: Array.isArray(g.scopes) ? g.scopes.map(String) : undefined }));
   };
-  const unknownNames = (byName: Map<string, string>, names: string[]) => {
+  // The account-scoped groups' ids by lowercase name, and their names as Cloudflare spells them.
+  const groupIds = async (parent: string, account: unknown) => {
+    const groups = (await listed(parent, account)).filter((g) => !g.scopes || g.scopes.includes(ACCOUNT_SCOPE));
+    return Object.assign(new Map(groups.map((g) => [g.name.toLowerCase(), g.id])), { spelled: groups.map((g) => g.name) });
+  };
+  const unknownNames = (byName: Map<string, string> & { spelled: string[] }, names: string[]) => {
     const unknown = names.filter((n) => !byName.has(n.toLowerCase()));
-    if (unknown.length) throw new Refused(400, `Cloudflare has no account permission named ${unknown.map((u) => JSON.stringify(u)).join(", ")}`);
+    if (!unknown.length) return;
+    const hints = unknown.map((u) => [u, near(u, byName.spelled)] as const).filter(([, n]) => n.length)
+      .map(([u, n]) => `for ${JSON.stringify(u)} it lists ${n.map((x) => JSON.stringify(x)).join(", ")}`);
+    throw new Refused(400, `Cloudflare has no account permission named ${unknown.map((u) => JSON.stringify(u)).join(", ")}${hints.length ? ` (${hints.join("; ")})` : ""}; \`tumbler scope groups KEY\` lists them`);
   };
   // Whether `parent` is an active user-owned token, which account routes reject.
   const userToken = async (parent: string) => {
@@ -123,7 +139,7 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
     },
     async mint(parent, config, scopes, expiresAt, label) {
       const stored = (config.scopes ?? {}) as Record<string, string[]>;
-      let byName: Map<string, string> | undefined;
+      let byName: Awaited<ReturnType<typeof groupIds>> | undefined;
       const lookup = async () => byName ??= await groupIds(parent, config.account_id);
       const legacy = async () => {
         const keys = Object.keys(stored).sort();
@@ -170,11 +186,16 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
     async groups(parent, config, names) {
       const bad = names.filter((n) => UNDELEGABLE.test(n));
       if (bad.length) throw new Refused(403, `${bad.join(", ")} can't be added from the CLI: a child with it could make tokens, members or billing changes. An admin adds it to the key's config in /admin`);
-      const list = await call("GET", `/accounts/${config.account_id}/tokens/permission_groups`, parent) as { name: string; scopes?: string[] }[];
-      const byName = new Map((Array.isArray(list) ? list : []).filter((g) => !g.scopes || g.scopes.includes("com.cloudflare.api.account"))
-        .map((g) => [String(g.name).toLowerCase(), String(g.name)]));
-      unknownNames(new Map([...byName].map(([k]) => [k, k])), names);
-      return names.map((n) => byName.get(n.toLowerCase())!);
+      const m = await groupIds(parent, config.account_id), spelled = new Map(m.spelled.map((n) => [n.toLowerCase(), n]));
+      unknownNames(m, names);
+      return names.map((n) => spelled.get(n.toLowerCase())!);
+    },
+    // All of them, zone and other scopes included: a group the mint can't use still explains a
+    // name that "doesn't exist" (it may be listed under another scope).
+    async listGroups(parent, config): Promise<GroupInfo[]> {
+      return (await listed(parent, config.account_id)).map((g) => ({ name: g.name, scopes: g.scopes ?? [],
+        delegable: !UNDELEGABLE.test(g.name) && (!g.scopes || g.scopes.includes(ACCOUNT_SCOPE)) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
     },
     // Before a parent is saved: Cloudflare must accept it as an active token on this account.
     async verify(parent, config) {
