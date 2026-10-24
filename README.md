@@ -273,7 +273,10 @@ scope a key has, including ones added to a key later). You decide once, there. A
 
 - Reads are minted on request, for every token.
 - A scope the token's scopes allow is minted at once. `tumbler run --scope workers:write -- wrangler
-  deploy` gets a wider child, and the narrower one is deleted at Cloudflare.
+  deploy` gets a wider child, and the narrower one is deleted at Cloudflare. Under the `wrangler`
+  shim a plain `wrangler deploy` (or `secret put`, `d1 migrations apply`, `containers push`...) asks
+  for `workers:write` itself; a token that can't hold it runs the command on its read child and says
+  so, instead of stopping it. `--local` and `--dry-run` stay on the read child.
 - A scope outside them is refused, and the command doesn't start: `CLOUDFLARE_API_TOKEN: token dev
   may not hold workers:write. Refused; retrying won't help: ask a human to add it to this token's
   scopes in /admin`. An agent stops and asks you; you click the token's scopes in `/admin`. Narrowing them ends the children holding what they no longer allow.
