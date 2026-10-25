@@ -187,7 +187,9 @@ test("a defaults key mints from DEFAULT_SCOPES as they are now, so workers:write
   assert.deepEqual(posted.at(-1).policies[0].permission_groups, Object.values(DEFAULT_SCOPES).flat().map((n) => ({ id: id(n) })));
   // workers:read, which every token gets, carries reads only.
   assert.ok(OPTIONAL_DEFAULTS["workers:read"].flat().every((n) => / read$/i.test(n)));
-  assert.ok(!Object.values(OPTIONAL_DEFAULTS).flat(2).some((n) => /secrets store/i.test(n)));
+  // A Worker with a Secrets Store binding deploys on workers:write, and only there.
+  assert.ok(OPTIONAL_DEFAULTS["workers:write"].some((names) => names[0] === "Secrets Store Write"));
+  assert.ok(!OPTIONAL_DEFAULTS["workers:read"].flat().some((n) => /secrets store/i.test(n)));
 });
 
 test("permission names Cloudflare doesn't list, or zone ones, are refused; so is a parent it won't list them for", async () => {
