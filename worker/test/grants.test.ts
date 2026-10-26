@@ -906,6 +906,21 @@ test("a delegate creates tokens no wider than itself, which end when it narrows 
   assert.ok((await s.catalog.tokens("dev")).every((t) => t.revoked_at));
 });
 
+test("a delegate's revoke cut short is finished by a retry, children included", async () => {
+  const s = await setup();
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  await admin("PATCH", "tokens/dev", { delegate: true });
+  const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"] })).json()).token;
+  assert.equal((await s.env(vps)).status, 200);
+  // The worker dies after the revoke's batch, before any grant is closed.
+  const close = s.grants.closeCaller.bind(s.grants);
+  s.grants.closeCaller = async () => { s.grants.closeCaller = close; throw new Error("worker died"); };
+  assert.equal((await admin("DELETE", "tokens/dev")).status, 500);
+  assert.deepEqual(s.fake.revoked, []);
+  assert.equal((await admin("DELETE", "tokens/dev")).status, 200);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
 test("a delegate's token never outlives it", async () => {
   const s = await setup();
   const until = "2026-10-21T12:00:00.000Z";

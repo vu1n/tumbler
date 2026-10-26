@@ -456,8 +456,10 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       return json({ ok: true, ...(ended.length ? { ended } : {}) });
     }
     if (m === "DELETE" && parts.length === 2) {
-      const children = (await catalog.tokens(parts[1])).filter((t) => !t.revoked_at).map((t) => t.name);
       const fresh = await catalog.revokeToken(parts[1]); // and the tokens it made as a delegate
+      // Every token it made, revoked earlier or not, read after the revoke: a retry of a cleanup cut
+      // short still finds their grants, and so does a child created just before the revoke landed.
+      const children = (await catalog.tokens(parts[1])).map((t) => t.name);
       for (const n of [parts[1], ...children]) await grants?.closeCaller(n, who); // their children stop working now, not at expiry
       if (fresh) await catalog.audit(who, "token-revoke", null, [parts[1]]);
       return json({ ok: true });
