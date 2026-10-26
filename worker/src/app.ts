@@ -209,6 +209,35 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
   return json({ error: "not found" }, 404);
 }
 
+// {"store": {"scope": "pr-review", "name": "PR_REVIEW_TUMBLER_TOKEN"}} on a token create: the new
+// token goes straight into that static key instead of the response, so no pipe can drop it.
+type StoreTarget = { scope: string; name: string; description?: string };
+function storeTarget(v: unknown): StoreTarget | null {
+  if (v === undefined || v === null) return null;
+  const o = v as Record<string, unknown>;
+  if (typeof v !== "object" || typeof o.scope !== "string" || typeof o.name !== "string") throw new Refused(400, 'store takes {"scope": ..., "name": ...}');
+  return { scope: o.scope, name: o.name, ...(typeof o.description === "string" ? { description: o.description } : {}) };
+}
+// Checked before the token exists, so a bad target never leaves a token behind. Only a static key: a
+// minted key's value is a parent credential, never a token handed to a caller.
+async function checkStoreTarget(catalog: Catalog, into: StoreTarget) {
+  checkScope(into.scope); checkName(into.name);
+  const prev = await catalog.keyRow(into.scope, into.name);
+  if (prev && prev.kind !== "static") throw new Refused(409, `${into.scope}/${into.name} is ${prev.kind}; store the token under another name`);
+}
+// A token whose store fails is revoked at once: nobody holds its value, so it could only ever be an
+// orphan that still works.
+async function storeToken(catalog: Catalog, grants: Grants | undefined, who: string, name: string, token: string, into: StoreTarget) {
+  try { await catalog.put(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }); }
+  catch (e) {
+    await catalog.revokeToken(name);
+    await grants?.closeCaller(name, who);
+    await catalog.audit(who, "token-revoke", null, [name]);
+    throw e instanceof Refused ? new Refused(e.status, `${e.message}; token ${name} was revoked, since nobody holds it`) : e;
+  }
+  await catalog.audit(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name]);
+}
+
 // The scope a caller token writes: the one it names, else the one it reads by default (never global by
 // accident), refused unless the token's writes reach it.
 function writeScope(catalog: Catalog, caller: Caller, requested: string | null) {
@@ -344,9 +373,13 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     if (m === "POST" && parts.length === 1) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
+      const into = storeTarget(b.store);
+      if (into) await checkStoreTarget(catalog, into);
       const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true);
       await catalog.audit(who, "token-create", null, [String(b.name)]);
-      return json({ name: b.name, token }); // shown once
+      if (!into) return json({ name: b.name, token }); // shown once
+      await storeToken(catalog, grants, who, String(b.name), token, into);
+      return json({ name: b.name, stored: into }); // never shown: it went straight into the key
     }
     // {"projects": [...]} edits the pin, {"scopes": [...]} the ceiling, {"writes": [...]} what it may
     // write; any of them.

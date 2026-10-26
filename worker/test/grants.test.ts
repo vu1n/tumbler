@@ -425,6 +425,26 @@ test("a parent that can't be a header value is refused; fetch errors never quote
   await assert.rejects(cf.mint(PARENT, CONFIG, ["workers:read"], new Date(), "x"), (e: any) => e.status === 502 && !e.message.includes(PARENT));
 });
 
+test("a token create with store never shows the token, and a store that fails leaves no live token", async () => {
+  const s = await setup();
+  const admin = (b: unknown) => s.call("POST", "/admin/api/tokens", undefined, b, "vu@example.com");
+  const r = await admin({ name: "vps", projects: ["dev"], store: { scope: "global", name: "VPS_TOKEN" } });
+  assert.equal(r.status, 200);
+  const out = await r.json();
+  assert.deepEqual(out, { name: "vps", stored: { scope: "global", name: "VPS_TOKEN" } });
+  const token = await s.catalog.value((await s.catalog.keyRow("global", "VPS_TOKEN"))!);
+  assert.equal((await s.env(token, "AWS_REGION")).status, 200);
+  // A minted key is never a target, and a bad target is refused before any token exists.
+  assert.equal((await admin({ name: "vps2", store: { scope: "dev", name: "CLOUDFLARE_API_TOKEN" } })).status, 409);
+  assert.equal((await admin({ name: "vps2", store: { scope: "dev", name: "lower" } })).status, 400);
+  assert.ok(!(await s.catalog.tokens()).some((t) => t.name === "vps2"));
+  // The store itself failing: the token it made is revoked, since nobody holds its value.
+  const put = s.catalog.put.bind(s.catalog);
+  s.catalog.put = async () => { s.catalog.put = put; throw new Error("d1 down"); };
+  assert.equal((await admin({ name: "vps3", store: { scope: "global", name: "VPS3_TOKEN" } })).status, 500);
+  assert.ok((await s.catalog.tokens()).find((t) => t.name === "vps3")!.revoked_at);
+});
+
 test("a caller token revoked while its first request mints gets nothing", async () => {
   const s = await setup();
   const fresh = await s.catalog.createToken("fresh", ["dev"]);
