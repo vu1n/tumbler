@@ -215,10 +215,14 @@ export class Catalog {
 
   // Revokes `name`'s token; `hash` is the one revoked, for a cleanup that must touch only its grants.
   async revokeTokenGen(name: string): Promise<{ fresh: boolean; hash: string }> {
-    const r = await this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL RETURNING hash").bind(now(), name).first<{ hash: string }>();
-    if (r) return { fresh: true, hash: r.hash };
-    const had = await this.db.prepare("SELECT hash FROM tokens WHERE name = ?").bind(name).first<{ hash: string }>();
-    if (had) return { fresh: false, hash: had.hash };
+    // One transaction: the hash returned is always the token this call revoked or found revoked,
+    // never a new token that took the name in between.
+    const [r, had] = await this.db.batch([
+      this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL RETURNING hash").bind(now(), name),
+      this.db.prepare("SELECT hash, revoked_at FROM tokens WHERE name = ?").bind(name)]);
+    const row = (had.results as { hash: string }[])[0];
+    if (r.results?.length) return { fresh: true, hash: (r.results as { hash: string }[])[0].hash };
+    if (row) return { fresh: false, hash: row.hash };
     throw new Refused(404, `no token ${name}`);
   }
 

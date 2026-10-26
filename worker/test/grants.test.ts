@@ -529,6 +529,10 @@ test("an old token's late request or late revoke cleanup never ends a reused nam
   await admin("DELETE", "tokens/dev");
   assert.equal(await activeChild(), 1);
   assert.equal((await s.env(fresh)).status, 200);
+  // A retry of a revoke that already landed reports that token's hash, read in the same transaction.
+  const before = await s.catalog.revokeTokenGen("dev");
+  assert.equal((await s.catalog.revokeTokenGen("dev")).fresh, false);
+  assert.equal((await s.catalog.revokeTokenGen("dev")).hash, before.hash);
 });
 
 test("a caller token revoked while its first request mints gets nothing", async () => {
