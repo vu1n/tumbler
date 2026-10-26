@@ -219,23 +219,28 @@ function storeTarget(v: unknown): StoreTarget | null {
   return { scope: o.scope, name: o.name, ...(typeof o.description === "string" ? { description: o.description } : {}) };
 }
 // Checked before the token exists, so a bad target never leaves a token behind. Only a static key: a
-// minted key's value is a parent credential, never a token handed to a caller.
+// minted key's value is a parent credential, never a token handed to a caller. Never a key with a
+// check either: that key holds some service's credential, which a tumbler token would replace.
 async function checkStoreTarget(catalog: Catalog, into: StoreTarget) {
   checkScope(into.scope); checkName(into.name);
   const prev = await catalog.keyRow(into.scope, into.name);
   if (prev && prev.kind !== "static") throw new Refused(409, `${into.scope}/${into.name} is ${prev.kind}; store the token under another name`);
+  if (prev && JSON.parse(prev.config || "{}").check) throw new Refused(409, `${into.scope}/${into.name} has a key check, so it holds another service's credential; store the token under another name`);
 }
-// A token whose store fails is revoked at once: nobody holds its value, so it could only ever be an
-// orphan that still works.
+// Everything after the token exists, audit included, fails as one: the token is then revoked at
+// once, since nobody holds its value and it could only ever be an orphan that still works.
 async function storeToken(catalog: Catalog, grants: Grants | undefined, who: string, name: string, token: string, into: StoreTarget) {
-  try { await catalog.put(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }); }
-  catch (e) {
+  try {
+    await catalog.audit(who, "token-create", null, [name]);
+    await catalog.put(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) });
+    await catalog.audit(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name]);
+  } catch (e) {
     await catalog.revokeToken(name);
     await grants?.closeCaller(name, who);
     await catalog.audit(who, "token-revoke", null, [name]);
-    throw e instanceof Refused ? new Refused(e.status, `${e.message}; token ${name} was revoked, since nobody holds it`) : e;
+    // Only a refusal's own text; any other error's message can quote what it was handed.
+    throw new Refused(e instanceof Refused ? e.status : 500, `${e instanceof Refused ? e.message : "the token could not be stored"}; token ${name} was revoked, since nobody holds it`);
   }
-  await catalog.audit(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name]);
 }
 
 // The scope a caller token writes: the one it names, else the one it reads by default (never global by
@@ -376,8 +381,10 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       const into = storeTarget(b.store);
       if (into) await checkStoreTarget(catalog, into);
       const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true);
-      await catalog.audit(who, "token-create", null, [String(b.name)]);
-      if (!into) return json({ name: b.name, token }); // shown once
+      if (!into) {
+        await catalog.audit(who, "token-create", null, [String(b.name)]);
+        return json({ name: b.name, token }); // shown once
+      }
       await storeToken(catalog, grants, who, String(b.name), token, into);
       return json({ name: b.name, stored: into }); // never shown: it went straight into the key
     }
