@@ -174,17 +174,18 @@ export class Grants {
   }
 
   // After a token's pin narrows: its children minted for a project it no longer reaches stop now.
-  async closeOutsidePin(caller: string, projects: string[] | null, who: string) {
+  // `gen` as for closeCaller().
+  async closeOutsidePin(caller: string, projects: string[] | null, who: string, gen?: string) {
     const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND project IS NOT NULL AND ${LIVE}`).bind(caller).all<any>();
-    for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who);
+    for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who, null, gen);
   }
 
   // After a token's scopes narrow: its children holding a scope it no longer allows stop now.
-  async closeOutsideCeiling(caller: string, scopes: string[] | null, who: string) {
+  async closeOutsideCeiling(caller: string, scopes: string[] | null, who: string, gen?: string) {
     const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND ${LIVE}`).bind(caller).all<any>();
     for (const r of results) {
       const g = parse(r);
-      if (!g.scopes.every((s) => allowedBy(scopes, s))) await this.close(g, "revoked", who);
+      if (!g.scopes.every((s) => allowedBy(scopes, s))) await this.close(g, "revoked", who, null, gen);
     }
   }
 

@@ -388,8 +388,9 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       // One checked write for both, so a bad pin never lands a wider ceiling (or the reverse).
       const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...("operator" in b ? { operator: b.operator === true } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
       // Both cleanups run before either audit; a cleanup cut short is finished by the sweep.
-      if ("projects" in done) await grants?.closeOutsidePin(parts[1], done.projects!, who);
-      if ("scopes" in done) await grants?.closeOutsideCeiling(parts[1], done.scopes!, who);
+      // Only the edited token's grants (its hash), never those of a token that took the name meanwhile.
+      if ("projects" in done) await grants?.closeOutsidePin(parts[1], done.projects!, who, done.hash);
+      if ("scopes" in done) await grants?.closeOutsideCeiling(parts[1], done.scopes!, who, done.hash);
       if ("projects" in done) await catalog.audit(who, "token-pin", null, [parts[1], ...(done.projects ?? ["global-only"])]);
       if ("scopes" in done) await catalog.audit(who, "token-scopes", null, [parts[1], ...(done.scopes ?? ["reads-only"])]);
       if ("writes" in done) await catalog.audit(who, "token-writes", null, [parts[1], ...(done.writes ?? ["writes-nothing"])]);

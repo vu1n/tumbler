@@ -533,6 +533,18 @@ test("an old token's late request or late revoke cleanup never ends a reused nam
   await admin("DELETE", "tokens/dev");
   assert.equal(await activeChild(), 1);
   assert.equal((await s.env(fresh)).status, 200);
+  // A narrowing whose cleanup runs only after the name was reused and the new token minted.
+  await admin("PATCH", "tokens/dev", { scopes: ["workers:write"] }); // the current token, then narrowed below
+  const ceiling = s.grants.closeOutsideCeiling.bind(s.grants);
+  s.grants.closeOutsideCeiling = async (...a: Parameters<typeof ceiling>) => {
+    s.grants.closeOutsideCeiling = ceiling;
+    await admin("DELETE", "tokens/dev");
+    await reuse();
+    return ceiling(...a);
+  };
+  await admin("PATCH", "tokens/dev", { scopes: [] });
+  assert.equal(await activeChild(), 1);
+  assert.equal((await s.env(fresh)).status, 200);
   // A retry of a revoke that already landed reports that token's hash, read in the same transaction.
   const before = await s.catalog.revokeTokenGen("dev");
   assert.equal((await s.catalog.revokeTokenGen("dev")).fresh, false);

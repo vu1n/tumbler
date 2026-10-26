@@ -229,15 +229,16 @@ export class Catalog {
   // A live token's pin, ceiling, writes and/or operator flag in one write, all checked first, so a
   // refused part never lands the others. Returns the fields as stored.
   async updateToken(name: string, edit: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean }) {
-    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean } = {}, sets: string[] = [], binds: (string | number | null)[] = [];
+    // `hash`: the token edited, for a cleanup that must touch only its grants.
+    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; hash?: string } = {}, sets: string[] = [], binds: (string | number | null)[] = [];
     if ("projects" in edit) { checkPin(done.projects = edit.projects ?? null); sets.push("projects = ?"); binds.push(asJson(done.projects)); }
     if ("scopes" in edit) { done.scopes = checkCeiling(edit.scopes ?? null); sets.push("scopes = ?"); binds.push(asJson(done.scopes)); }
     if ("writes" in edit) { done.writes = checkWrites(edit.writes ?? null); sets.push("writes = ?"); binds.push(asJson(done.writes)); }
     if ("operator" in edit) { done.operator = edit.operator === true; sets.push("operator = ?"); binds.push(done.operator ? 1 : 0); }
     if (!sets.length) return done;
-    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL`).bind(...binds, name).run();
-    if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
-    return done;
+    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL RETURNING hash`).bind(...binds, name).first<{ hash: string }>();
+    if (!r) throw new Refused(404, `no live token ${name}`);
+    return { ...done, hash: r.hash };
   }
 
   // True when this call revoked it; false when it was already revoked, so a retry still reaches the
