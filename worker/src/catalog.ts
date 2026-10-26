@@ -96,7 +96,9 @@ export function writeReaches(writes: string[] | null | undefined, scope: string)
 // child is minted at once; outside it the request is refused. null: reads only.
 // `writes`: the scopes `tumbler put` may save static keys in (checkWrites). null: writes nothing.
 // `operator`: may add or remove permission groups on the minted keys it reads (`tumbler scope`).
-export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; expires_at?: string | null }
+// `hash`: which credential authenticated, so a mint that lands after the name was reused by a new
+// token is refused (the name alone would pass).
+export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; expires_at?: string | null; hash?: string }
 export interface KeyRow {
   scope: string; name: string; kind: string; config: string; description: string; owner: string;
   created_at: string; rotated_at: string; expires_at: string | null; checked: number;
@@ -108,6 +110,13 @@ const now = () => new Date().toISOString();
 // Children live at most 24h (MAX_TTL_MIN in grants.ts); a retired parent is kept a little longer.
 export const RETIRE_MS = 25 * 60 * 60 * 1000;
 const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as ArrayBuffer);
+
+// The refusal for a token insert that failed on its name, or on a grant of the ended token it replaces.
+function tokenRefusal(e: Error, name: string, ended: string | null) {
+  if (/UNIQUE/.test(e.message)) return new Refused(409, ended ? `token ${name} changed while this ran; run it again` : `token ${name} is live; revoke it first (tumbler admin token revoke ${name}) or pick another name`);
+  if (ended && /NOT NULL/.test(e.message)) return new Refused(409, `a grant of the old token ${name} opened while this ran; run it again`);
+  return null;
+}
 
 type PutMeta = { description?: string; owner?: string; expires_at?: string | null; kind?: string; config?: Record<string, unknown>; checked?: boolean };
 
@@ -128,44 +137,66 @@ export class Catalog {
   async caller(token: string): Promise<Caller | null> {
     // Why here and not only in the sweep: an expired token must stop at its expiry, not up to one
     // sweep later. The sweep then ends the grants it still holds.
+    const hash = await sha256hex(token);
     const row = await this.db.prepare("SELECT name, projects, scopes, writes, operator, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
-      .bind(await sha256hex(token), this.clock().toISOString()).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; expires_at: string | null }>();
+      .bind(hash, this.clock().toISOString()).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; expires_at: string | null }>();
     return row ? { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects),
-      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, expires_at: row.expires_at } : null;
+      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, expires_at: row.expires_at, hash } : null;
   }
 
   // Returns the token once; only its hash is stored. expiresAt (ISO time) is optional: without it the
   // token lives until revoked, as every token made before expiry existed does.
-  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false): Promise<string> {
-    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator);
-    await insert.run().catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} exists`) : e; });
+  // The hash of `name`'s token when it has ended (revoked or expired), so its name may be reused.
+  async endedToken(name: string): Promise<string | null> {
+    return (await this.db.prepare("SELECT hash FROM tokens WHERE name = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(name, this.clock().toISOString()).first<{ hash: string }>())?.hash ?? null;
+  }
+
+  // `ended`: the hash of the ended token whose name this reuses (endedToken()), after its grants were
+  // closed. That token moves to an archived name in the insert's own transaction, and the insert
+  // lands only while no grant under the name is live (the hash is NULL otherwise, failing the batch),
+  // so the new token starts with nothing of the old one. If the name isn't that ended token's any
+  // more (a concurrent create), the insert fails on the name and the archive rolls back with it.
+  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false,
+    ended: string | null = null): Promise<string> {
+    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, ended ? [this.noLiveGrants(name)] : []);
+    await this.db.batch([...this.reuse(name, ended), insert]).catch((e: Error) => { throw tokenRefusal(e, name, ended) ?? e; });
     return token;
   }
 
   // A new token stored straight into a static key, in one transaction with both audit rows: it either
   // all lands or none of it does, so a failure never leaves a working token nobody holds, nor a key
-  // overwritten for a token that doesn't exist.
+  // overwritten for a token that doesn't exist. `ended` as for createToken().
   async createTokenInto(who: string, into: { scope: string; name: string; description?: string }, name: string, projects: string[] | null, expiresAt: string | null = null,
-    scopes: string[] | null = null, writes: string[] | null = null, operator = false) {
+    scopes: string[] | null = null, writes: string[] | null = null, operator = false, ended: string | null = null) {
     // The target is checked again inside the transaction: a key that became minted, or gained a
     // check, while this ran holds another service's credential and is never overwritten.
-    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, {
+    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, [{
       sql: "NOT EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND (kind != 'static' OR json_extract(COALESCE(NULLIF(config, ''), '{}'), '$.check') IS NOT NULL))",
-      binds: [into.scope, into.name] });
-    await this.db.batch([insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
+      binds: [into.scope, into.name] }, ...(ended ? [this.noLiveGrants(name)] : [])]);
+    await this.db.batch([...this.reuse(name, ended), insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
       this.auditRow(who, "token-create", null, [name]), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name])])
       .catch((e: Error) => {
-        if (/UNIQUE/.test(e.message)) throw new Refused(409, `token ${name} exists`);
-        if (/NOT NULL/.test(e.message)) throw new Refused(409, `${into.scope}/${into.name} changed to a minted or checked key while this ran, so nothing was created; store the token under another name`);
+        if (/NOT NULL/.test(e.message)) throw new Refused(409, `${into.scope}/${into.name} changed to a minted or checked key${ended ? `, or a grant of the old token ${name} opened,` : ""} while this ran, so nothing was created; run it again or store the token under another name`);
+        const refused = tokenRefusal(e, name, ended);
+        if (refused) throw refused;
         console.error("tumbler: token create --store failed", e.name); // never the message: it may quote a bound value
         throw new Refused(500, `token ${name} could not be stored, so nothing was created and ${into.name} is unchanged`);
       });
   }
 
-  // `ok`: a condition the insert lands under, in its own statement (the hash is NULL otherwise, which
+  // Reusing an ended token's name moves that token (matched by its hash) to an archived name.
+  private reuse(name: string, ended: string | null) {
+    return ended ? [this.db.prepare("UPDATE tokens SET name = ? WHERE name = ? AND hash = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)")
+      .bind(`${name}~${ended.slice(0, 8)}`, name, ended, this.clock().toISOString())] : [];
+  }
+  private noLiveGrants(name: string) {
+    return { sql: "NOT EXISTS (SELECT 1 FROM grants WHERE caller = ? AND state IN ('pending', 'active'))", binds: [name] };
+  }
+
+  // `ok`: conditions the insert lands under, in its own statement (the hash is NULL otherwise, which
   // fails the insert and any batch it is in).
   private async tokenInsert(name: string, projects: string[] | null, expiresAt: string | null, scopes: string[] | null, writes: string[] | null, operator: boolean,
-    ok?: { sql: string; binds: unknown[] }) {
+    ok: { sql: string; binds: unknown[] }[] = []) {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     checkPin(projects);
     scopes = checkCeiling(scopes);
@@ -177,9 +208,9 @@ export class Catalog {
       if (t <= this.clock().getTime()) throw new Refused(400, "expiry must be in the future");
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
-    const token = randomToken();
-    return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ${ok ? `CASE WHEN ${ok.sql} THEN ? END` : "?"}, ?, ?, ?, ?, ?, ?)`)
-      .bind(name, ...(ok?.binds ?? []), await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires) };
+    const token = randomToken(), hashSql = ok.length ? `CASE WHEN ${ok.map((c) => c.sql).join(" AND ")} THEN ? END` : "?";
+    return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ${hashSql}, ?, ?, ?, ?, ?, ?)`)
+      .bind(name, ...ok.flatMap((c) => c.binds), await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires) };
   }
 
   // Changes which projects a live token reads, so widening one never means minting a new token and
@@ -198,23 +229,34 @@ export class Catalog {
   // A live token's pin, ceiling, writes and/or operator flag in one write, all checked first, so a
   // refused part never lands the others. Returns the fields as stored.
   async updateToken(name: string, edit: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean }) {
-    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean } = {}, sets: string[] = [], binds: (string | number | null)[] = [];
+    // `hash`: the token edited, for a cleanup that must touch only its grants.
+    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; hash?: string } = {}, sets: string[] = [], binds: (string | number | null)[] = [];
     if ("projects" in edit) { checkPin(done.projects = edit.projects ?? null); sets.push("projects = ?"); binds.push(asJson(done.projects)); }
     if ("scopes" in edit) { done.scopes = checkCeiling(edit.scopes ?? null); sets.push("scopes = ?"); binds.push(asJson(done.scopes)); }
     if ("writes" in edit) { done.writes = checkWrites(edit.writes ?? null); sets.push("writes = ?"); binds.push(asJson(done.writes)); }
     if ("operator" in edit) { done.operator = edit.operator === true; sets.push("operator = ?"); binds.push(done.operator ? 1 : 0); }
     if (!sets.length) return done;
-    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL`).bind(...binds, name).run();
-    if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
-    return done;
+    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL RETURNING hash`).bind(...binds, name).first<{ hash: string }>();
+    if (!r) throw new Refused(404, `no live token ${name}`);
+    return { ...done, hash: r.hash };
   }
 
   // True when this call revoked it; false when it was already revoked, so a retry still reaches the
   // grant cleanup that an interrupted first attempt left undone.
   async revokeToken(name: string): Promise<boolean> {
-    const r = await this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL").bind(now(), name).run();
-    if (r.meta.changes) return true;
-    if (await this.db.prepare("SELECT 1 FROM tokens WHERE name = ?").bind(name).first()) return false;
+    return (await this.revokeTokenGen(name)).fresh;
+  }
+
+  // Revokes `name`'s token; `hash` is the one revoked, for a cleanup that must touch only its grants.
+  async revokeTokenGen(name: string): Promise<{ fresh: boolean; hash: string }> {
+    // One transaction: the hash returned is always the token this call revoked or found revoked,
+    // never a new token that took the name in between.
+    const [r, had] = await this.db.batch([
+      this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL RETURNING hash").bind(now(), name),
+      this.db.prepare("SELECT hash, revoked_at FROM tokens WHERE name = ?").bind(name)]);
+    const row = (had.results as { hash: string }[])[0];
+    if (r.results?.length) return { fresh: true, hash: (r.results as { hash: string }[])[0].hash };
+    if (row) return { fresh: false, hash: row.hash };
     throw new Refused(404, `no token ${name}`);
   }
 

@@ -9,9 +9,9 @@ class Stmt {
   async all() { return { results: this.db.prepare(this.sql).all(...(this.args as any[])) as Record<string, unknown>[] }; }
   async first() { return (await this.all()).results[0] ?? null; }
   async run() { const r = this.db.prepare(this.sql).run(...(this.args as any[])); return { success: true, meta: { changes: Number(r.changes) } }; }
-  // What a batch gets back: rows for a statement with RETURNING, as D1 gives them.
+  // What a batch gets back: rows for a SELECT or a statement with RETURNING, as D1 gives them.
   async exec() {
-    if (!/\bRETURNING\b/i.test(this.sql)) return { ...(await this.run()), results: [] };
+    if (!/^\s*SELECT\b|\bRETURNING\b/i.test(this.sql)) return { ...(await this.run()), results: [] };
     const results = (await this.all()).results;
     return { success: true, results, meta: { changes: results.length } };
   }

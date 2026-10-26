@@ -64,6 +64,8 @@ const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as 
 const union = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort();
 const grantScope = (id: string) => `grant:${id}`; // AAD for the sealed child, apart from every key row
 const LIVE = "state IN ('pending', 'active')";
+// The grant's caller name is still held by the token with this hash (a generation of that name).
+const GEN = "EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.hash = ?)";
 
 export class Grants {
   catalog: Catalog; providers: Record<string, Provider>; now: () => Date;
@@ -147,10 +149,10 @@ export class Grants {
     }
     if (g.state !== "active") throw new Refused(409, `${row.name} is being minted by another request; run again`);
     // A request left from before ceilings: drop it (the child stays), then mint what's asked now.
-    if (g.requested) g = await this.apply(g, { type: "lapse", who: "system" }) ?? g;
+    if (g.requested) g = await this.apply(g, { type: "lapse", who: "system" }, { gen: caller.hash }) ?? g;
     const want = union(g.scopes.filter((s) => allowedBy(caller.scopes ?? null, s)), scopes);
     if (!g.requested && want.length === g.scopes.length && want.every((s) => g!.scopes.includes(s))) return g;
-    const done = await this.mintFor(g, row, want, "policy", caller.scopes ?? null);
+    const done = await this.mintFor(g, row, want, "policy", caller.scopes ?? null, caller.hash);
     await this.catalog.audit(caller.name, "grant-step-up", project, [`${row.name}:${want.join("+")}`]);
     return done;
   }
@@ -164,23 +166,26 @@ export class Grants {
   }
 
   // A revoked caller token: end its grants so their children stop working now, not at expiry.
-  async closeCaller(caller: string, who: string) {
+  // `gen`: only while the token with that hash holds the name, so a late cleanup of an old token
+  // never ends grants of a new one that reused its name.
+  async closeCaller(caller: string, who: string, gen?: string) {
     const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND ${LIVE}`).bind(caller).all<any>();
-    for (const r of results) await this.close(parse(r), "revoked", who);
+    for (const r of results) await this.close(parse(r), "revoked", who, null, gen);
   }
 
   // After a token's pin narrows: its children minted for a project it no longer reaches stop now.
-  async closeOutsidePin(caller: string, projects: string[] | null, who: string) {
+  // `gen` as for closeCaller().
+  async closeOutsidePin(caller: string, projects: string[] | null, who: string, gen?: string) {
     const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND project IS NOT NULL AND ${LIVE}`).bind(caller).all<any>();
-    for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who);
+    for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who, null, gen);
   }
 
   // After a token's scopes narrow: its children holding a scope it no longer allows stop now.
-  async closeOutsideCeiling(caller: string, scopes: string[] | null, who: string) {
+  async closeOutsideCeiling(caller: string, scopes: string[] | null, who: string, gen?: string) {
     const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND ${LIVE}`).bind(caller).all<any>();
     for (const r of results) {
       const g = parse(r);
-      if (!g.scopes.every((s) => allowedBy(scopes, s))) await this.close(g, "revoked", who);
+      if (!g.scopes.every((s) => allowedBy(scopes, s))) await this.close(g, "revoked", who, null, gen);
     }
   }
 
@@ -279,18 +284,18 @@ export class Grants {
   async current(caller: Caller, project: string | null, row: KeyRow) {
     const g = await this.live(caller, project, row.name);
     if (!g) return null;
-    if (g.state === "active" && !this.fresh(g)) { await this.close(g, "expired", "system"); return null; }
+    if (g.state === "active" && !this.fresh(g)) { await this.close(g, "expired", "system", null, caller.hash); return null; }
     // A child wider than the token now allows (scopes narrowed, or minted before ceilings existed)
     // ends here rather than at expiry; the caller gets a fresh one within its scopes.
-    if (g.state === "active" && !g.scopes.every((s) => allowedBy(caller.scopes ?? null, s))) { await this.close(g, "revoked", "system"); return null; }
+    if (g.state === "active" && !g.scopes.every((s) => allowedBy(caller.scopes ?? null, s))) { await this.close(g, "revoked", "system", null, caller.hash); return null; }
     // A read claim whose minting request died (evicted, crashed) before storing: drop it and retry.
     if (g.state === "pending" && !g.child_id && Date.parse(g.created_at) < this.now().getTime() - ABANDONED_MS) {
-      await this.apply(g, { type: "abandon", who: "system" });
+      await this.apply(g, { type: "abandon", who: "system" }, { gen: caller.hash });
       return null;
     }
     // Another key row (a project key now overriding a global one) or an older revision of this one:
     // end it (close() finds the revision that minted it, retired or not) and start fresh.
-    if (g.key_scope !== row.scope || g.key_rev !== row.rev) { await this.close(g, "revoked", "system"); return null; }
+    if (g.key_scope !== row.scope || g.key_rev !== row.rev) { await this.close(g, "revoked", "system", null, caller.hash); return null; }
     return g;
   }
 
@@ -310,7 +315,7 @@ export class Grants {
     scopes = g.requested!; // sorted, as the first mint must match it
     // Why: the pending row claims the one live slot before anything is minted, so a concurrent
     // request finds it instead of minting a second child.
-    if (!await this.insert(g, e)) {
+    if (!await this.insert(g, e, caller.hash)) {
       const other = await this.live(caller, project, row.name);
       if (other) return other;
       throw new Refused(409, `${row.name}: a grant changed meanwhile; run again`);
@@ -321,14 +326,19 @@ export class Grants {
       await this.apply(g, { type: "abandon", who: "system" });
       throw err;
     }
-    await this.store(g, row, minted, scopes, "policy", caller.scopes ?? null);
+    // A refused landing (a revoke, a reused name, a narrowed pin) frees the slot too, or the next
+    // request would wait out the abandoned-claim window behind it.
+    try { await this.store(g, row, minted, scopes, "policy", caller.scopes ?? null, caller.hash); } catch (err) {
+      await this.apply(g, { type: "abandon", who: "system" });
+      throw err;
+    }
     await this.catalog.audit(caller.name, "grant-mint", project, [`${row.name}:${scopes.join("+")}`]);
     return (await this.get(id))!;
   }
 
-  async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string, ceiling: string[] | null): Promise<GrantRow> {
+  async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string, ceiling: string[] | null, hash?: string): Promise<GrantRow> {
     const minted = await this.mint(row, g, scopes), old = g.child_id;
-    await this.store(g, row, minted, scopes, who, ceiling);
+    await this.store(g, row, minted, scopes, who, ceiling, hash);
     if (old) await this.revokeChild(row, old, g.expires_at);
     await this.catalog.audit(g.caller, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`]);
     return (await this.get(g.id))!;
@@ -353,17 +363,19 @@ export class Grants {
   // The json_each test is pinReaches() in SQL: the scope itself, or `*` / `*/<env>` for it.
   // `ceiling`: the caller token's scopes as read before minting. Every scope beyond reads must still
   // be among the token's scopes when the child lands, so narrowing them mid-mint wins like a revoke.
-  async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string, ceiling: string[] | null) {
+  // `hash`: the credential that asked; the name's token must still be that one, or a request by a
+  // revoked token whose name was reused would land a child for the new token.
+  async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string, ceiling: string[] | null, hash?: string) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(g.id), row.name, m.value);
     const t = this.now().toISOString(), beyond = scopes.filter((s) => !autoApproved(s));
     const approved = beyond.filter((s) => allowedBy(ceiling, s));
     const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who, approved }, {
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
-        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
+        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND (? IS NULL OR t.hash = ?) AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
           AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value IN (grants.project,
             CASE WHEN instr(grants.project, '/') > 0 THEN '*' || substr(grants.project, instr(grants.project, '/')) ELSE '*' END)))
           AND NOT EXISTS (SELECT 1 FROM json_each(?) j WHERE NOT EXISTS (SELECT 1 FROM json_each(COALESCE(t.scopes, '[]')) c WHERE c.value IN (j.value, '*'))))`,
-      binds: [row.rev, row.scope, row.name, row.rev, t, JSON.stringify(beyond)], store: { iv, ciphertext },
+      binds: [row.rev, row.scope, row.name, row.rev, hash ?? null, hash ?? null, t, JSON.stringify(beyond)], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
     if (!done) {
       await this.revokeChild(row, m.id, m.expires_at);
@@ -380,10 +392,10 @@ export class Grants {
   // End a grant: forget its child here first, then delete it at the provider (best effort: it
   // expires there on its own if the provider can't be reached).
   // `row` is the key row that minted the child, when the caller has it.
-  async close(g: GrantRow | null, state: "expired" | "revoked", who: string, row?: KeyRow | null) {
+  async close(g: GrantRow | null, state: "expired" | "revoked", who: string, row?: KeyRow | null, gen?: string) {
     // `live`: ends the grant in whatever live state it is in now, and returns the child that update
     // actually ended, so a child minted concurrently is never left alive at the provider.
-    const ended = g && await this.apply(g, { type: state === "expired" ? "expire" : "revoke", who }, { store: { iv: null, ciphertext: null }, live: true });
+    const ended = g && await this.apply(g, { type: state === "expired" ? "expire" : "revoke", who }, { store: { iv: null, ciphertext: null }, live: true, gen });
     if (!ended || !g) return; // already ended by someone else
     if (ended.child_id) {
       // Only the revision that minted the child can delete it; a newer one may hold another parent.
@@ -430,13 +442,15 @@ export class Grants {
 
   // A new grant and its `open` event. False when another live grant already holds the slot (the
   // unique index), and then neither is written.
-  async insert(g: GrantRow, e: GrantEvent): Promise<boolean> {
+  // `gen`: opened only while the token with that hash holds the caller name (a 401 otherwise).
+  async insert(g: GrantRow, e: GrantEvent, gen?: string): Promise<boolean> {
     try {
-      await this.db.batch([this.db.prepare(
+      const [r] = await this.db.batch([this.db.prepare(
         `INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, requested, requested_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ? IS NULL OR EXISTS (SELECT 1 FROM tokens t WHERE t.name = ? AND t.hash = ?)`,
       ).bind(g.id, g.caller, g.project, g.key_scope, g.key_rev, g.name, g.state, JSON.stringify(g.scopes),
-        asJson(g.requested), g.requested_at, g.created_at, g.updated_at), this.event(g.id, g.created_at, e, g.state)]);
+        asJson(g.requested), g.requested_at, g.created_at, g.updated_at, gen ?? null, g.caller, gen ?? null), this.event(g.id, g.created_at, e, g.state, true)]);
+      if (!r.meta.changes) throw new Refused(401, "unauthorized");
       return true;
     } catch (err) {
       if (/UNIQUE/i.test((err as Error).message)) return false;
@@ -452,7 +466,9 @@ export class Grants {
   // `live`: match any live state instead of `g` exactly, for an event whose outcome doesn't depend on
   // the rest (expire, revoke), so a stream of step-ups or re-mints can't keep a revoke from landing.
   // Only the columns the event changes are written, and RETURNING reads the child actually ended.
-  async apply(g: GrantRow, e: GrantEvent, extra: { guard?: string; binds?: unknown[]; store?: Record<string, unknown>; live?: boolean } = {}): Promise<GrantRow | null> {
+  // `gen`: the hash of the caller token acting; the change lands only while that token still holds the
+  // grant's caller name, so a request by a token whose name was reused never touches the new one's grants.
+  async apply(g: GrantRow, e: GrantEvent, extra: { guard?: string; binds?: unknown[]; store?: Record<string, unknown>; live?: boolean; gen?: string } = {}): Promise<GrantRow | null> {
     const next = transition(g, e);
     if (!next) return null;
     const t = this.now().toISOString();
@@ -462,10 +478,12 @@ export class Grants {
       requested_at: g.requested_at, child_id: g.child_id, expires_at: g.expires_at, decided_by: g.decided_by };
     const set: Record<string, unknown> = { ...Object.fromEntries(Object.entries(all).filter(([k, v]) => v !== was[k] || k === "state" || (extra.live && ENDS.includes(k)))), ...extra.store, updated_at: t };
     const cols = Object.keys(set);
-    const [where, binds] = extra.live
+    const [base, baseBinds] = extra.live
       ? [`id = ? AND ${LIVE}`, [g.id]]
       : [`id = ? AND state = ? AND requested IS ? AND requested_at IS ? AND child_id IS ?${extra.guard ? ` AND ${extra.guard}` : ""}`,
         [g.id, g.state, asJson(g.requested), g.requested_at, g.child_id, ...(extra.binds ?? [])]];
+    const [where, binds] = extra.gen === undefined ? [base, baseBinds]
+      : [`${base} AND ${GEN}`, [...baseBinds, extra.gen]];
     // Ending a live grant records its child's delete in the same write, so a crash before the
     // provider call still leaves it for sweep() to retry; revokeChild() clears the row on success.
     const intent = extra.live ? [this.db.prepare(
@@ -486,9 +504,10 @@ export class Grants {
 
   // The `open` event of a new grant. Never the child or its provider id: the event's kind, who, the
   // states and the scopes it carried (apply() writes the rest the same way).
-  event(id: string, at: string, e: GrantEvent, to: string) {
-    return this.db.prepare(`INSERT INTO grant_events (grant_id, at, type, actor, from_state, to_state, scopes) VALUES (?, ?, ?, ?, NULL, ?, ?)`)
-      .bind(id, at, e.type, e.who, to, eventScopes(e));
+  // `ifGrant`: only when the grant row exists, for an insert that may have been refused.
+  event(id: string, at: string, e: GrantEvent, to: string, ifGrant = false) {
+    return this.db.prepare(`INSERT INTO grant_events (grant_id, at, type, actor, from_state, to_state, scopes) SELECT ?, ?, ?, ?, NULL, ?, ?${ifGrant ? " WHERE EXISTS (SELECT 1 FROM grants WHERE id = ?)" : ""}`)
+      .bind(id, at, e.type, e.who, to, eventScopes(e), ...(ifGrant ? [id] : []));
   }
 }
 
