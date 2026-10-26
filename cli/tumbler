@@ -703,11 +703,16 @@ function trimValue(v) {
   return one.includes("\n") ? v : one;
 }
 
-async function save({ name, scope, desc }, value, how, failNote = "") {
+// A 401 with no TUMBLER_TOKEN is a person's machine, not a revoked token: the write they want is the
+// admin one, which signs in through Access instead of a caller token.
+const adminHint = (e, verb, name, scope) => /^broker 401\b/.test(e.message) && !callerCfg().token
+  ? `; this machine has no caller token (TUMBLER_TOKEN). As the admin, run \`tumbler admin ${verb} ${name} --scope ${scope ?? "<project>"}\`, which signs in through Cloudflare Access` : "";
+
+async function save({ name, scope, desc }, value, how, failNote = "", admin = false) {
   if (!value) die(`empty value; ${how}`);
   let r;
   try { r = await brokerCall("PUT", `/v1/keys/${encodeURIComponent(name)}`, { value, ...(scope ? { scope } : {}), ...(desc !== undefined ? { description: desc } : {}) }); }
-  catch (e) { die(e.message + failNote); }
+  catch (e) { die(e.message + (admin ? adminHint(e, "put", name, scope) : "") + failNote); }
   try { await ask({ op: "reload" }); } catch {} // so the next run sees it, not a cached older value
   say(`${r.action} ${r.name} in ${r.scope}${r.checked ? "; it passes its check" : ""}`);
 }
@@ -726,7 +731,7 @@ const VALUE_HOW = "pipe it in, pass --from-file or --clipboard, or type it at th
 
 async function put(args) {
   const f = writeFlags(args, PUT_USAGE, { input: true });
-  await save(f, await readValue(f), VALUE_HOW);
+  await save(f, await readValue(f), VALUE_HOW, "", true);
 }
 
 async function rm(args) {
@@ -734,7 +739,7 @@ async function rm(args) {
   if (f.desc !== undefined) die("rm takes no description", 2);
   let r;
   try { r = await brokerCall("DELETE", `/v1/keys/${encodeURIComponent(f.name)}${f.scope ? `?scope=${encodeURIComponent(f.scope)}` : ""}`, null); }
-  catch (e) { die(e.message); }
+  catch (e) { die(e.message + adminHint(e, "rm", f.name, f.scope)); }
   try { await ask({ op: "reload" }); } catch {} // so the next run doesn't get it from the cache
   say(`deleted ${r.name} from ${r.scope}`);
 }
