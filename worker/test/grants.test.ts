@@ -933,6 +933,22 @@ test("a delegate's revoke cut short is finished by a retry, children included", 
   assert.deepEqual(s.fake.revoked, ["id-1"]);
 });
 
+test("a delegate narrowed while its child's mint runs: the child is never stored", async () => {
+  const s = await setup();
+  await s.call("PATCH", "/admin/api/tokens/dev", undefined, { delegate: true }, "vu@example.com");
+  const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"], scopes: ["workers:write"] })).json()).token;
+  // Narrowed in its row alone, as a PATCH cut short leaves it, while the provider mints.
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+    s.fake.provider.mint = mint;
+    s.db.raw.prepare("UPDATE tokens SET scopes = NULL WHERE name = 'dev'").run();
+    return mint(...a);
+  };
+  assert.equal((await s.call("POST", "/v1/step-up", vps, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).status, 409);
+  assert.equal((await adminGrants(s)).filter((g: any) => g.caller === "vps" && g.state === "active" && g.scopes.includes("workers:write")).length, 0);
+  assert.ok(s.fake.revoked.length >= 1, "the child minted for it is deleted at the provider");
+});
+
 test("a delegate's token never outlives it", async () => {
   const s = await setup();
   const until = "2026-10-21T12:00:00.000Z";
