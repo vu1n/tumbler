@@ -148,8 +148,16 @@ export class Catalog {
     const row = await this.db.prepare(`SELECT name, projects, scopes, writes, operator, delegate, parent, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
       AND (parent IS NULL OR EXISTS (SELECT 1 FROM tokens p WHERE p.name = tokens.parent AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)))`)
       .bind(await sha256hex(token), t, t).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; delegate: number; parent: string | null; expires_at: string | null }>();
-    return row ? { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects),
-      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, delegate: !!row.delegate, parent: row.parent, expires_at: row.expires_at } : null;
+    if (!row) return null;
+    const me: Caller = { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects),
+      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, delegate: !!row.delegate, parent: row.parent, expires_at: row.expires_at };
+    // A delegate's token never works beyond its parent as the parent is now: a narrowing whose
+    // cleanup was cut short, or a create that raced it, is refused here (the sweep then revokes it).
+    if (me.parent) {
+      const p = await this.tokenRow(me.parent);
+      if (!p || beyond(p, { projects: me.projects, scopes: me.scopes ?? null, writes: me.writes ?? null, expires_at: me.expires_at ?? null }).length) return null;
+    }
+    return me;
   }
 
   // Returns the token once; only its hash is stored. expiresAt (ISO time) is optional: without it the
@@ -218,6 +226,18 @@ export class Catalog {
       .bind(...(parent === undefined ? [] : [parent])).all<any>();
     const parse = (v: string | null) => v === null ? null : JSON.parse(v);
     return results.map((r) => ({ ...r, projects: parse(r.projects), scopes: parse(r.scopes), writes: parse(r.writes), operator: !!r.operator, delegate: !!r.delegate }));
+  }
+
+  // Live tokens a delegate made that reach beyond it as it is now: revoked here, so the grant sweep
+  // ends what they hold. Returns their names.
+  async revokeOutgrown(): Promise<string[]> {
+    const all = await this.tokens(), byName = new Map(all.map((t) => [t.name, t])), out = [];
+    for (const t of all) {
+      const p = t.parent ? byName.get(t.parent) : undefined;
+      if (!t.parent || t.revoked_at || !p || !beyond(p, t).length) continue;
+      if (await this.revokeToken(t.name)) { await this.audit("system", "token-revoke", null, [t.name, `beyond:${t.parent}`]); out.push(t.name); }
+    }
+    return out;
   }
 
   async tokenRow(name: string): Promise<TokenRow | null> {

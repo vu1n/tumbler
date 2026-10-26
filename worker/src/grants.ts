@@ -238,6 +238,7 @@ export class Grants {
       .bind(this.now().toISOString()).all<any>();
     for (const r of results) await this.close(parse(r), "expired", "system");
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
+    await this.catalog.revokeOutgrown(); // a delegate's tokens an interrupted narrowing left wider than it
     await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
     await this.closeOutsideCeilings(); // grants an interrupted narrowing left behind
     await this.closeOutsidePins(); // grants an interrupted repin left behind

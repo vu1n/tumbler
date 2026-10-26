@@ -284,6 +284,13 @@ async function delegateCreate(catalog: Catalog, grants: Grants | undefined, call
     await checkStoreTarget(catalog, into);
   }
   const token = await catalog.createToken(name, child.projects, expires, child.scopes, child.writes, false, { parent: caller.name });
+  // Again once it exists: a narrowing of the delegate that landed meanwhile wins (caller() refuses
+  // such a token anyway; this ends it now rather than at the next sweep).
+  const now = await catalog.tokenRow(caller.name);
+  if (!now || now.revoked_at || beyond(now, child).length) {
+    await catalog.revokeToken(name);
+    throw new Refused(409, `${caller.name} changed while token ${name} was being made; it was revoked, run again`);
+  }
   const created = [name, `parent:${caller.name}`];
   if (!into) {
     await catalog.audit(caller.name, "token-create", null, created);

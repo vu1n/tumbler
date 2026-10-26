@@ -914,3 +914,27 @@ test("a delegate's token never outlives it", async () => {
   const made = await (await s.call("POST", "/v1/tokens", brief, { name: "short", projects: ["dev"] })).json();
   assert.equal(made.expires_at, until);
 });
+
+test("a delegate's token stops at its parent's current bounds even when cleanup is cut short or a create races a narrowing", async () => {
+  const s = await setup();
+  await s.call("PATCH", "/admin/api/tokens/dev", undefined, { delegate: true }, "vu@example.com");
+  const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"], scopes: ["workers:write"] })).json()).token;
+  await s.call("POST", "/v1/step-up", vps, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  // Narrowed with no cleanup at all, as a PATCH cut short after its write leaves it.
+  s.db.raw.prepare("UPDATE tokens SET scopes = NULL WHERE name = 'dev'").run();
+  assert.equal((await s.call("GET", "/v1/whoami", vps)).status, 401);
+  await s.grants.sweep();
+  assert.ok((await s.catalog.tokenRow("vps"))!.revoked_at);
+  assert.equal((await adminGrants(s)).filter((g: any) => g.caller === "vps" && ["active", "pending"].includes(g.state)).length, 0);
+  // A create authorized before a narrowing that lands while it runs.
+  s.db.raw.prepare("UPDATE tokens SET projects = '[\"dev\"]' WHERE name = 'dev'").run();
+  const create = s.catalog.createToken.bind(s.catalog);
+  s.catalog.createToken = async (...a: Parameters<typeof create>) => {
+    s.catalog.createToken = create;
+    s.db.raw.prepare("UPDATE tokens SET projects = NULL WHERE name = 'dev'").run();
+    return create(...a);
+  };
+  const raced = await s.call("POST", "/v1/tokens", s.dev, { name: "vps2", projects: ["dev"] });
+  assert.equal(raced.status, 409);
+  assert.ok((await s.catalog.tokenRow("vps2"))!.revoked_at);
+});
