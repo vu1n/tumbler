@@ -266,16 +266,9 @@ async function delegateCreate(catalog: Catalog, grants: Grants | undefined, call
     if (!writeReaches(caller.writes, into.scope)) throw new Refused(403, `${caller.name} may not write ${into.scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}; store the token where it writes, or leave out store to have it shown once`);
     await checkStoreTarget(catalog, into);
   }
-  const created = [name, `parent:${caller.name}`], kin = { parent: caller.name };
+  const created = [name, `parent:${caller.name}`], kin = { parent: caller };
   const token = into ? null : await catalog.createToken(name, child.projects, expires, child.scopes, child.writes, false, kin);
   if (into) await catalog.createTokenInto(caller.name, into, created, name, child.projects, expires, child.scopes, child.writes, false, kin);
-  // Again once it exists: a narrowing of the delegate that landed meanwhile wins (caller() refuses
-  // such a token anyway; this ends it now rather than at the next sweep).
-  const now = await catalog.tokenRow(caller.name);
-  if (!now || now.revoked_at || beyond(now, child).length) {
-    await catalog.revokeToken(name);
-    throw new Refused(409, `${caller.name} changed while token ${name} was being made; it was revoked${into ? ` (${into.name} holds it, dead)` : ""}, so run again under another name`);
-  }
   if (into) return { name, expires_at: expires, stored: into }; // never shown: it went straight into the key
   await catalog.audit(caller.name, "token-create", null, created);
   return { name, expires_at: expires, token }; // shown once

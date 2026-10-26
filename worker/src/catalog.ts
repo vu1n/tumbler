@@ -78,6 +78,13 @@ function checkCeiling(scopes: string[] | null): string[] | null {
   for (const s of list) if (!scopeName(s)) throw new Refused(400, `invalid scope: ${s}`);
   return list.length ? list : null;
 }
+// The refusal for a token insert that failed on its name, or on its parent changing underneath it.
+function insertRefusal(e: Error, name: string, kin: Kin) {
+  if (/UNIQUE/.test(e.message)) return new Refused(409, `token ${name} exists`);
+  if (kin.parent && /NOT NULL/.test(e.message)) return new Refused(409, `${kin.parent.name} changed while token ${name} was being made, so nothing was created; run it again`);
+  return null;
+}
+
 // A token's pin, ceiling and writes as they are stored: checked, trimmed, empty as null. Bounds are
 // compared on this form, so a request can't slip past one with spacing it gets stored without.
 export function tokenShape(projects: string[] | null, scopes: string[] | null, writes: string[] | null) {
@@ -134,7 +141,8 @@ const now = () => new Date().toISOString();
 export const RETIRE_MS = 25 * 60 * 60 * 1000;
 const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as ArrayBuffer);
 
-type Kin = { delegate?: boolean; parent?: string | null }; // a delegate may make tokens; parent is the delegate that made this one
+// delegate: the token may make tokens. parent: the delegate making this one, as it was when it asked.
+type Kin = { delegate?: boolean; parent?: Pick<Caller, "name" | "projects" | "scopes" | "writes" | "expires_at"> | null };
 type PutMeta = { description?: string; owner?: string; expires_at?: string | null; kind?: string; config?: Record<string, unknown>; checked?: boolean };
 
 export class Catalog {
@@ -177,7 +185,7 @@ export class Catalog {
   async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false,
     kin: Kin = {}): Promise<string> {
     const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, kin);
-    await insert.run().catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} exists`) : e; });
+    await insert.run().catch((e: Error) => { throw insertRefusal(e, name, kin) ?? e; });
     return token;
   }
 
@@ -190,7 +198,8 @@ export class Catalog {
     await this.db.batch([insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
       this.auditRow(who, "token-create", null, created), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name])])
       .catch((e: Error) => {
-        if (/UNIQUE/.test(e.message)) throw new Refused(409, `token ${name} exists`);
+        const refused = insertRefusal(e, name, kin);
+        if (refused) throw refused;
         console.error("tumbler: token create --store failed", e.name); // never the message: it may quote a bound value
         throw new Refused(500, `token ${name} could not be stored, so nothing was created and ${into.name} is unchanged`);
       });
@@ -209,9 +218,16 @@ export class Catalog {
       if (t <= this.clock().getTime()) throw new Refused(400, "expiry must be in the future");
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
-    const token = randomToken();
-    return { token, insert: this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, writes, operator, delegate, parent, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, delegate ? 1 : 0, parent, now(), expires) };
+    const token = randomToken(), hash = await sha256hex(token), t = now();
+    const row = [name, projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, delegate ? 1 : 0, parent?.name ?? null, t, expires];
+    if (!parent) return { token, insert: this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, writes, operator, delegate, parent, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(row[0], hash, ...row.slice(1)) };
+    // A child is inserted only while its parent is still exactly as it was when it asked (the hash is
+    // otherwise NULL, which fails the whole batch): a narrowing or revoke that lands first always wins.
+    return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, delegate, parent, created_at, expires_at) VALUES (?,
+      CASE WHEN EXISTS (SELECT 1 FROM tokens p WHERE p.name = ? AND p.delegate = 1 AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)
+        AND p.projects IS ? AND p.scopes IS ? AND p.writes IS ? AND p.expires_at IS ?) THEN ? END, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(row[0], parent.name, this.clock().toISOString(), asJson(parent.projects), asJson(parent.scopes ?? null), asJson(parent.writes ?? null), parent.expires_at ?? null, hash, ...row.slice(1)) };
   }
 
   // Changes which projects a live token reads, so widening one never means minting a new token and

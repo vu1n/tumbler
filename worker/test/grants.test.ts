@@ -935,5 +935,18 @@ test("a delegate's token stops at its parent's current bounds even when cleanup 
   };
   const raced = await s.call("POST", "/v1/tokens", s.dev, { name: "vps2", projects: ["dev"] });
   assert.equal(raced.status, 409);
-  assert.ok((await s.catalog.tokenRow("vps2"))!.revoked_at);
+  assert.match((await raced.json()).error, /dev changed while token vps2 was being made, so nothing was created/);
+  assert.equal(await s.catalog.tokenRow("vps2"), null);
+  // Its writes taken away while a create stores into them: nothing is created, and the key is untouched.
+  s.db.raw.prepare("UPDATE tokens SET projects = '[\"dev\"]', writes = '[\"dev\"]' WHERE name = 'dev'").run();
+  await s.catalog.put("dev", "VPS_TOKEN", "old-value");
+  const into = s.catalog.createTokenInto.bind(s.catalog);
+  s.catalog.createTokenInto = async (...a: Parameters<typeof into>) => {
+    s.catalog.createTokenInto = into;
+    s.db.raw.prepare("UPDATE tokens SET writes = NULL WHERE name = 'dev'").run();
+    return into(...a);
+  };
+  assert.equal((await s.call("POST", "/v1/tokens", s.dev, { name: "vps3", projects: ["dev"], store: { scope: "dev", name: "VPS_TOKEN" } })).status, 409);
+  assert.equal(await s.catalog.tokenRow("vps3"), null);
+  assert.equal(await s.catalog.value((await s.catalog.keyRow("dev", "VPS_TOKEN"))!), "old-value");
 });
