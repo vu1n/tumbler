@@ -904,6 +904,13 @@ test("a delegate creates tokens no wider than itself, which end when it narrows 
   assert.equal((await make({ name: "other" })).status, 409);
   assert.equal((await s.call("DELETE", "/v1/tokens/other", s.dev)).status, 404);
   assert.deepEqual((await (await s.call("GET", "/v1/tokens", s.dev)).json()).tokens.map((t: any) => t.name), ["vps", "vps2"]);
+  // A token a delegate made never becomes a delegate or an operator, so chains stay one level deep.
+  for (const b of [{ delegate: true }, { operator: true }]) {
+    const r = await admin("PATCH", "tokens/vps", b);
+    assert.equal(r.status, 409, JSON.stringify(b));
+    assert.match((await r.json()).error, /was made by dev, so it can't be a delegate or an operator/);
+  }
+  assert.equal((await admin("PATCH", "tokens/vps", { delegate: false })).status, 200);
   // Narrowing the delegate ends what no longer fits: vps held workers:write, vps2 reads only.
   const narrowed = await (await admin("PATCH", "tokens/dev", { scopes: [] })).json();
   assert.deepEqual(narrowed.ended, ["vps"]);

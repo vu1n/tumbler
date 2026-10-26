@@ -260,8 +260,15 @@ export class Catalog {
     if ("operator" in edit) { done.operator = edit.operator === true; sets.push("operator = ?"); binds.push(done.operator ? 1 : 0); }
     if ("delegate" in edit) { done.delegate = edit.delegate === true; sets.push("delegate = ?"); binds.push(done.delegate ? 1 : 0); }
     if (!sets.length) return done;
-    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL`).bind(...binds, name).run();
-    if (!r.meta.changes) throw new Refused(404, `no live token ${name}`);
+    // A token a delegate made is never itself a delegate or an operator: delegation stays one level
+    // deep, so its parent's revoke and bounds (checked one level up) always reach it.
+    const raise = done.delegate === true || done.operator === true ? 1 : 0;
+    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL AND (? = 0 OR parent IS NULL)`).bind(...binds, name, raise).run();
+    if (!r.meta.changes) {
+      const t = await this.db.prepare("SELECT parent FROM tokens WHERE name = ? AND revoked_at IS NULL").bind(name).first<{ parent: string | null }>();
+      if (t?.parent) throw new Refused(409, `token ${name} was made by ${t.parent}, so it can't be a delegate or an operator; create it as an admin token instead`);
+      throw new Refused(404, `no live token ${name}`);
+    }
     return done;
   }
 
