@@ -79,10 +79,11 @@ function checkCeiling(scopes: string[] | null): string[] | null {
   return list.length ? list : null;
 }
 // The refusal for a token insert that failed on its name, or on its parent changing underneath it.
-function insertRefusal(e: Error, name: string, kin: Kin) {
+function insertRefusal(e: Error, name: string, kin: Kin, into?: { scope: string; name: string }) {
   if (/UNIQUE/.test(e.message)) return new Refused(409, `token ${name} exists`);
-  if (kin.parent && /NOT NULL/.test(e.message)) return new Refused(409, `${kin.parent.name} changed while token ${name} was being made, so nothing was created; run it again`);
-  return null;
+  if (!/NOT NULL/.test(e.message) || !(kin.parent || into)) return null;
+  const changed = [kin.parent?.name, into && `${into.scope}/${into.name}`].filter(Boolean).join(" or ");
+  return new Refused(409, `${changed} changed while token ${name} was being made, so nothing was created; run it again`);
 }
 
 // A token's pin, ceiling and writes as they are stored: checked, trimmed, empty as null. Bounds are
@@ -194,19 +195,25 @@ export class Catalog {
   // overwritten for a token that doesn't exist.
   async createTokenInto(who: string, into: { scope: string; name: string; description?: string }, created: string[], name: string, projects: string[] | null, expiresAt: string | null = null,
     scopes: string[] | null = null, writes: string[] | null = null, operator = false, kin: Kin = {}) {
-    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, kin);
+    // The target is checked again inside the transaction: a key that became minted, or gained a
+    // check, while this ran holds another service's credential and is never overwritten.
+    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, kin, {
+      sql: "NOT EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND (kind != 'static' OR json_extract(COALESCE(NULLIF(config, ''), '{}'), '$.check') IS NOT NULL))",
+      binds: [into.scope, into.name] });
     await this.db.batch([insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
       this.auditRow(who, "token-create", null, created), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name])])
       .catch((e: Error) => {
-        const refused = insertRefusal(e, name, kin);
+        const refused = insertRefusal(e, name, kin, into);
         if (refused) throw refused;
         console.error("tumbler: token create --store failed", e.name); // never the message: it may quote a bound value
         throw new Refused(500, `token ${name} could not be stored, so nothing was created and ${into.name} is unchanged`);
       });
   }
 
+  // `ok`: a further condition the insert lands under, like the parent's (the hash is NULL otherwise,
+  // which fails the insert and any batch it is in).
   private async tokenInsert(name: string, projects: string[] | null, expiresAt: string | null, scopes: string[] | null, writes: string[] | null, operator: boolean,
-    { delegate = false, parent = null }: Kin) {
+    { delegate = false, parent = null }: Kin, ok?: { sql: string; binds: unknown[] }) {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     checkPin(projects);
     scopes = checkCeiling(scopes);
@@ -219,15 +226,15 @@ export class Catalog {
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
     const token = randomToken(), hash = await sha256hex(token), t = now();
-    const row = [name, projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, delegate ? 1 : 0, parent?.name ?? null, t, expires];
-    if (!parent) return { token, insert: this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, writes, operator, delegate, parent, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(row[0], hash, ...row.slice(1)) };
-    // A child is inserted only while its parent is still exactly as it was when it asked (the hash is
-    // otherwise NULL, which fails the whole batch): a narrowing or revoke that lands first always wins.
-    return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, delegate, parent, created_at, expires_at) VALUES (?,
-      CASE WHEN EXISTS (SELECT 1 FROM tokens p WHERE p.name = ? AND p.delegate = 1 AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)
-        AND p.projects IS ? AND p.scopes IS ? AND p.writes IS ? AND p.expires_at IS ?) THEN ? END, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .bind(row[0], parent.name, this.clock().toISOString(), asJson(parent.projects), asJson(parent.scopes ?? null), asJson(parent.writes ?? null), parent.expires_at ?? null, hash, ...row.slice(1)) };
+    const row = [projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, delegate ? 1 : 0, parent?.name ?? null, t, expires];
+    // A child is inserted only while its parent is still exactly as it was when it asked: a narrowing
+    // or revoke that lands first always wins.
+    const conds = [...(parent ? [{ sql: `EXISTS (SELECT 1 FROM tokens p WHERE p.name = ? AND p.delegate = 1 AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)
+        AND p.projects IS ? AND p.scopes IS ? AND p.writes IS ? AND p.expires_at IS ?)`,
+      binds: [parent.name, this.clock().toISOString(), asJson(parent.projects), asJson(parent.scopes ?? null), asJson(parent.writes ?? null), parent.expires_at ?? null] }] : []), ...(ok ? [ok] : [])];
+    const hashSql = conds.length ? `CASE WHEN ${conds.map((c) => c.sql).join(" AND ")} THEN ? END` : "?";
+    return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, delegate, parent, created_at, expires_at) VALUES (?, ${hashSql}, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(name, ...conds.flatMap((c) => c.binds), hash, ...row) };
   }
 
   // Changes which projects a live token reads, so widening one never means minting a new token and
