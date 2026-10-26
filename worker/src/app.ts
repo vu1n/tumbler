@@ -347,11 +347,11 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     if (m === "POST" && parts.length === 1) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
-      // Reusing an ended token's name: its children end first, so none is left live under a name the
-      // new token holds (the sweep closes them only while the token row reads revoked or expired).
-      const { token, archived } = await catalog.newToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true);
-      // The old token's children stop now rather than at the next sweep.
-      if (archived) await grants?.closeCaller(archived, who);
+      // Reusing an ended token's name: its children end first, and only that token's (closeCaller's
+      // gen), so newToken() finds nothing live under the name it hands over.
+      const name = String(b.name ?? ""), ended = await catalog.endedToken(name);
+      if (ended) await grants?.closeCaller(name, who, ended);
+      const token = await catalog.newToken(name, projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true, ended);
       await catalog.audit(who, "token-create", null, [String(b.name)]);
       return json({ name: b.name, token }); // shown once
     }
@@ -372,8 +372,8 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       return json({ ok: true });
     }
     if (m === "DELETE" && parts.length === 2) {
-      const fresh = await catalog.revokeToken(parts[1]);
-      await grants?.closeCaller(parts[1], who); // its children stop working now, not at expiry
+      const { fresh, hash } = await catalog.revokeTokenGen(parts[1]);
+      await grants?.closeCaller(parts[1], who, hash); // its children stop working now, not at expiry; never a reused name's
       if (fresh) await catalog.audit(who, "token-revoke", null, [parts[1]]);
       return json({ ok: true });
     }

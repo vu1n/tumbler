@@ -459,10 +459,10 @@ test("a request by a token whose name is reused mid-mint gets nothing, and a tok
     fresh = (await (await s.call("POST", "/admin/api/tokens", undefined, { name: "dev", projects: ["dev"], scopes: ["workers:write"] }, "vu@example.com")).json()).token;
     return open(...a);
   };
-  assert.equal((await s.env()).status, 409);
-  assert.deepEqual(s.fake.revoked, ["id-1"]);
-  assert.equal((await adminGrants(s)).filter((g: any) => g.state === "active").length, 0);
-  assert.equal((await (await s.env(fresh)).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
+  // It can't even open a grant under the name now: nothing is minted for it.
+  assert.equal((await s.env()).status, 401);
+  assert.deepEqual([s.fake.minted.length, s.fake.revoked], [0, []]);
+  assert.equal((await (await s.env(fresh)).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
   // Two creates of one ended name: the second finds the name taken by the first's new token, and
   // that token's grants stay its own.
   await s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com");
@@ -476,7 +476,7 @@ test("a request by a token whose name is reused mid-mint gets nothing, and a tok
   const first = await s.call("POST", "/admin/api/tokens", undefined, { name: "dev", projects: ["dev"] }, "vu@example.com");
   assert.deepEqual([second!.status, first.status], [200, 409]);
   const winner = (await second!.json()).token;
-  assert.equal((await (await s.env(winner)).json()).env.CLOUDFLARE_API_TOKEN, "child-3");
+  assert.equal((await (await s.env(winner)).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
   assert.equal((await adminGrants(s)).filter((g: any) => g.caller === "dev" && g.state === "active").length, 1);
 });
 
@@ -496,6 +496,39 @@ test("a request by a token whose name is reused never gets the new token's child
   const r = await s.env();
   assert.equal(r.status, 401);
   assert.doesNotMatch(await r.text(), /child-1/);
+});
+
+test("an old token's late request or late revoke cleanup never ends a reused name's grants", async () => {
+  const s = await setup();
+  await s.catalog.setScopes("dev", null); // reads only, so a workers:write child is beyond it
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  let fresh = "";
+  const reuse = async () => {
+    fresh = (await (await admin("POST", "tokens", { name: "dev", projects: ["dev"], scopes: ["workers:write"] })).json()).token;
+    assert.equal((await s.call("POST", "/v1/step-up", fresh, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).status, 200);
+  };
+  const activeChild = async () => (await adminGrants(s)).filter((g: any) => g.caller === "dev" && g.state === "active").length;
+  // The old token's request reaches current() after the name went to a token holding a wider child.
+  const current = s.grants.current.bind(s.grants);
+  s.grants.current = async (...a: Parameters<typeof current>) => {
+    s.grants.current = current;
+    await admin("DELETE", "tokens/dev");
+    await reuse();
+    return current(...a);
+  };
+  assert.equal((await s.env()).status, 401);
+  assert.equal(await activeChild(), 1);
+  assert.deepEqual(s.fake.revoked, []);
+  // A revoke whose cleanup runs only after the name was reused and the new token minted.
+  const close = s.grants.closeCaller.bind(s.grants);
+  s.grants.closeCaller = async (...a: Parameters<typeof close>) => {
+    s.grants.closeCaller = close;
+    await reuse();
+    return close(...a);
+  };
+  await admin("DELETE", "tokens/dev");
+  assert.equal(await activeChild(), 1);
+  assert.equal((await s.env(fresh)).status, 200);
 });
 
 test("a caller token revoked while its first request mints gets nothing", async () => {
