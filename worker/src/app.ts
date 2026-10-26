@@ -1,5 +1,5 @@
 // app.ts — routes, apart from index.ts so tests can drive them without Worker bindings.
-import { beyond, type Caller, Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused, writeReaches } from "./catalog.ts";
+import { beyond, type Caller, Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused, tokenShape, writeReaches } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
@@ -244,22 +244,6 @@ async function checkStoreTarget(catalog: Catalog, into: StoreTarget) {
   if (prev && prev.kind !== "static") throw new Refused(409, `${into.scope}/${into.name} is ${prev.kind}; store the token under another name`);
   if (prev && JSON.parse(prev.config || "{}").check) throw new Refused(409, `${into.scope}/${into.name} has a key check, so it holds another service's credential; store the token under another name`);
 }
-// Everything after the token exists, audit included, fails as one: the token is then revoked at
-// once, since nobody holds its value and it could only ever be an orphan that still works.
-async function storeToken(catalog: Catalog, grants: Grants | undefined, who: string, name: string, token: string, into: StoreTarget, created: string[]) {
-  try {
-    await catalog.audit(who, "token-create", null, created);
-    await catalog.put(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) });
-    await catalog.audit(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name]);
-  } catch (e) {
-    await catalog.revokeToken(name);
-    await grants?.closeCaller(name, who);
-    await catalog.audit(who, "token-revoke", null, [name]);
-    // Only a refusal's own text; any other error's message can quote what it was handed.
-    throw new Refused(e instanceof Refused ? e.status : 500, `${e instanceof Refused ? e.message : "the token could not be stored"}; token ${name} was revoked, since nobody holds it`);
-  }
-}
-
 const CHILD_HOURS = 30 * 24, MAX_CHILD_HOURS = 90 * 24;
 
 // A delegate's new token: {"name", "projects", "scopes", "writes", "expires_hours"?, "store"?}. Refused
@@ -271,8 +255,7 @@ async function delegateCreate(catalog: Catalog, grants: Grants | undefined, call
   let expires = new Date(catalog.clock().getTime() + hours * 3600_000).toISOString();
   // Never past the delegate's own expiry: capped there rather than refused, so a default still works.
   if (caller.expires_at && expires > caller.expires_at) expires = caller.expires_at;
-  const projects = list(b.projects)?.map((p) => p.trim()).filter(Boolean) ?? [], scopes = list(b.scopes), writes = list(b.writes);
-  const child = { projects: projects.length ? projects : null, scopes: scopes?.length ? scopes : null, writes: writes?.length ? writes : null, expires_at: expires };
+  const child = { ...tokenShape(list(b.projects), list(b.scopes), list(b.writes)), expires_at: expires };
   const over = beyond(caller, child);
   if (over.length) throw new Refused(403, `token ${name} would hold ${over.join("; ")}: beyond ${caller.name}, so nothing was created`);
   // A name another token holds (live or ended) stays its own: a delegate never takes it over.
@@ -283,21 +266,19 @@ async function delegateCreate(catalog: Catalog, grants: Grants | undefined, call
     if (!writeReaches(caller.writes, into.scope)) throw new Refused(403, `${caller.name} may not write ${into.scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}; store the token where it writes, or leave out store to have it shown once`);
     await checkStoreTarget(catalog, into);
   }
-  const token = await catalog.createToken(name, child.projects, expires, child.scopes, child.writes, false, { parent: caller.name });
+  const created = [name, `parent:${caller.name}`], kin = { parent: caller.name };
+  const token = into ? null : await catalog.createToken(name, child.projects, expires, child.scopes, child.writes, false, kin);
+  if (into) await catalog.createTokenInto(caller.name, into, created, name, child.projects, expires, child.scopes, child.writes, false, kin);
   // Again once it exists: a narrowing of the delegate that landed meanwhile wins (caller() refuses
   // such a token anyway; this ends it now rather than at the next sweep).
   const now = await catalog.tokenRow(caller.name);
   if (!now || now.revoked_at || beyond(now, child).length) {
     await catalog.revokeToken(name);
-    throw new Refused(409, `${caller.name} changed while token ${name} was being made; it was revoked, run again`);
+    throw new Refused(409, `${caller.name} changed while token ${name} was being made; it was revoked${into ? ` (${into.name} holds it, dead)` : ""}, so run again under another name`);
   }
-  const created = [name, `parent:${caller.name}`];
-  if (!into) {
-    await catalog.audit(caller.name, "token-create", null, created);
-    return { name, expires_at: expires, token }; // shown once
-  }
-  await storeToken(catalog, grants, caller.name, name, token, into, created);
-  return { name, expires_at: expires, stored: into };
+  if (into) return { name, expires_at: expires, stored: into }; // never shown: it went straight into the key
+  await catalog.audit(caller.name, "token-create", null, created);
+  return { name, expires_at: expires, token }; // shown once
 }
 
 // The live tokens a delegate made that no longer fit inside it after an edit: each is revoked and its
@@ -451,15 +432,16 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
       const into = storeTarget(b.store);
-      if (into) await checkStoreTarget(catalog, into);
-      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true, { delegate: b.delegate === true });
-      const created = [String(b.name), ...(b.delegate === true ? ["delegate"] : [])];
-      if (!into) {
-        await catalog.audit(who, "token-create", null, created);
-        return json({ name: b.name, token }); // shown once
+      const args = [String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true] as const;
+      const kin = { delegate: b.delegate === true }, created = [String(b.name), ...(kin.delegate ? ["delegate"] : [])];
+      if (into) {
+        await checkStoreTarget(catalog, into);
+        await catalog.createTokenInto(who, into, created, ...args, kin);
+        return json({ name: b.name, stored: into }); // never shown: it went straight into the key
       }
-      await storeToken(catalog, grants, who, String(b.name), token, into, created);
-      return json({ name: b.name, stored: into }); // never shown: it went straight into the key
+      const token = await catalog.createToken(...args, kin);
+      await catalog.audit(who, "token-create", null, created);
+      return json({ name: b.name, token }); // shown once
     }
     // {"projects": [...]} edits the pin, {"scopes": [...]} the ceiling, {"writes": [...]} what it may
     // write; any of them.

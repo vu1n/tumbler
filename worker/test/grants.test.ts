@@ -425,7 +425,7 @@ test("a parent that can't be a header value is refused; fetch errors never quote
   await assert.rejects(cf.mint(PARENT, CONFIG, ["workers:read"], new Date(), "x"), (e: any) => e.status === 502 && !e.message.includes(PARENT));
 });
 
-test("a token create with store never shows the token, and a store that fails leaves no live token", async () => {
+test("a token create with store never shows the token, and a store that fails leaves nothing behind", async () => {
   const s = await setup();
   const admin = (b: unknown) => s.call("POST", "/admin/api/tokens", undefined, b, "vu@example.com");
   const r = await admin({ name: "vps", projects: ["dev"], store: { scope: "global", name: "VPS_TOKEN" } });
@@ -443,19 +443,18 @@ test("a token create with store never shows the token, and a store that fails le
   assert.equal((await admin({ name: "vps2", store: { scope: "global", name: "OPENAI_API_KEY" } })).status, 409);
   assert.equal(await s.catalog.value((await s.catalog.keyRow("global", "OPENAI_API_KEY"))!), "sk-fake");
   assert.ok(!(await s.catalog.tokens()).some((t) => t.name === "vps2"));
-  // The store itself failing, or its audit: the token it made is revoked, and the answer says so.
-  const put = s.catalog.put.bind(s.catalog);
-  s.catalog.put = async () => { s.catalog.put = put; throw new Error("d1 down"); };
-  const failed = await admin({ name: "vps3", store: { scope: "global", name: "VPS3_TOKEN" } });
-  assert.equal(failed.status, 500);
-  assert.match((await failed.json()).error, /could not be stored; token vps3 was revoked/);
-  assert.ok((await s.catalog.tokens()).find((t) => t.name === "vps3")!.revoked_at);
-  const audit = s.catalog.audit.bind(s.catalog);
-  s.catalog.audit = async (...a: Parameters<typeof audit>) => { if (a[1] === "token-create") throw new Error("d1 down"); return audit(...a); };
-  assert.equal((await admin({ name: "vps4", store: { scope: "global", name: "VPS4_TOKEN" } })).status, 500);
-  s.catalog.audit = audit;
-  assert.ok((await s.catalog.tokens()).find((t) => t.name === "vps4")!.revoked_at);
-  assert.equal(await s.catalog.keyRow("global", "VPS4_TOKEN"), null);
+  // Any part failing, the last audit row included, leaves nothing: no token, and the key it targeted untouched.
+  await s.catalog.put("global", "VPS3_TOKEN", "old-value");
+  const auditRow = s.catalog.auditRow.bind(s.catalog), db = (s.catalog as any).db;
+  for (const fail of ["token-create", "put"]) {
+    s.catalog.auditRow = (...a: Parameters<typeof auditRow>) => a[1] === fail ? db.prepare("INSERT INTO no_such_table VALUES (1)") : auditRow(...a);
+    const r = await admin({ name: "vps3", store: { scope: "global", name: "VPS3_TOKEN" } });
+    assert.equal(r.status, 500);
+    assert.match((await r.json()).error, /nothing was created and VPS3_TOKEN is unchanged/);
+    s.catalog.auditRow = auditRow;
+    assert.ok(!(await s.catalog.tokens()).some((t) => t.name === "vps3"));
+    assert.equal(await s.catalog.value((await s.catalog.keyRow("global", "VPS3_TOKEN"))!), "old-value");
+  }
 });
 
 test("a caller token revoked while its first request mints gets nothing", async () => {
@@ -868,8 +867,8 @@ test("a delegate creates tokens no wider than itself, which end when it narrows 
   const make = (b: unknown, token = s.dev) => s.call("POST", "/v1/tokens", token, b);
   assert.match((await (await make({ name: "vps", projects: ["dev"] })).json()).error, /not a delegate.*--delegate on/);
   assert.equal((await admin("PATCH", "tokens/dev", { delegate: true, writes: ["dev"] })).status, 200);
-  // Anything beyond the delegate is refused whole, and nothing is created.
-  for (const b of [{ projects: ["kypp"] }, { projects: ["*"] }, { scopes: ["*"] }, { scopes: ["pages:write"] }, { writes: ["global"] }, { operator: true, projects: ["kypp"] }]) {
+  // Anything beyond the delegate is refused whole, padded or not, and nothing is created.
+  for (const b of [{ projects: ["kypp"] }, { projects: ["*"] }, { scopes: ["*"] }, { scopes: ["pages:write"] }, { writes: ["global"] }, { writes: [" global "] }, { scopes: [" pages:write"] }, { projects: [" kypp "] }, { operator: true, projects: ["kypp"] }]) {
     const r = await make({ name: "wide", ...b });
     assert.equal(r.status, 403, JSON.stringify(b));
     assert.match((await r.json()).error, /beyond dev, so nothing was created/);
