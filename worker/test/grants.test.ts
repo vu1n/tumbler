@@ -470,6 +470,24 @@ test("a request by a token whose name is reused mid-mint gets nothing, and a tok
   await assert.rejects(s.catalog.createToken("brief", ["dev"], null, null, null, false, null), /token brief ended while this ran/);
 });
 
+test("a request by a token whose name is reused never gets the new token's child", async () => {
+  const s = await setup();
+  // The old token authenticated, then reaches its grant only after the name went to a new token
+  // that already holds a child.
+  const current = s.grants.current.bind(s.grants);
+  let fresh = "";
+  s.grants.current = async (...a: Parameters<typeof current>) => {
+    s.grants.current = current;
+    await s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com");
+    fresh = (await (await s.call("POST", "/admin/api/tokens", undefined, { name: "dev", projects: ["dev"] }, "vu@example.com")).json()).token;
+    assert.equal((await (await s.env(fresh)).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+    return current(...a);
+  };
+  const r = await s.env();
+  assert.equal(r.status, 401);
+  assert.doesNotMatch(await r.text(), /child-1/);
+});
+
 test("a caller token revoked while its first request mints gets nothing", async () => {
   const s = await setup();
   const fresh = await s.catalog.createToken("fresh", ["dev"]);

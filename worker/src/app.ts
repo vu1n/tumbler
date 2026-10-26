@@ -204,6 +204,9 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     const names = (url.searchParams.get("keys") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     let minted = false;
     const env = await catalog.resolve(caller, url.searchParams.get("project"), names, grants && ((c, p, r) => { minted = true; return grants.issue(c, p, r); }));
+    // Values go out only if the credential that asked still works now: a revoke (or its name reused
+    // by a new token, whose grants share the name) while this ran wins over the request.
+    if ((await catalog.caller(token!))?.hash !== caller.hash) return json({ error: "unauthorized" }, 401);
     return json(minted ? { env, max_age: MINTED_MAX_AGE_S } : { env });
   }
   return json({ error: "not found" }, 404);
