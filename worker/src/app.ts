@@ -221,6 +221,9 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     const names = (url.searchParams.get("keys") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     let minted = false;
     const env = await catalog.resolve(caller, url.searchParams.get("project"), names, grants && ((c, p, r) => { minted = true; return grants.issue(c, p, r); }));
+    // Values go out only if the credential that asked still works now: a revoke (or its name reused
+    // by a new token, whose grants share the name) while this ran wins over the request.
+    if ((await catalog.caller(token!))?.hash !== caller.hash) return json({ error: "unauthorized" }, 401);
     return json(minted ? { env, max_age: MINTED_MAX_AGE_S } : { env });
   }
   return json({ error: "not found" }, 404);
@@ -424,9 +427,13 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     if (m === "POST" && parts.length === 1) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
+      // Reusing an ended token's name: its children end first, and only that token's (closeCaller's
+      // gen), so the create finds nothing live under the name it hands over.
+      const name = String(b.name ?? ""), ended = await catalog.endedToken(name);
+      if (ended) await grants?.closeCaller(name, who, ended);
       const into = storeTarget(b.store);
-      const args = [String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true] as const;
-      const kin = { delegate: b.delegate === true }, created = [String(b.name), ...(kin.delegate ? ["delegate"] : [])];
+      const args = [name, projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true] as const;
+      const kin = { delegate: b.delegate === true, ended }, created = [name, ...(kin.delegate ? ["delegate"] : [])];
       if (into) {
         await checkStoreTarget(catalog, into);
         await catalog.createTokenInto(who, into, created, ...args, kin);
@@ -444,8 +451,9 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       // One checked write for both, so a bad pin never lands a wider ceiling (or the reverse).
       const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...("operator" in b ? { operator: b.operator === true } : {}), ...("delegate" in b ? { delegate: b.delegate === true } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
       // Both cleanups run before either audit; a cleanup cut short is finished by the sweep.
-      if ("projects" in done) await grants?.closeOutsidePin(parts[1], done.projects!, who);
-      if ("scopes" in done) await grants?.closeOutsideCeiling(parts[1], done.scopes!, who);
+      // Only the edited token's grants (its hash), never those of a token that took the name meanwhile.
+      if ("projects" in done) await grants?.closeOutsidePin(parts[1], done.projects!, who, done.hash);
+      if ("scopes" in done) await grants?.closeOutsideCeiling(parts[1], done.scopes!, who, done.hash);
       if ("projects" in done) await catalog.audit(who, "token-pin", null, [parts[1], ...(done.projects ?? ["global-only"])]);
       if ("scopes" in done) await catalog.audit(who, "token-scopes", null, [parts[1], ...(done.scopes ?? ["reads-only"])]);
       if ("writes" in done) await catalog.audit(who, "token-writes", null, [parts[1], ...(done.writes ?? ["writes-nothing"])]);
@@ -456,11 +464,11 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       return json({ ok: true, ...(ended.length ? { ended } : {}) });
     }
     if (m === "DELETE" && parts.length === 2) {
-      const fresh = await catalog.revokeToken(parts[1]); // and the tokens it made as a delegate
+      const { fresh, hash } = await catalog.revokeTokenGen(parts[1]); // and the tokens it made as a delegate
+      await grants?.closeCaller(parts[1], who, hash); // its children stop working now, not at expiry; never a reused name's
       // Every token it made, revoked earlier or not, read after the revoke: a retry of a cleanup cut
       // short still finds their grants, and so does a child created just before the revoke landed.
-      const children = (await catalog.tokens(parts[1])).map((t) => t.name);
-      for (const n of [parts[1], ...children]) await grants?.closeCaller(n, who); // their children stop working now, not at expiry
+      for (const c of await catalog.childGens(parts[1])) await grants?.closeCaller(c.name, who, c.hash);
       if (fresh) await catalog.audit(who, "token-revoke", null, [parts[1]]);
       return json({ ok: true });
     }

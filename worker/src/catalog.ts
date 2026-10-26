@@ -80,9 +80,10 @@ function checkCeiling(scopes: string[] | null): string[] | null {
 }
 // The refusal for a token insert that failed on its name, or on its parent changing underneath it.
 function insertRefusal(e: Error, name: string, kin: Kin, into?: { scope: string; name: string }) {
-  if (/UNIQUE/.test(e.message)) return new Refused(409, `token ${name} exists`);
-  if (!/NOT NULL/.test(e.message) || !(kin.parent || into)) return null;
-  const changed = [kin.parent?.name, into && `${into.scope}/${into.name}`].filter(Boolean).join(" or ");
+  if (/UNIQUE/.test(e.message)) return new Refused(409, kin.ended ? `token ${name} changed while this ran; run it again`
+    : kin.parent || into ? `token ${name} exists` : `token ${name} is live; revoke it first (tumbler admin token revoke ${name}) or pick another name`);
+  if (!/NOT NULL/.test(e.message) || !(kin.parent || into || kin.ended)) return null;
+  const changed = [kin.parent?.name, into && `${into.scope}/${into.name}`, kin.ended && `the grants of the old token ${name}`].filter(Boolean).join(" or ");
   return new Refused(409, `${changed} changed while token ${name} was being made, so nothing was created; run it again`);
 }
 
@@ -112,8 +113,9 @@ export function writeReaches(writes: string[] | null | undefined, scope: string)
 // `writes`: the scopes `tumbler put` may save static keys in (checkWrites). null: writes nothing.
 // `operator`: may add or remove permission groups on the minted keys it reads (`tumbler scope`).
 // `delegate`: may create tokens no wider than itself (`tumbler token create`); `parent`: the delegate
-// that created this one, if any.
-export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; parent?: string | null; expires_at?: string | null }
+// that created this one, if any. `hash`: which credential authenticated, so a mint that lands after
+// the name was reused by a new token is refused (the name alone would pass).
+export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; parent?: string | null; expires_at?: string | null; hash?: string }
 
 // What a delegate's new token would hold beyond the delegate itself, as reasons; empty: within it.
 // A pin or write entry is within when the delegate reaches that exact scope (`*` and `*/env` only
@@ -143,7 +145,8 @@ export const RETIRE_MS = 25 * 60 * 60 * 1000;
 const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as ArrayBuffer);
 
 // delegate: the token may make tokens. parent: the delegate making this one, as it was when it asked.
-type Kin = { delegate?: boolean; parent?: Pick<Caller, "name" | "projects" | "scopes" | "writes" | "expires_at"> | null };
+// ended: the hash of the ended token whose name this one reuses (endedToken()).
+type Kin = { delegate?: boolean; parent?: Pick<Caller, "name" | "projects" | "scopes" | "writes" | "expires_at"> | null; ended?: string | null };
 type PutMeta = { description?: string; owner?: string; expires_at?: string | null; kind?: string; config?: Record<string, unknown>; checked?: boolean };
 
 export class Catalog {
@@ -165,13 +168,13 @@ export class Catalog {
     // sweep later. The sweep then ends the grants it still holds.
     // A delegate's token stops with its parent: checked here too, so a revoke whose cascade was cut
     // short (or a parent that expired) never leaves a child working.
-    const t = this.clock().toISOString();
+    const t = this.clock().toISOString(), hash = await sha256hex(token);
     const row = await this.db.prepare(`SELECT name, projects, scopes, writes, operator, delegate, parent, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
       AND (parent IS NULL OR EXISTS (SELECT 1 FROM tokens p WHERE p.name = tokens.parent AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)))`)
-      .bind(await sha256hex(token), t, t).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; delegate: number; parent: string | null; expires_at: string | null }>();
+      .bind(hash, t, t).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; delegate: number; parent: string | null; expires_at: string | null }>();
     if (!row) return null;
     const me: Caller = { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects),
-      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, delegate: !!row.delegate, parent: row.parent, expires_at: row.expires_at };
+      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, delegate: !!row.delegate, parent: row.parent, expires_at: row.expires_at, hash };
     // A delegate's token never works beyond its parent as the parent is now: a narrowing whose
     // cleanup was cut short, or a create that raced it, is refused here (the sweep then revokes it).
     if (me.parent) {
@@ -183,16 +186,26 @@ export class Catalog {
 
   // Returns the token once; only its hash is stored. expiresAt (ISO time) is optional: without it the
   // token lives until revoked, as every token made before expiry existed does.
+  // The hash of `name`'s token when it has ended (revoked or expired), so its name may be reused.
+  async endedToken(name: string): Promise<string | null> {
+    return (await this.db.prepare("SELECT hash FROM tokens WHERE name = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(name, this.clock().toISOString()).first<{ hash: string }>())?.hash ?? null;
+  }
+
+  // `kin.ended`: the hash of the ended token whose name this reuses, after its grants were closed. That
+  // token (and the parent its children name) moves to an archived name in the insert's own
+  // transaction, and the insert lands only while no grant under the name is live, so the new token
+  // starts with nothing of the old one. If the name isn't that ended token's any more (a concurrent
+  // create), the insert fails on the name and the archive rolls back with it.
   async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false,
     kin: Kin = {}): Promise<string> {
     const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, kin);
-    await insert.run().catch((e: Error) => { throw insertRefusal(e, name, kin) ?? e; });
+    await this.db.batch([...this.reuse(name, kin.ended), insert]).catch((e: Error) => { throw insertRefusal(e, name, kin) ?? e; });
     return token;
   }
 
   // A new token stored straight into a static key, in one transaction with both audit rows: it either
   // all lands or none of it does, so a failure never leaves a working token nobody holds, nor a key
-  // overwritten for a token that doesn't exist.
+  // overwritten for a token that doesn't exist. `kin` as for createToken().
   async createTokenInto(who: string, into: { scope: string; name: string; description?: string }, created: string[], name: string, projects: string[] | null, expiresAt: string | null = null,
     scopes: string[] | null = null, writes: string[] | null = null, operator = false, kin: Kin = {}) {
     // The target is checked again inside the transaction: a key that became minted, or gained a
@@ -200,7 +213,7 @@ export class Catalog {
     const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, kin, {
       sql: "NOT EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND (kind != 'static' OR json_extract(COALESCE(NULLIF(config, ''), '{}'), '$.check') IS NOT NULL))",
       binds: [into.scope, into.name] });
-    await this.db.batch([insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
+    await this.db.batch([...this.reuse(name, kin.ended), insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
       this.auditRow(who, "token-create", null, created), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name])])
       .catch((e: Error) => {
         const refused = insertRefusal(e, name, kin, into);
@@ -210,10 +223,19 @@ export class Catalog {
       });
   }
 
+  // Reusing an ended token's name moves that token (matched by its hash), and the parent its
+  // children name, to an archived name, so the new token inherits neither.
+  private reuse(name: string, ended: string | null | undefined) {
+    if (!ended) return [];
+    const archived = `${name}~${ended.slice(0, 8)}`;
+    return [this.db.prepare("UPDATE tokens SET name = ? WHERE name = ? AND hash = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(archived, name, ended, this.clock().toISOString()),
+      this.db.prepare("UPDATE tokens SET parent = ? WHERE parent = ? AND EXISTS (SELECT 1 FROM tokens WHERE name = ?)").bind(archived, name, archived)];
+  }
+
   // `ok`: a further condition the insert lands under, like the parent's (the hash is NULL otherwise,
   // which fails the insert and any batch it is in).
   private async tokenInsert(name: string, projects: string[] | null, expiresAt: string | null, scopes: string[] | null, writes: string[] | null, operator: boolean,
-    { delegate = false, parent = null }: Kin, ok?: { sql: string; binds: unknown[] }) {
+    { delegate = false, parent = null, ended = null }: Kin, ok?: { sql: string; binds: unknown[] }) {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     checkPin(projects);
     scopes = checkCeiling(scopes);
@@ -231,7 +253,8 @@ export class Catalog {
     // or revoke that lands first always wins.
     const conds = [...(parent ? [{ sql: `EXISTS (SELECT 1 FROM tokens p WHERE p.name = ? AND p.delegate = 1 AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)
         AND p.projects IS ? AND p.scopes IS ? AND p.writes IS ? AND p.expires_at IS ?)`,
-      binds: [parent.name, this.clock().toISOString(), asJson(parent.projects), asJson(parent.scopes ?? null), asJson(parent.writes ?? null), parent.expires_at ?? null] }] : []), ...(ok ? [ok] : [])];
+      binds: [parent.name, this.clock().toISOString(), asJson(parent.projects), asJson(parent.scopes ?? null), asJson(parent.writes ?? null), parent.expires_at ?? null] }] : []), ...(ok ? [ok] : []),
+      ...(ended ? [{ sql: "NOT EXISTS (SELECT 1 FROM grants WHERE caller = ? AND state IN ('pending', 'active'))", binds: [name] }] : [])];
     const hashSql = conds.length ? `CASE WHEN ${conds.map((c) => c.sql).join(" AND ")} THEN ? END` : "?";
     return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, delegate, parent, created_at, expires_at) VALUES (?, ${hashSql}, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(name, ...conds.flatMap((c) => c.binds), hash, ...row) };
@@ -253,7 +276,8 @@ export class Catalog {
   // A live token's pin, ceiling, writes and/or operator flag in one write, all checked first, so a
   // refused part never lands the others. Returns the fields as stored.
   async updateToken(name: string, edit: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean }) {
-    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean } = {}, sets: string[] = [], binds: (string | number | null)[] = [];
+    // `hash`: the token edited, for a cleanup that must touch only its grants.
+    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; hash?: string } = {}, sets: string[] = [], binds: (string | number | null)[] = [];
     if ("projects" in edit) { checkPin(done.projects = edit.projects ?? null); sets.push("projects = ?"); binds.push(asJson(done.projects)); }
     if ("scopes" in edit) { done.scopes = checkCeiling(edit.scopes ?? null); sets.push("scopes = ?"); binds.push(asJson(done.scopes)); }
     if ("writes" in edit) { done.writes = checkWrites(edit.writes ?? null); sets.push("writes = ?"); binds.push(asJson(done.writes)); }
@@ -263,24 +287,39 @@ export class Catalog {
     // A token a delegate made is never itself a delegate or an operator: delegation stays one level
     // deep, so its parent's revoke and bounds (checked one level up) always reach it.
     const raise = done.delegate === true || done.operator === true ? 1 : 0;
-    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL AND (? = 0 OR parent IS NULL)`).bind(...binds, name, raise).run();
-    if (!r.meta.changes) {
+    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL AND (? = 0 OR parent IS NULL) RETURNING hash`).bind(...binds, name, raise).first<{ hash: string }>();
+    if (!r) {
       const t = await this.db.prepare("SELECT parent FROM tokens WHERE name = ? AND revoked_at IS NULL").bind(name).first<{ parent: string | null }>();
       if (t?.parent) throw new Refused(409, `token ${name} was made by ${t.parent}, so it can't be a delegate or an operator; create it as an admin token instead`);
       throw new Refused(404, `no live token ${name}`);
     }
-    return done;
+    return { ...done, hash: r.hash };
   }
 
   // True when this call revoked it; false when it was already revoked, so a retry still reaches the
   // grant cleanup that an interrupted first attempt left undone.
   async revokeToken(name: string): Promise<boolean> {
-    // The tokens it created as a delegate go with it (caller() refuses them anyway once it is gone).
-    const [r] = await this.db.batch([this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL").bind(now(), name),
-      this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE parent = ? AND revoked_at IS NULL").bind(now(), name)]);
-    if (r.meta.changes) return true;
-    if (await this.db.prepare("SELECT 1 FROM tokens WHERE name = ?").bind(name).first()) return false;
+    return (await this.revokeTokenGen(name)).fresh;
+  }
+
+  // Revokes `name`'s token, and the tokens it created as a delegate (caller() refuses them anyway once
+  // it is gone); `hash` is the one revoked, for a cleanup that must touch only its grants.
+  async revokeTokenGen(name: string): Promise<{ fresh: boolean; hash: string }> {
+    // One transaction: the hash returned is always the token this call revoked or found revoked,
+    // never a new token that took the name in between.
+    const [r, , had] = await this.db.batch([
+      this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL RETURNING hash").bind(now(), name),
+      this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE parent = ? AND revoked_at IS NULL").bind(now(), name),
+      this.db.prepare("SELECT hash, revoked_at FROM tokens WHERE name = ?").bind(name)]);
+    const row = (had.results as { hash: string }[])[0];
+    if (r.results?.length) return { fresh: true, hash: (r.results as { hash: string }[])[0].hash };
+    if (row) return { fresh: false, hash: row.hash };
     throw new Refused(404, `no token ${name}`);
+  }
+
+  // The tokens `parent` made, with the hash of each, for a cleanup that must touch only their grants.
+  async childGens(parent: string) {
+    return (await this.db.prepare("SELECT name, hash FROM tokens WHERE parent = ?").bind(parent).all<{ name: string; hash: string }>()).results;
   }
 
   async tokens(parent?: string): Promise<TokenRow[]> {
