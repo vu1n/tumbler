@@ -443,6 +443,18 @@ test("a token create with store never shows the token, and a store that fails le
   assert.equal((await admin({ name: "vps2", store: { scope: "global", name: "OPENAI_API_KEY" } })).status, 409);
   assert.equal(await s.catalog.value((await s.catalog.keyRow("global", "OPENAI_API_KEY"))!), "sk-fake");
   assert.ok(!(await s.catalog.tokens()).some((t) => t.name === "vps2"));
+  // A check added to the target after it was checked, but before the write: refused in the transaction.
+  await s.catalog.put("global", "RACED_KEY", "sk-old");
+  const check = s.catalog.keyRow.bind(s.catalog);
+  s.catalog.keyRow = async (...a: Parameters<typeof check>) => {
+    const r = await check(...a);
+    s.catalog.keyRow = check;
+    (s.catalog as any).db.raw.prepare(`UPDATE keys SET config = '{"check":"openai"}' WHERE name = 'RACED_KEY'`).run();
+    return r;
+  };
+  assert.equal((await admin({ name: "vps2", store: { scope: "global", name: "RACED_KEY" } })).status, 409);
+  assert.equal(await s.catalog.value((await check("global", "RACED_KEY"))!), "sk-old");
+  assert.ok(!(await s.catalog.tokens()).some((t) => t.name === "vps2"));
   // Any part failing, the last audit row included, leaves nothing: no token, and the key it targeted untouched.
   await s.catalog.put("global", "VPS3_TOKEN", "old-value");
   const auditRow = s.catalog.auditRow.bind(s.catalog), db = (s.catalog as any).db;

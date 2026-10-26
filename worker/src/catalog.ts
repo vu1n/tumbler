@@ -147,17 +147,25 @@ export class Catalog {
   // overwritten for a token that doesn't exist.
   async createTokenInto(who: string, into: { scope: string; name: string; description?: string }, name: string, projects: string[] | null, expiresAt: string | null = null,
     scopes: string[] | null = null, writes: string[] | null = null, operator = false) {
-    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator);
+    // The target is checked again inside the transaction: a key that became minted, or gained a
+    // check, while this ran holds another service's credential and is never overwritten.
+    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, {
+      sql: "NOT EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND (kind != 'static' OR json_extract(COALESCE(NULLIF(config, ''), '{}'), '$.check') IS NOT NULL))",
+      binds: [into.scope, into.name] });
     await this.db.batch([insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
       this.auditRow(who, "token-create", null, [name]), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name])])
       .catch((e: Error) => {
         if (/UNIQUE/.test(e.message)) throw new Refused(409, `token ${name} exists`);
+        if (/NOT NULL/.test(e.message)) throw new Refused(409, `${into.scope}/${into.name} changed to a minted or checked key while this ran, so nothing was created; store the token under another name`);
         console.error("tumbler: token create --store failed", e.name); // never the message: it may quote a bound value
         throw new Refused(500, `token ${name} could not be stored, so nothing was created and ${into.name} is unchanged`);
       });
   }
 
-  private async tokenInsert(name: string, projects: string[] | null, expiresAt: string | null, scopes: string[] | null, writes: string[] | null, operator: boolean) {
+  // `ok`: a condition the insert lands under, in its own statement (the hash is NULL otherwise, which
+  // fails the insert and any batch it is in).
+  private async tokenInsert(name: string, projects: string[] | null, expiresAt: string | null, scopes: string[] | null, writes: string[] | null, operator: boolean,
+    ok?: { sql: string; binds: unknown[] }) {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     checkPin(projects);
     scopes = checkCeiling(scopes);
@@ -170,8 +178,8 @@ export class Catalog {
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
     const token = randomToken();
-    return { token, insert: this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires) };
+    return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ${ok ? `CASE WHEN ${ok.sql} THEN ? END` : "?"}, ?, ?, ?, ?, ?, ?)`)
+      .bind(name, ...(ok?.binds ?? []), await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires) };
   }
 
   // Changes which projects a live token reads, so widening one never means minting a new token and
