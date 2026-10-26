@@ -196,10 +196,10 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     if (!name && request.method === "GET") return json({ tokens: await catalog.tokens(caller.name) });
     if (!name && request.method === "POST") return json(await delegateCreate(catalog, grants, caller, await request.json().catch(() => ({})) as Record<string, unknown>));
     if (name && request.method === "DELETE") {
-      const t = await catalog.tokenRow(name);
-      if (!t || t.parent !== caller.name) return json({ error: `${caller.name} made no token ${name}; only an admin revokes others` }, 404);
-      const fresh = await catalog.revokeToken(name);
-      await grants?.closeCaller(name, caller.name);
+      const done = await catalog.revokeChildOf(caller, name);
+      if (!done) return json({ error: `${caller.name} made no token ${name}; only an admin revokes others` }, 404);
+      const { fresh, hash } = done;
+      await grants?.closeCaller(name, caller.name, hash); // only the token revoked, never one that took the name
       if (fresh) await catalog.audit(caller.name, "token-revoke", null, [name]);
       return json({ ok: true });
     }

@@ -146,7 +146,7 @@ const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as 
 
 // delegate: the token may make tokens. parent: the delegate making this one, as it was when it asked.
 // ended: the hash of the ended token whose name this one reuses (endedToken()).
-type Kin = { delegate?: boolean; parent?: Pick<Caller, "name" | "projects" | "scopes" | "writes" | "expires_at"> | null; ended?: string | null };
+type Kin = { delegate?: boolean; parent?: Pick<Caller, "name" | "projects" | "scopes" | "writes" | "expires_at" | "hash"> | null; ended?: string | null };
 type PutMeta = { description?: string; owner?: string; expires_at?: string | null; kind?: string; config?: Record<string, unknown>; checked?: boolean };
 
 export class Catalog {
@@ -251,9 +251,9 @@ export class Catalog {
     const row = [projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, delegate ? 1 : 0, parent?.name ?? null, t, expires];
     // A child is inserted only while its parent is still exactly as it was when it asked: a narrowing
     // or revoke that lands first always wins.
-    const conds = [...(parent ? [{ sql: `EXISTS (SELECT 1 FROM tokens p WHERE p.name = ? AND p.delegate = 1 AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)
+    const conds = [...(parent ? [{ sql: `EXISTS (SELECT 1 FROM tokens p WHERE p.name = ? AND p.hash = ? AND p.delegate = 1 AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)
         AND p.projects IS ? AND p.scopes IS ? AND p.writes IS ? AND p.expires_at IS ?)`,
-      binds: [parent.name, this.clock().toISOString(), asJson(parent.projects), asJson(parent.scopes ?? null), asJson(parent.writes ?? null), parent.expires_at ?? null] }] : []), ...(ok ? [ok] : []),
+      binds: [parent.name, parent.hash ?? null, this.clock().toISOString(), asJson(parent.projects), asJson(parent.scopes ?? null), asJson(parent.writes ?? null), parent.expires_at ?? null] }] : []), ...(ok ? [ok] : []),
       ...(ended ? [{ sql: "NOT EXISTS (SELECT 1 FROM grants WHERE caller = ? AND state IN ('pending', 'active'))", binds: [name] }] : [])];
     const hashSql = conds.length ? `CASE WHEN ${conds.map((c) => c.sql).join(" AND ")} THEN ? END` : "?";
     return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, delegate, parent, created_at, expires_at) VALUES (?, ${hashSql}, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -315,6 +315,19 @@ export class Catalog {
     if (r.results?.length) return { fresh: true, hash: (r.results as { hash: string }[])[0].hash };
     if (row) return { fresh: false, hash: row.hash };
     throw new Refused(404, `no token ${name}`);
+  }
+
+  // A delegate revoking a token it made: one transaction checks that the delegate (by its hash) is
+  // still live and made this exact token, so a name reused meanwhile is never touched. Null when it
+  // made no such token; `hash` is the one revoked, for its grant cleanup.
+  async revokeChildOf(parent: { name: string; hash?: string }, name: string): Promise<{ fresh: boolean; hash: string } | null> {
+    const owned = "parent = ? AND EXISTS (SELECT 1 FROM tokens p WHERE p.name = ? AND p.hash = ? AND p.revoked_at IS NULL)";
+    const [r, had] = await this.db.batch([
+      this.db.prepare(`UPDATE tokens SET revoked_at = ? WHERE name = ? AND revoked_at IS NULL AND ${owned} RETURNING hash`).bind(now(), name, parent.name, parent.name, parent.hash ?? null),
+      this.db.prepare(`SELECT hash FROM tokens WHERE name = ? AND ${owned}`).bind(name, parent.name, parent.name, parent.hash ?? null)]);
+    if (r.results?.length) return { fresh: true, hash: (r.results as { hash: string }[])[0].hash };
+    const row = (had.results as { hash: string }[])[0];
+    return row ? { fresh: false, hash: row.hash } : null;
   }
 
   // The tokens `parent` made, with the hash of each, for a cleanup that must touch only their grants.

@@ -1093,6 +1093,38 @@ test("a delegate's reused name inherits none of the old delegate's tokens", asyn
   assert.equal((await s.call("GET", "/v1/whoami", vps)).status, 401);
 });
 
+test("a delegate's request racing a revoke and reuse of its name, or of its child's, touches nothing new", async () => {
+  const s = await setup();
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  await admin("PATCH", "tokens/dev", { delegate: true, projects: ["dev"] });
+  // The old delegate authenticated, then its name goes to a new delegate with the same bounds.
+  const create = s.catalog.createToken.bind(s.catalog);
+  s.catalog.createToken = async (...a: Parameters<typeof create>) => {
+    s.catalog.createToken = create;
+    await admin("DELETE", "tokens/dev");
+    await admin("POST", "tokens", { name: "dev", projects: ["dev"], scopes: ["workers:write"], delegate: true });
+    return create(...a);
+  };
+  assert.equal((await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"] })).status, 409);
+  assert.equal(await s.catalog.tokenRow("vps"), null);
+  // A delegate revoking its child after an admin revoked and reused the child's name.
+  const fresh = (await (await admin("POST", "tokens", { name: "boss", projects: ["dev"], delegate: true })).json()).token;
+  assert.equal((await s.call("POST", "/v1/tokens", fresh, { name: "kid", projects: ["dev"], expires: "1d" })).status, 200);
+  // The admin revokes and reuses "kid" just after the delegate's ownership check has read it.
+  let other = "";
+  const race = async () => {
+    if (other) return;
+    other = "pending";
+    await admin("DELETE", "tokens/kid");
+    other = (await (await admin("POST", "tokens", { name: "kid", projects: ["dev"] })).json()).token;
+  };
+  const { tokenRow, revokeChildOf } = s.catalog;
+  s.catalog.tokenRow = async (n: string) => { const r = await tokenRow.call(s.catalog, n); if (n === "kid") await race(); return r; };
+  s.catalog.revokeChildOf = async (...a: Parameters<typeof revokeChildOf>) => { await race(); return revokeChildOf.apply(s.catalog, a); };
+  assert.equal((await s.call("DELETE", "/v1/tokens/kid", fresh)).status, 404);
+  assert.equal((await s.env(other)).status, 200);
+});
+
 test("a delegate's token never outlives it", async () => {
   const s = await setup();
   const until = "2026-10-21T12:00:00.000Z";
