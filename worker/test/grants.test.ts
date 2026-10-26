@@ -425,6 +425,50 @@ test("a parent that can't be a header value is refused; fetch errors never quote
   await assert.rejects(cf.mint(PARENT, CONFIG, ["workers:read"], new Date(), "x"), (e: any) => e.status === 502 && !e.message.includes(PARENT));
 });
 
+test("a token create with store never shows the token, and a store that fails leaves nothing behind", async () => {
+  const s = await setup();
+  const admin = (b: unknown) => s.call("POST", "/admin/api/tokens", undefined, b, "vu@example.com");
+  const r = await admin({ name: "vps", projects: ["dev"], store: { scope: "global", name: "VPS_TOKEN" } });
+  assert.equal(r.status, 200);
+  const out = await r.json();
+  assert.deepEqual(out, { name: "vps", stored: { scope: "global", name: "VPS_TOKEN" } });
+  const token = await s.catalog.value((await s.catalog.keyRow("global", "VPS_TOKEN"))!);
+  assert.equal((await s.env(token, "AWS_REGION")).status, 200);
+  // A minted key is never a target, and a bad target is refused before any token exists.
+  assert.equal((await admin({ name: "vps2", store: { scope: "dev", name: "CLOUDFLARE_API_TOKEN" } })).status, 409);
+  assert.equal((await admin({ name: "vps2", store: { scope: "dev", name: "lower" } })).status, 400);
+  assert.ok(!(await s.catalog.tokens()).some((t) => t.name === "vps2"));
+  // A key with a check holds another service's credential: never overwritten with a token.
+  await s.catalog.put("global", "OPENAI_API_KEY", "sk-fake", { config: { check: "openai" } });
+  assert.equal((await admin({ name: "vps2", store: { scope: "global", name: "OPENAI_API_KEY" } })).status, 409);
+  assert.equal(await s.catalog.value((await s.catalog.keyRow("global", "OPENAI_API_KEY"))!), "sk-fake");
+  assert.ok(!(await s.catalog.tokens()).some((t) => t.name === "vps2"));
+  // A check added to the target after it was checked, but before the write: refused in the transaction.
+  await s.catalog.put("global", "RACED_KEY", "sk-old");
+  const check = s.catalog.keyRow.bind(s.catalog);
+  s.catalog.keyRow = async (...a: Parameters<typeof check>) => {
+    const r = await check(...a);
+    s.catalog.keyRow = check;
+    (s.catalog as any).db.raw.prepare(`UPDATE keys SET config = '{"check":"openai"}' WHERE name = 'RACED_KEY'`).run();
+    return r;
+  };
+  assert.equal((await admin({ name: "vps2", store: { scope: "global", name: "RACED_KEY" } })).status, 409);
+  assert.equal(await s.catalog.value((await check("global", "RACED_KEY"))!), "sk-old");
+  assert.ok(!(await s.catalog.tokens()).some((t) => t.name === "vps2"));
+  // Any part failing, the last audit row included, leaves nothing: no token, and the key it targeted untouched.
+  await s.catalog.put("global", "VPS3_TOKEN", "old-value");
+  const auditRow = s.catalog.auditRow.bind(s.catalog), db = (s.catalog as any).db;
+  for (const fail of ["token-create", "put"]) {
+    s.catalog.auditRow = (...a: Parameters<typeof auditRow>) => a[1] === fail ? db.prepare("INSERT INTO no_such_table VALUES (1)") : auditRow(...a);
+    const r = await admin({ name: "vps3", store: { scope: "global", name: "VPS3_TOKEN" } });
+    assert.equal(r.status, 500);
+    assert.match((await r.json()).error, /nothing was created and VPS3_TOKEN is unchanged/);
+    s.catalog.auditRow = auditRow;
+    assert.ok(!(await s.catalog.tokens()).some((t) => t.name === "vps3"));
+    assert.equal(await s.catalog.value((await s.catalog.keyRow("global", "VPS3_TOKEN"))!), "old-value");
+  }
+});
+
 test("a caller token revoked while its first request mints gets nothing", async () => {
   const s = await setup();
   const fresh = await s.catalog.createToken("fresh", ["dev"]);

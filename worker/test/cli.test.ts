@@ -372,6 +372,19 @@ test("admin creates a token with writes, edits it, lists it and revokes it", asy
   assert.match((await cliIn(["keys"], "", { TUMBLER_TOKEN: token })).stderr, /broker 401/);
 });
 
+test("admin token create --store puts the new token straight into a key and never prints it", async () => {
+  const made = await adminCli(["token", "create", "vps-bot", "--pin", "dev", "--store", "VPS_TUMBLER_TOKEN", "--scope", "dev", "-d", "for the VPS"]);
+  assert.equal(made.code, 0, made.stderr);
+  assert.equal(made.stdout, "");
+  assert.match(made.stderr, /stored it as VPS_TUMBLER_TOKEN in dev; it was never shown/);
+  const token = await stored("dev", "VPS_TUMBLER_TOKEN");
+  assert.doesNotMatch(made.stderr, new RegExp(token));
+  assert.equal((await catalog.list()).find((k) => k.scope === "dev" && k.name === "VPS_TUMBLER_TOKEN")!.description, "for the VPS");
+  assert.equal((await cliIn(["keys"], "", { TUMBLER_TOKEN: token })).code, 0);
+  assert.equal((await adminCli(["token", "create", "vps-bot2", "--store", "VPS_TUMBLER_TOKEN"])).code, 2);
+  assert.equal((await adminCli(["token", "revoke", "vps-bot", "--scope", "dev"])).code, 2);
+});
+
 test("admin saves and deletes any key, imports a .env, and lists keys without values", async () => {
   assert.equal((await adminCli(["put", "ADMIN_SET", "--scope", "global", "-d", "set by admin"], "admin-fake\n")).code, 0);
   assert.equal(await stored("global", "ADMIN_SET"), "admin-fake");
