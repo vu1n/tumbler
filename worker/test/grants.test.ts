@@ -425,6 +425,29 @@ test("a parent that can't be a header value is refused; fetch errors never quote
   await assert.rejects(cf.mint(PARENT, CONFIG, ["workers:read"], new Date(), "x"), (e: any) => e.status === 502 && !e.message.includes(PARENT));
 });
 
+test("an ended token's name is reused: the new token starts clean and the old one stays dead", async () => {
+  const s = await setup();
+  await s.env();
+  // Revoked in the token row only, as an interrupted revoke leaves it: its child is still live.
+  await s.catalog.revokeToken("dev");
+  const live = await s.call("POST", "/admin/api/tokens", undefined, { name: "other", projects: ["dev"] }, "vu@example.com");
+  assert.equal(live.status, 409);
+  assert.match((await live.json()).error, /token other is live; revoke it first/);
+  const r = await s.call("POST", "/admin/api/tokens", undefined, { name: "dev", projects: ["dev"] }, "vu@example.com");
+  assert.equal(r.status, 200);
+  const { token } = await r.json();
+  // The old child ended before the name was handed over; the new token mints its own.
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await s.env(s.dev)).status, 401);
+  assert.equal((await (await s.env(token)).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
+  // Nothing of the old token carries over: it held workers:write, the new one reads only.
+  assert.equal((await s.call("POST", "/v1/step-up", token, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).status, 403);
+  // An expired token's name is free too.
+  await s.catalog.createToken("brief", ["dev"], new Date(Date.parse("2026-10-20T12:30:00Z")).toISOString());
+  s.tick(60);
+  assert.equal((await s.call("POST", "/admin/api/tokens", undefined, { name: "brief" }, "vu@example.com")).status, 200);
+});
+
 test("a caller token revoked while its first request mints gets nothing", async () => {
   const s = await setup();
   const fresh = await s.catalog.createToken("fresh", ["dev"]);

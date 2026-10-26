@@ -145,10 +145,21 @@ export class Catalog {
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
     const token = randomToken();
-    await this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires).run()
-      .catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} exists`) : e; });
+    // A revoked or expired token's name is free again: the row takes the new token whole (hash, pin,
+    // scopes, writes, operator, expiry), so nothing of the old one carries over. A live name is refused.
+    const r = await this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(name) DO UPDATE SET hash = excluded.hash, projects = excluded.projects, scopes = excluded.scopes, writes = excluded.writes,
+        operator = excluded.operator, created_at = excluded.created_at, expires_at = excluded.expires_at, revoked_at = NULL
+      WHERE tokens.revoked_at IS NOT NULL OR tokens.expires_at <= ?`)
+      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires, this.clock().toISOString()).run();
+    if (!r.meta.changes) throw new Refused(409, `token ${name} is live; revoke it first (tumbler admin token revoke ${name}) or pick another name`);
     return token;
+  }
+
+  // True when a token by this name exists and no longer works (revoked or expired), so creating it
+  // again reuses the name.
+  async tokenEnded(name: string): Promise<boolean> {
+    return !!await this.db.prepare("SELECT 1 FROM tokens WHERE name = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(name, this.clock().toISOString()).first();
   }
 
   // Changes which projects a live token reads, so widening one never means minting a new token and
