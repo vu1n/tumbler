@@ -703,11 +703,16 @@ function trimValue(v) {
   return one.includes("\n") ? v : one;
 }
 
-async function save({ name, scope, desc }, value, how, failNote = "") {
+// A 401 with no TUMBLER_TOKEN is a person's machine, not a revoked token: the write they want is the
+// admin one, which signs in through Access instead of a caller token.
+const adminHint = (e, verb, name, scope) => /^broker 401\b/.test(e.message) && !callerCfg().token
+  ? `; this machine has no caller token (TUMBLER_TOKEN). As the admin, run \`tumbler admin ${verb} ${name} --scope ${scope ?? "<project>"}\`, which signs in through Cloudflare Access` : "";
+
+async function save({ name, scope, desc }, value, how, failNote = "", admin = false) {
   if (!value) die(`empty value; ${how}`);
   let r;
   try { r = await brokerCall("PUT", `/v1/keys/${encodeURIComponent(name)}`, { value, ...(scope ? { scope } : {}), ...(desc !== undefined ? { description: desc } : {}) }); }
-  catch (e) { die(e.message + failNote); }
+  catch (e) { die(e.message + (admin ? adminHint(e, "put", name, scope) : "") + failNote); }
   try { await ask({ op: "reload" }); } catch {} // so the next run sees it, not a cached older value
   say(`${r.action} ${r.name} in ${r.scope}${r.checked ? "; it passes its check" : ""}`);
 }
@@ -726,7 +731,7 @@ const VALUE_HOW = "pipe it in, pass --from-file or --clipboard, or type it at th
 
 async function put(args) {
   const f = writeFlags(args, PUT_USAGE, { input: true });
-  await save(f, await readValue(f), VALUE_HOW);
+  await save(f, await readValue(f), VALUE_HOW, "", true);
 }
 
 async function rm(args) {
@@ -734,7 +739,7 @@ async function rm(args) {
   if (f.desc !== undefined) die("rm takes no description", 2);
   let r;
   try { r = await brokerCall("DELETE", `/v1/keys/${encodeURIComponent(f.name)}${f.scope ? `?scope=${encodeURIComponent(f.scope)}` : ""}`, null); }
-  catch (e) { die(e.message); }
+  catch (e) { die(e.message + adminHint(e, "rm", f.name, f.scope)); }
   try { await ask({ op: "reload" }); } catch {} // so the next run doesn't get it from the cache
   say(`deleted ${r.name} from ${r.scope}`);
 }
@@ -812,7 +817,10 @@ const ADMIN_USAGE = `usage: tumbler admin <command>
   login                                   sign in through Cloudflare Access (cloudflared)
   keys | tokens | grants | audit [--json] list them (names and metadata, never values)
   token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off] [--expires-hours N]
-                                          prints the new token once, on stdout
+      [--store KEY --scope S [-d description]]
+                                          prints the new token once, on stdout; with --store it goes
+                                          straight into static key KEY in S instead and is never
+                                          shown (a failed store revokes it, so nothing is orphaned)
   token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off]   (an empty list clears it)
                                           --operator on: the token may change minted keys' groups
                                           with tumbler scope (never tokens, parents or token groups)
@@ -891,16 +899,24 @@ async function admin(args) {
     }
     case "token": {
       const [verb, ...more] = rest;
-      const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--operator": "value", "--expires-hours": "value" });
+      const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--operator": "value", "--expires-hours": "value", "--store": "value", "--scope": "value", "-d": "value", "--description": "value" });
       const [name] = f._;
       if (!name || f._.length > 1) die(ADMIN_USAGE, 2);
       if (f["--operator"] !== undefined && !["on", "off"].includes(f["--operator"])) die("--operator takes on or off", 2);
       const operator = f["--operator"] === undefined ? {} : { operator: f["--operator"] === "on" };
+      if (verb !== "create" && ["--store", "--scope", "-d", "--description"].some((k) => f[k] !== undefined)) die("--store, --scope and -d are for token create", 2);
       if (verb === "create") {
         const hours = f["--expires-hours"] === undefined ? null : Number(f["--expires-hours"]);
         if (hours !== null && !(hours > 0)) die("--expires-hours takes a number of hours", 2);
+        const desc = f["-d"] ?? f["--description"];
+        if ((f["--store"] === undefined) !== (f["--scope"] === undefined) || (desc !== undefined && f["--store"] === undefined)) die("--store KEY and --scope S go together (and -d only with them)", 2);
+        const store = f["--store"] === undefined ? {} : { store: { scope: f["--scope"], name: f["--store"], ...(desc !== undefined ? { description: desc } : {}) } };
         const r = await adminCall("POST", "tokens", { name, projects: names(f["--pin"] ?? ""), scopes: names(f["--scopes"] ?? ""), writes: names(f["--writes"] ?? ""), ...operator,
-          expires_at: hours === null ? null : new Date(Date.now() + hours * 3600_000).toISOString() });
+          expires_at: hours === null ? null : new Date(Date.now() + hours * 3600_000).toISOString(), ...store });
+        if (r.stored) {
+          try { await ask({ op: "reload" }); } catch {}
+          return say(`created token ${name} and stored it as ${r.stored.name} in ${r.stored.scope}; it was never shown`);
+        }
         process.stdout.write(r.token + "\n");
         return say(`created token ${name}; it is shown once, so store it now (as a network secret, or TUMBLER_TOKEN)`);
       }

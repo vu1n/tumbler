@@ -129,7 +129,7 @@ as it does for the page.
 
 ```
 tumbler admin keys | tokens | grants | audit [--json]
-tumbler admin token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--expires-hours N]
+tumbler admin token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--expires-hours N] [--store KEY --scope S]
 tumbler admin token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b]
 tumbler admin token revoke NAME
 tumbler admin put NAME --scope S [--kind mint:cloudflare] [--config JSON] [--from-file F | --clipboard] [--skip-check]
@@ -140,7 +140,9 @@ tumbler admin grant revoke ID
 ```
 
 `token create` prints the token once on stdout, so `tumbler admin token create ci --pin kypp | gh secret
-set TUMBLER_TOKEN` never shows it. `admin put` takes its value the way `put` does, and is the CLI's way
+set TUMBLER_TOKEN` never shows it. To hand a token to a machine that reads tumbler (a VPS service),
+`--store KEY --scope S` puts it straight into that static key instead of stdout; if the store fails the
+token is revoked, so a broken pipe never leaves a working token nobody holds. `admin put` takes its value the way `put` does, and is the CLI's way
 to set a minted key's parent.
 
 ### Writing keys from the CLI

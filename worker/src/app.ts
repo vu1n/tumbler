@@ -212,6 +212,24 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
   return json({ error: "not found" }, 404);
 }
 
+// {"store": {"scope": "pr-review", "name": "PR_REVIEW_TUMBLER_TOKEN"}} on a token create: the new
+// token goes straight into that static key instead of the response, so no pipe can drop it.
+type StoreTarget = { scope: string; name: string; description?: string };
+function storeTarget(v: unknown): StoreTarget | null {
+  if (v === undefined || v === null) return null;
+  const o = v as Record<string, unknown>;
+  if (typeof v !== "object" || typeof o.scope !== "string" || typeof o.name !== "string") throw new Refused(400, 'store takes {"scope": ..., "name": ...}');
+  return { scope: o.scope, name: o.name, ...(typeof o.description === "string" ? { description: o.description } : {}) };
+}
+// Checked before the token exists, so a bad target never leaves a token behind. Only a static key: a
+// minted key's value is a parent credential, never a token handed to a caller. Never a key with a
+// check either: that key holds some service's credential, which a tumbler token would replace.
+async function checkStoreTarget(catalog: Catalog, into: StoreTarget) {
+  checkScope(into.scope); checkName(into.name);
+  const prev = await catalog.keyRow(into.scope, into.name);
+  if (prev && prev.kind !== "static") throw new Refused(409, `${into.scope}/${into.name} is ${prev.kind}; store the token under another name`);
+  if (prev && JSON.parse(prev.config || "{}").check) throw new Refused(409, `${into.scope}/${into.name} has a key check, so it holds another service's credential; store the token under another name`);
+}
 // The scope a caller token writes: the one it names, else the one it reads by default (never global by
 // accident), refused unless the token's writes reach it.
 function writeScope(catalog: Catalog, caller: Caller, requested: string | null) {
@@ -348,10 +366,17 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
       // Reusing an ended token's name: its children end first, and only that token's (closeCaller's
-      // gen), so newToken() finds nothing live under the name it hands over.
+      // gen), so the create finds nothing live under the name it hands over.
       const name = String(b.name ?? ""), ended = await catalog.endedToken(name);
       if (ended) await grants?.closeCaller(name, who, ended);
-      const token = await catalog.newToken(name, projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true, ended);
+      const into = storeTarget(b.store);
+      const args = [name, projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true] as const;
+      if (into) {
+        await checkStoreTarget(catalog, into);
+        await catalog.createTokenInto(who, into, ...args, ended);
+        return json({ name: b.name, stored: into }); // never shown: it went straight into the key
+      }
+      const token = await catalog.createToken(...args, ended);
       await catalog.audit(who, "token-create", null, [String(b.name)]);
       return json({ name: b.name, token }); // shown once
     }

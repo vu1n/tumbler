@@ -111,14 +111,25 @@ const now = () => new Date().toISOString();
 export const RETIRE_MS = 25 * 60 * 60 * 1000;
 const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as ArrayBuffer);
 
+// The refusal for a token insert that failed on its name, or on a grant of the ended token it replaces.
+function tokenRefusal(e: Error, name: string, ended: string | null) {
+  if (/UNIQUE/.test(e.message)) return new Refused(409, ended ? `token ${name} changed while this ran; run it again` : `token ${name} is live; revoke it first (tumbler admin token revoke ${name}) or pick another name`);
+  if (ended && /NOT NULL/.test(e.message)) return new Refused(409, `a grant of the old token ${name} opened while this ran; run it again`);
+  return null;
+}
+
+type PutMeta = { description?: string; owner?: string; expires_at?: string | null; kind?: string; config?: Record<string, unknown>; checked?: boolean };
+
 export class Catalog {
   db: D1Database; key: CryptoKey;
   clock: () => Date = () => new Date(); // what token expiry is checked against; tests move it
   constructor(db: D1Database, key: CryptoKey) { this.db = db; this.key = key; }
 
   async audit(actor: string, action: string, project: string | null, names: string[] = []) {
-    await this.db.prepare("INSERT INTO audit (at, actor, action, project, names) VALUES (?, ?, ?, ?, ?)")
-      .bind(now(), actor, action, project, names.join(",")).run();
+    await this.auditRow(actor, action, project, names).run();
+  }
+  auditRow(actor: string, action: string, project: string | null, names: string[] = []) {
+    return this.db.prepare("INSERT INTO audit (at, actor, action, project, names) VALUES (?, ?, ?, ?, ?)").bind(now(), actor, action, project, names.join(","));
   }
 
   // --- caller tokens ---
@@ -135,10 +146,6 @@ export class Catalog {
 
   // Returns the token once; only its hash is stored. expiresAt (ISO time) is optional: without it the
   // token lives until revoked, as every token made before expiry existed does.
-  async createToken(...a: Parameters<Catalog["newToken"]>) { return this.newToken(...a); }
-
-  // createToken, also naming the archived token when the name was free because its token had ended
-  // (see below), so the caller can end that token's grants at once.
   // The hash of `name`'s token when it has ended (revoked or expired), so its name may be reused.
   async endedToken(name: string): Promise<string | null> {
     return (await this.db.prepare("SELECT hash FROM tokens WHERE name = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(name, this.clock().toISOString()).first<{ hash: string }>())?.hash ?? null;
@@ -149,7 +156,47 @@ export class Catalog {
   // lands only while no grant under the name is live (the hash is NULL otherwise, failing the batch),
   // so the new token starts with nothing of the old one. If the name isn't that ended token's any
   // more (a concurrent create), the insert fails on the name and the archive rolls back with it.
-  async newToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false, ended: string | null = null): Promise<string> {
+  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false,
+    ended: string | null = null): Promise<string> {
+    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, ended ? [this.noLiveGrants(name)] : []);
+    await this.db.batch([...this.reuse(name, ended), insert]).catch((e: Error) => { throw tokenRefusal(e, name, ended) ?? e; });
+    return token;
+  }
+
+  // A new token stored straight into a static key, in one transaction with both audit rows: it either
+  // all lands or none of it does, so a failure never leaves a working token nobody holds, nor a key
+  // overwritten for a token that doesn't exist. `ended` as for createToken().
+  async createTokenInto(who: string, into: { scope: string; name: string; description?: string }, name: string, projects: string[] | null, expiresAt: string | null = null,
+    scopes: string[] | null = null, writes: string[] | null = null, operator = false, ended: string | null = null) {
+    // The target is checked again inside the transaction: a key that became minted, or gained a
+    // check, while this ran holds another service's credential and is never overwritten.
+    const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, [{
+      sql: "NOT EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND (kind != 'static' OR json_extract(COALESCE(NULLIF(config, ''), '{}'), '$.check') IS NOT NULL))",
+      binds: [into.scope, into.name] }, ...(ended ? [this.noLiveGrants(name)] : [])]);
+    await this.db.batch([...this.reuse(name, ended), insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
+      this.auditRow(who, "token-create", null, [name]), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name])])
+      .catch((e: Error) => {
+        if (/NOT NULL/.test(e.message)) throw new Refused(409, `${into.scope}/${into.name} changed to a minted or checked key${ended ? `, or a grant of the old token ${name} opened,` : ""} while this ran, so nothing was created; run it again or store the token under another name`);
+        const refused = tokenRefusal(e, name, ended);
+        if (refused) throw refused;
+        console.error("tumbler: token create --store failed", e.name); // never the message: it may quote a bound value
+        throw new Refused(500, `token ${name} could not be stored, so nothing was created and ${into.name} is unchanged`);
+      });
+  }
+
+  // Reusing an ended token's name moves that token (matched by its hash) to an archived name.
+  private reuse(name: string, ended: string | null) {
+    return ended ? [this.db.prepare("UPDATE tokens SET name = ? WHERE name = ? AND hash = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)")
+      .bind(`${name}~${ended.slice(0, 8)}`, name, ended, this.clock().toISOString())] : [];
+  }
+  private noLiveGrants(name: string) {
+    return { sql: "NOT EXISTS (SELECT 1 FROM grants WHERE caller = ? AND state IN ('pending', 'active'))", binds: [name] };
+  }
+
+  // `ok`: conditions the insert lands under, in its own statement (the hash is NULL otherwise, which
+  // fails the insert and any batch it is in).
+  private async tokenInsert(name: string, projects: string[] | null, expiresAt: string | null, scopes: string[] | null, writes: string[] | null, operator: boolean,
+    ok: { sql: string; binds: unknown[] }[] = []) {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     checkPin(projects);
     scopes = checkCeiling(scopes);
@@ -161,23 +208,9 @@ export class Catalog {
       if (t <= this.clock().getTime()) throw new Refused(400, "expiry must be in the future");
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
-    const token = randomToken(), hash = await sha256hex(token);
-    const row = [projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires];
-    if (!ended) {
-      await this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(name, hash, ...row).run()
-        .catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} is live; revoke it first (tumbler admin token revoke ${name}) or pick another name`) : e; });
-      return token;
-    }
-    await this.db.batch([
-      this.db.prepare("UPDATE tokens SET name = ? WHERE name = ? AND hash = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(`${name}~${ended.slice(0, 8)}`, name, ended, this.clock().toISOString()),
-      this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at)
-        VALUES (?, CASE WHEN NOT EXISTS (SELECT 1 FROM grants WHERE caller = ? AND state IN ('pending', 'active')) THEN ? END, ?, ?, ?, ?, ?, ?)`).bind(name, name, hash, ...row),
-    ]).catch((e: Error) => {
-      if (/UNIQUE/.test(e.message)) throw new Refused(409, `token ${name} changed while this ran; run it again`);
-      if (/NOT NULL/.test(e.message)) throw new Refused(409, `a grant of the old token ${name} opened while this ran; run it again`);
-      throw e;
-    });
-    return token;
+    const token = randomToken(), hashSql = ok.length ? `CASE WHEN ${ok.map((c) => c.sql).join(" AND ")} THEN ? END` : "?";
+    return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ${hashSql}, ?, ?, ?, ?, ?, ?)`)
+      .bind(name, ...ok.flatMap((c) => c.binds), await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires) };
   }
 
   // Changes which projects a live token reads, so widening one never means minting a new token and
@@ -236,8 +269,12 @@ export class Catalog {
 
   // kind is 'static' (the value is handed out as is) or 'mint:<provider>' (the value is a parent
   // credential that never leaves the broker; config says what children it may mint).
-  async put(scope: string, name: string, value: string,
-    meta: { description?: string; owner?: string; expires_at?: string | null; kind?: string; config?: Record<string, unknown>; checked?: boolean } = {}) {
+  async put(scope: string, name: string, value: string, meta: PutMeta = {}) {
+    await this.db.batch(await this.putRows(scope, name, value, meta));
+  }
+
+  // The statements a put runs, checked and sealed, for a caller to batch with its own.
+  async putRows(scope: string, name: string, value: string, meta: PutMeta = {}) {
     checkScope(scope); checkName(name);
     if (!value) throw new Refused(400, "empty value");
     // Why: rotating a value without naming a kind keeps the old kind and config. Defaulting to
@@ -255,7 +292,7 @@ export class Catalog {
     const { iv, ciphertext } = await seal(this.key, scope, name, value), t = now();
     // Why one batch: the old revision is retired in the same transaction that replaces it, so even
     // concurrent writes each keep the parent they displaced.
-    await this.db.batch([this.retire(scope, name), this.db.prepare(
+    return [this.retire(scope, name), this.db.prepare(
       `INSERT INTO keys (scope, name, kind, config, rev, checked, description, owner, iv, ciphertext, created_at, rotated_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (scope, name) DO UPDATE SET iv = excluded.iv, ciphertext = excluded.ciphertext,
@@ -263,7 +300,7 @@ export class Catalog {
          rotated_at = excluded.rotated_at, expires_at = excluded.expires_at,
          description = CASE WHEN excluded.description = '' THEN keys.description ELSE excluded.description END,
          owner = CASE WHEN excluded.owner = '' THEN keys.owner ELSE excluded.owner END`,
-    ).bind(scope, name, kind, config, crypto.randomUUID(), meta.checked ? 1 : 0, meta.description ?? "", meta.owner ?? "", iv, ciphertext, t, t, meta.expires_at ?? null)]);
+    ).bind(scope, name, kind, config, crypto.randomUUID(), meta.checked ? 1 : 0, meta.description ?? "", meta.owner ?? "", iv, ciphertext, t, t, meta.expires_at ?? null)];
   }
 
   // A mint key's new config under a new revision, only if it is still at `rev`: the old revision is

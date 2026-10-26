@@ -277,6 +277,16 @@ test("put refuses outside the token's writes, an empty value, and -p with --glob
   assert.equal(await catalog.keyRow("global", "NOPE"), null);
 });
 
+test("put and rm with no caller token point the admin to admin put and admin rm", async () => {
+  const put = await cliIn(["put", "LAPTOP_KEY", "-p", "dev"], "v", { TUMBLER_TOKEN: "" });
+  assert.equal(put.code, 1);
+  assert.match(put.stderr, /broker 401.*no caller token.*`tumbler admin put LAPTOP_KEY --scope dev`/);
+  assert.match((await cliIn(["rm", "LAPTOP_KEY", "--global"], "", { TUMBLER_TOKEN: "" })).stderr, /`tumbler admin rm LAPTOP_KEY --scope global`/);
+  // A token that was sent and refused is a bad token, not a missing one: no admin hint.
+  assert.doesNotMatch((await cliIn(["put", "LAPTOP_KEY", "-p", "dev"], "v", { TUMBLER_TOKEN: "tmb_bad" })).stderr, /admin put/);
+  assert.equal(await catalog.keyRow("dev", "LAPTOP_KEY"), null);
+});
+
 test("neither the token nor a put value appears in curl's arguments", async () => {
   const dir = mkdtempSync(join(home, "argv-")), log = join(dir, "argv");
   const real = execFileSync("sh", ["-c", "command -v curl"], { encoding: "utf8" }).trim();
@@ -360,6 +370,19 @@ test("admin creates a token with writes, edits it, lists it and revokes it", asy
   assert.match((await adminCli(["tokens"])).stdout, /^name\tprojects\tscopes\twrites/);
   assert.equal((await adminCli(["token", "revoke", "ci-bot"])).code, 0);
   assert.match((await cliIn(["keys"], "", { TUMBLER_TOKEN: token })).stderr, /broker 401/);
+});
+
+test("admin token create --store puts the new token straight into a key and never prints it", async () => {
+  const made = await adminCli(["token", "create", "vps-bot", "--pin", "dev", "--store", "VPS_TUMBLER_TOKEN", "--scope", "dev", "-d", "for the VPS"]);
+  assert.equal(made.code, 0, made.stderr);
+  assert.equal(made.stdout, "");
+  assert.match(made.stderr, /stored it as VPS_TUMBLER_TOKEN in dev; it was never shown/);
+  const token = await stored("dev", "VPS_TUMBLER_TOKEN");
+  assert.doesNotMatch(made.stderr, new RegExp(token));
+  assert.equal((await catalog.list()).find((k) => k.scope === "dev" && k.name === "VPS_TUMBLER_TOKEN")!.description, "for the VPS");
+  assert.equal((await cliIn(["keys"], "", { TUMBLER_TOKEN: token })).code, 0);
+  assert.equal((await adminCli(["token", "create", "vps-bot2", "--store", "VPS_TUMBLER_TOKEN"])).code, 2);
+  assert.equal((await adminCli(["token", "revoke", "vps-bot", "--scope", "dev"])).code, 2);
 });
 
 test("admin saves and deletes any key, imports a .env, and lists keys without values", async () => {
