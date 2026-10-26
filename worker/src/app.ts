@@ -227,22 +227,6 @@ async function checkStoreTarget(catalog: Catalog, into: StoreTarget) {
   if (prev && prev.kind !== "static") throw new Refused(409, `${into.scope}/${into.name} is ${prev.kind}; store the token under another name`);
   if (prev && JSON.parse(prev.config || "{}").check) throw new Refused(409, `${into.scope}/${into.name} has a key check, so it holds another service's credential; store the token under another name`);
 }
-// Everything after the token exists, audit included, fails as one: the token is then revoked at
-// once, since nobody holds its value and it could only ever be an orphan that still works.
-async function storeToken(catalog: Catalog, grants: Grants | undefined, who: string, name: string, token: string, into: StoreTarget) {
-  try {
-    await catalog.audit(who, "token-create", null, [name]);
-    await catalog.put(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) });
-    await catalog.audit(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name]);
-  } catch (e) {
-    await catalog.revokeToken(name);
-    await grants?.closeCaller(name, who);
-    await catalog.audit(who, "token-revoke", null, [name]);
-    // Only a refusal's own text; any other error's message can quote what it was handed.
-    throw new Refused(e instanceof Refused ? e.status : 500, `${e instanceof Refused ? e.message : "the token could not be stored"}; token ${name} was revoked, since nobody holds it`);
-  }
-}
-
 // The scope a caller token writes: the one it names, else the one it reads by default (never global by
 // accident), refused unless the token's writes reach it.
 function writeScope(catalog: Catalog, caller: Caller, requested: string | null) {
@@ -379,14 +363,15 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       const b = await body();
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
       const into = storeTarget(b.store);
-      if (into) await checkStoreTarget(catalog, into);
-      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true);
-      if (!into) {
-        await catalog.audit(who, "token-create", null, [String(b.name)]);
-        return json({ name: b.name, token }); // shown once
+      const args = [String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true] as const;
+      if (into) {
+        await checkStoreTarget(catalog, into);
+        await catalog.createTokenInto(who, into, ...args);
+        return json({ name: b.name, stored: into }); // never shown: it went straight into the key
       }
-      await storeToken(catalog, grants, who, String(b.name), token, into);
-      return json({ name: b.name, stored: into }); // never shown: it went straight into the key
+      const token = await catalog.createToken(...args);
+      await catalog.audit(who, "token-create", null, [String(b.name)]);
+      return json({ name: b.name, token }); // shown once
     }
     // {"projects": [...]} edits the pin, {"scopes": [...]} the ceiling, {"writes": [...]} what it may
     // write; any of them.
