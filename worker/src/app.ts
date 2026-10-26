@@ -283,10 +283,10 @@ async function endChildren(catalog: Catalog, grants: Grants | undefined, parent:
   const p = await catalog.tokenRow(parent);
   if (!p) return [];
   const ended = [];
-  for (const t of await catalog.tokens(parent)) {
+  for (const t of await catalog.tokenGens(parent)) {
     if (t.revoked_at || !beyond(p, t).length) continue;
-    if (await catalog.revokeToken(t.name)) await catalog.audit(who, "token-revoke", null, [t.name, `beyond:${parent}`]);
-    await grants?.closeCaller(t.name, who);
+    if (await catalog.revokeGen(t)) await catalog.audit(who, "token-revoke", null, [t.name, `beyond:${parent}`]);
+    await grants?.closeCaller(t.name, who, t.hash);
     ended.push(t.name);
   }
   return ended;

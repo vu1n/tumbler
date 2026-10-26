@@ -336,7 +336,13 @@ export class Catalog {
   }
 
   async tokens(parent?: string): Promise<TokenRow[]> {
-    const { results } = await this.db.prepare(`SELECT name, projects, scopes, writes, operator, delegate, parent, created_at, revoked_at, expires_at FROM tokens${parent === undefined ? "" : " WHERE parent = ?"} ORDER BY name`)
+    return (await this.tokenGens(parent)).map(({ hash: _, ...t }) => t);
+  }
+
+  // tokens() with each row's hash, for a cleanup that must touch only the token it read (never one
+  // that took the name since). The hash never leaves the worker.
+  async tokenGens(parent?: string): Promise<(TokenRow & { hash: string })[]> {
+    const { results } = await this.db.prepare(`SELECT name, hash, projects, scopes, writes, operator, delegate, parent, created_at, revoked_at, expires_at FROM tokens${parent === undefined ? "" : " WHERE parent = ?"} ORDER BY name`)
       .bind(...(parent === undefined ? [] : [parent])).all<any>();
     const parse = (v: string | null) => v === null ? null : JSON.parse(v);
     return results.map((r) => ({ ...r, projects: parse(r.projects), scopes: parse(r.scopes), writes: parse(r.writes), operator: !!r.operator, delegate: !!r.delegate }));
@@ -345,13 +351,21 @@ export class Catalog {
   // Live tokens a delegate made that reach beyond it as it is now: revoked here, so the grant sweep
   // ends what they hold. Returns their names.
   async revokeOutgrown(): Promise<string[]> {
-    const all = await this.tokens(), byName = new Map(all.map((t) => [t.name, t])), out = [];
+    const all = await this.tokenGens(), byName = new Map(all.map((t) => [t.name, t])), out = [];
     for (const t of all) {
       const p = t.parent ? byName.get(t.parent) : undefined;
       if (!t.parent || t.revoked_at || !p || !beyond(p, t).length) continue;
-      if (await this.revokeToken(t.name)) { await this.audit("system", "token-revoke", null, [t.name, `beyond:${t.parent}`]); out.push(t.name); }
+      if (await this.revokeGen(t)) { await this.audit("system", "token-revoke", null, [t.name, `beyond:${t.parent}`]); out.push(t.name); }
     }
     return out;
+  }
+
+  // Revokes exactly the child read (same name, hash and parent); false when it is already revoked or
+  // the name now belongs to another token.
+  async revokeGen(t: { name: string; hash: string; parent: string | null }): Promise<boolean> {
+    const r = await this.db.prepare("UPDATE tokens SET revoked_at = ? WHERE name = ? AND hash = ? AND parent = ? AND revoked_at IS NULL RETURNING hash")
+      .bind(now(), t.name, t.hash, t.parent).all();
+    return r.results.length > 0;
   }
 
   async tokenRow(name: string): Promise<TokenRow | null> {

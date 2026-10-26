@@ -1125,6 +1125,38 @@ test("a delegate's request racing a revoke and reuse of its name, or of its chil
   assert.equal((await s.env(other)).status, 200);
 });
 
+test("ending a delegate's outgrown tokens never revokes a token that took the name meanwhile", async () => {
+  const s = await setup();
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  await admin("PATCH", "tokens/dev", { delegate: true });
+  // Each cleanup lists the outgrown child, then an admin revokes it and gives its name to a new token.
+  const race = async (name: string) => {
+    const { revokeGen, revokeToken } = s.catalog;
+    let other = "";
+    const reuse = async () => {
+      if (other) return;
+      other = "pending";
+      await admin("DELETE", `tokens/${name}`);
+      other = (await (await admin("POST", "tokens", { name, projects: ["dev"] })).json()).token;
+    };
+    s.catalog.revokeGen = async (t) => { await reuse(); return revokeGen.call(s.catalog, t); };
+    s.catalog.revokeToken = async (n) => { await reuse(); return revokeToken.call(s.catalog, n); };
+    return () => { Object.assign(s.catalog, { revokeGen, revokeToken }); return other; };
+  };
+  // The narrowing PATCH's own cleanup.
+  await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"], scopes: ["workers:write"] });
+  let done = await race("vps");
+  await admin("PATCH", "tokens/dev", { scopes: [] });
+  assert.equal((await s.call("GET", "/v1/whoami", done())).status, 200);
+  // The sweep, for a narrowing whose cleanup never ran.
+  await admin("PATCH", "tokens/dev", { scopes: ["workers:write"] });
+  await s.call("POST", "/v1/tokens", s.dev, { name: "vps2", projects: ["dev"], scopes: ["workers:write"] });
+  s.db.raw.prepare("UPDATE tokens SET scopes = NULL WHERE name = 'dev'").run();
+  done = await race("vps2");
+  await s.grants.sweep();
+  assert.equal((await s.call("GET", "/v1/whoami", done())).status, 200);
+});
+
 test("a delegate's token never outlives it", async () => {
   const s = await setup();
   const until = "2026-10-21T12:00:00.000Z";
