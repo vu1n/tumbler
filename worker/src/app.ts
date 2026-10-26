@@ -1,5 +1,5 @@
 // app.ts — routes, apart from index.ts so tests can drive them without Worker bindings.
-import { type Caller, Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused, writeReaches } from "./catalog.ts";
+import { beyond, type Caller, Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused, tokenShape, writeReaches } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
@@ -188,8 +188,25 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     return json({ scope: row.scope, name: row.name, kind: row.kind, defaults: cfg.defaults === true,
       scopes: Object.fromEntries(scopeNames(cfg).sort().map((s) => [s, { base: (base[s] ?? []).map(String), extra: extra[s] ?? [] }])) });
   }
+  // A delegate's own tokens: what `tumbler token create|list|revoke` sends. Each is no wider than the
+  // delegate, never an operator or delegate, always expires, and ends when the delegate does.
+  if (url.pathname === "/v1/tokens" || url.pathname.startsWith("/v1/tokens/")) {
+    if (!caller.delegate) return json({ error: `token ${caller.name} is not a delegate; an admin turns that on with \`tumbler admin token edit ${caller.name} --delegate on\`` }, 403);
+    const name = url.pathname === "/v1/tokens" ? null : decodeURIComponent(url.pathname.slice("/v1/tokens/".length));
+    if (!name && request.method === "GET") return json({ tokens: await catalog.tokens(caller.name) });
+    if (!name && request.method === "POST") return json(await delegateCreate(catalog, grants, caller, await request.json().catch(() => ({})) as Record<string, unknown>));
+    if (name && request.method === "DELETE") {
+      const done = await catalog.revokeChildOf(caller, name);
+      if (!done) return json({ error: `${caller.name} made no token ${name}; only an admin revokes others` }, 404);
+      const { fresh, hash } = done;
+      await grants?.closeCaller(name, caller.name, hash); // only the token revoked, never one that took the name
+      if (fresh) await catalog.audit(caller.name, "token-revoke", null, [name]);
+      return json({ ok: true });
+    }
+    return json({ error: "method not allowed" }, 405);
+  }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
-  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, writes: caller.writes ?? null, operator: caller.operator ?? false, expires_at: caller.expires_at ?? null });
+  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, writes: caller.writes ?? null, operator: caller.operator ?? false, delegate: caller.delegate ?? false, parent: caller.parent ?? null, expires_at: caller.expires_at ?? null });
   // Names only: listing must not mint a child for every minted key.
   if (url.pathname === "/v1/keys") {
     const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
@@ -230,6 +247,51 @@ async function checkStoreTarget(catalog: Catalog, into: StoreTarget) {
   if (prev && prev.kind !== "static") throw new Refused(409, `${into.scope}/${into.name} is ${prev.kind}; store the token under another name`);
   if (prev && JSON.parse(prev.config || "{}").check) throw new Refused(409, `${into.scope}/${into.name} has a key check, so it holds another service's credential; store the token under another name`);
 }
+const CHILD_HOURS = 30 * 24, MAX_CHILD_HOURS = 90 * 24;
+
+// A delegate's new token: {"name", "projects", "scopes", "writes", "expires_hours"?, "store"?}. Refused
+// whole when any part reaches beyond the delegate (beyond()). Stored into a key the delegate writes,
+// or returned once.
+async function delegateCreate(catalog: Catalog, grants: Grants | undefined, caller: Caller, b: Record<string, unknown>) {
+  const name = String(b.name ?? ""), hours = b.expires_hours === undefined ? CHILD_HOURS : Number(b.expires_hours);
+  if (!(hours > 0 && hours <= MAX_CHILD_HOURS)) throw new Refused(400, `expires_hours is 1 to ${MAX_CHILD_HOURS} (a delegate's tokens always expire)`);
+  let expires = new Date(catalog.clock().getTime() + hours * 3600_000).toISOString();
+  // Never past the delegate's own expiry: capped there rather than refused, so a default still works.
+  if (caller.expires_at && expires > caller.expires_at) expires = caller.expires_at;
+  const child = { ...tokenShape(list(b.projects), list(b.scopes), list(b.writes)), expires_at: expires };
+  const over = beyond(caller, child);
+  if (over.length) throw new Refused(403, `token ${name} would hold ${over.join("; ")}: beyond ${caller.name}, so nothing was created`);
+  // A name another token holds (live or ended) stays its own: a delegate never takes it over.
+  const prev = await catalog.tokenRow(name);
+  if (prev) throw new Refused(409, `token ${name} exists${prev.parent === caller.name ? "" : ` and ${caller.name} didn't make it`}; pick another name`);
+  const into = storeTarget(b.store);
+  if (into) {
+    if (!writeReaches(caller.writes, into.scope)) throw new Refused(403, `${caller.name} may not write ${into.scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}; store the token where it writes, or leave out store to have it shown once`);
+    await checkStoreTarget(catalog, into);
+  }
+  const created = [name, `parent:${caller.name}`], kin = { parent: caller };
+  const token = into ? null : await catalog.createToken(name, child.projects, expires, child.scopes, child.writes, false, kin);
+  if (into) await catalog.createTokenInto(caller.name, into, created, name, child.projects, expires, child.scopes, child.writes, false, kin);
+  if (into) return { name, expires_at: expires, stored: into }; // never shown: it went straight into the key
+  await catalog.audit(caller.name, "token-create", null, created);
+  return { name, expires_at: expires, token }; // shown once
+}
+
+// The live tokens a delegate made that no longer fit inside it after an edit: each is revoked and its
+// grants closed. Returns their names.
+async function endChildren(catalog: Catalog, grants: Grants | undefined, parent: string, who: string) {
+  const p = await catalog.tokenRow(parent);
+  if (!p) return [];
+  const ended = [];
+  for (const t of await catalog.tokenGens(parent)) {
+    if (t.revoked_at || !beyond(p, t).length) continue;
+    if (await catalog.revokeGen(t)) await catalog.audit(who, "token-revoke", null, [t.name, `beyond:${parent}`]);
+    await grants?.closeCaller(t.name, who, t.hash);
+    ended.push(t.name);
+  }
+  return ended;
+}
+
 // The scope a caller token writes: the one it names, else the one it reads by default (never global by
 // accident), refused unless the token's writes reach it.
 function writeScope(catalog: Catalog, caller: Caller, requested: string | null) {
@@ -371,22 +433,23 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       if (ended) await grants?.closeCaller(name, who, ended);
       const into = storeTarget(b.store);
       const args = [name, projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true] as const;
+      const kin = { delegate: b.delegate === true, ended }, created = [name, ...(kin.delegate ? ["delegate"] : [])];
       if (into) {
         await checkStoreTarget(catalog, into);
-        await catalog.createTokenInto(who, into, ...args, ended);
+        await catalog.createTokenInto(who, into, created, ...args, kin);
         return json({ name: b.name, stored: into }); // never shown: it went straight into the key
       }
-      const token = await catalog.createToken(...args, ended);
-      await catalog.audit(who, "token-create", null, [String(b.name)]);
+      const token = await catalog.createToken(...args, kin);
+      await catalog.audit(who, "token-create", null, created);
       return json({ name: b.name, token }); // shown once
     }
     // {"projects": [...]} edits the pin, {"scopes": [...]} the ceiling, {"writes": [...]} what it may
     // write; any of them.
     if (m === "PATCH" && parts.length === 2) {
       const b = await body();
-      const pin = "projects" in b || !("scopes" in b || "writes" in b || "operator" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
+      const pin = "projects" in b || !("scopes" in b || "writes" in b || "operator" in b || "delegate" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
       // One checked write for both, so a bad pin never lands a wider ceiling (or the reverse).
-      const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...("operator" in b ? { operator: b.operator === true } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
+      const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...("operator" in b ? { operator: b.operator === true } : {}), ...("delegate" in b ? { delegate: b.delegate === true } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
       // Both cleanups run before either audit; a cleanup cut short is finished by the sweep.
       // Only the edited token's grants (its hash), never those of a token that took the name meanwhile.
       if ("projects" in done) await grants?.closeOutsidePin(parts[1], done.projects!, who, done.hash);
@@ -395,11 +458,17 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       if ("scopes" in done) await catalog.audit(who, "token-scopes", null, [parts[1], ...(done.scopes ?? ["reads-only"])]);
       if ("writes" in done) await catalog.audit(who, "token-writes", null, [parts[1], ...(done.writes ?? ["writes-nothing"])]);
       if ("operator" in done) await catalog.audit(who, "token-operator", null, [parts[1], done.operator ? "on" : "off"]);
-      return json({ ok: true });
+      if ("delegate" in done) await catalog.audit(who, "token-delegate", null, [parts[1], done.delegate ? "on" : "off"]);
+      // A narrower delegate: the tokens it made that no longer fit inside it end now.
+      const ended = "projects" in done || "scopes" in done || "writes" in done ? await endChildren(catalog, grants, parts[1], who) : [];
+      return json({ ok: true, ...(ended.length ? { ended } : {}) });
     }
     if (m === "DELETE" && parts.length === 2) {
-      const { fresh, hash } = await catalog.revokeTokenGen(parts[1]);
+      const { fresh, hash } = await catalog.revokeTokenGen(parts[1]); // and the tokens it made as a delegate
       await grants?.closeCaller(parts[1], who, hash); // its children stop working now, not at expiry; never a reused name's
+      // Every token it made, revoked earlier or not, read after the revoke: a retry of a cleanup cut
+      // short still finds their grants, and so does a child created just before the revoke landed.
+      for (const c of await catalog.childGens(parts[1])) await grants?.closeCaller(c.name, who, c.hash);
       if (fresh) await catalog.audit(who, "token-revoke", null, [parts[1]]);
       return json({ ok: true });
     }

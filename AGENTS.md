@@ -17,6 +17,11 @@
   `global` only when named. It never sets or rotates a minted key's parent.
 - `tumbler admin` reaches `/admin/api` only through a Cloudflare Access session (cloudflared), never a
   caller token: an admin can mint any token, so admin stays tied to a person.
+- The one way a caller token creates tokens is `delegate` (set by an admin): `tumbler token create`
+  makes a token no wider than the delegate (catalog.ts beyond(): pin, scopes, writes, expiry), never
+  an operator or delegate, always expiring, recorded with `parent`. caller() refuses it once its
+  parent is revoked or expired; narrowing the parent ends the ones that no longer fit. Never let a
+  delegate take over another token's name or widen what it made.
 - The one admin power a caller token can hold is `operator` (set by an admin): `tumbler scope` adds
   or removes permission groups on the minted keys the token reads, on the person's word in chat.
   Additions live in the key's `config.extra`, on top of the admin's config, and never include token,

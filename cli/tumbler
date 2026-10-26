@@ -45,6 +45,16 @@
 //                                    /admin). Only groups added this way can be removed; token,
 //                                    member and billing groups are refused. Children holding the old
 //                                    groups are ended, so the next run mints with the new ones
+//   tumbler token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--expires-hours N]
+//         [--store KEY (-p project | --global)] [-d description]
+//                                    for a delegate token (set by an admin): make a token no wider
+//                                    than this one (pin, scopes, writes, expiry; never operator or
+//                                    delegate), for a new deployment. It expires (default 30 days,
+//                                    at most 90) and ends when this token does. With --store it goes
+//                                    straight into static key KEY in a scope this token writes and is
+//                                    never shown; without, it is printed once on stdout
+//   tumbler token list [--json] | tumbler token revoke NAME
+//                                    the tokens this delegate made, and ending one of them
 //   tumbler admin <command>          what /admin does (keys, tokens, pins, scopes, moves, grants,
 //                                    audit), signed in through Cloudflare Access: `tumbler admin
 //                                    login` runs cloudflared. `tumbler admin` lists the commands
@@ -816,14 +826,18 @@ async function scope(args) {
 const ADMIN_USAGE = `usage: tumbler admin <command>
   login                                   sign in through Cloudflare Access (cloudflared)
   keys | tokens | grants | audit [--json] list them (names and metadata, never values)
-  token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off] [--expires-hours N]
-      [--store KEY --scope S [-d description]]
+  token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off] [--delegate on|off]
+      [--expires-hours N] [--store KEY --scope S [-d description]]
                                           prints the new token once, on stdout; with --store it goes
                                           straight into static key KEY in S instead and is never
                                           shown (a failed store revokes it, so nothing is orphaned)
-  token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off]   (an empty list clears it)
+  token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off] [--delegate on|off]
+                                          (an empty list clears it)
                                           --operator on: the token may change minted keys' groups
                                           with tumbler scope (never tokens, parents or token groups)
+                                          --delegate on: the token may create tokens no wider than
+                                          itself with tumbler token create; narrowing it ends the
+                                          ones that no longer fit, revoking it ends them all
   token revoke NAME
   put NAME --scope S [--kind static|mint:<provider>] [--config JSON] [--from-file F | --clipboard]
       [-d description] [--skip-check]     any key, minted ones included; the value as for put
@@ -877,7 +891,7 @@ function table(rows, cols, json) {
 }
 
 const ADMIN_LISTS = {
-  keys: ["scope", "name", "kind", "checked", "rotated_at"], tokens: ["name", "projects", "scopes", "writes", "operator", "expires_at", "revoked_at"],
+  keys: ["scope", "name", "kind", "checked", "rotated_at"], tokens: ["name", "projects", "scopes", "writes", "operator", "delegate", "parent", "expires_at", "revoked_at"],
   grants: ["id", "name", "caller", "project", "state", "scopes", "expires_at"], audit: ["at", "actor", "action", "project", "names"],
 };
 
@@ -899,11 +913,12 @@ async function admin(args) {
     }
     case "token": {
       const [verb, ...more] = rest;
-      const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--operator": "value", "--expires-hours": "value", "--store": "value", "--scope": "value", "-d": "value", "--description": "value" });
+      const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--operator": "value", "--delegate": "value", "--expires-hours": "value", "--store": "value", "--scope": "value", "-d": "value", "--description": "value" });
       const [name] = f._;
       if (!name || f._.length > 1) die(ADMIN_USAGE, 2);
       if (f["--operator"] !== undefined && !["on", "off"].includes(f["--operator"])) die("--operator takes on or off", 2);
-      const operator = f["--operator"] === undefined ? {} : { operator: f["--operator"] === "on" };
+      if (f["--delegate"] !== undefined && !["on", "off"].includes(f["--delegate"])) die("--delegate takes on or off", 2);
+      const operator = { ...(f["--operator"] === undefined ? {} : { operator: f["--operator"] === "on" }), ...(f["--delegate"] === undefined ? {} : { delegate: f["--delegate"] === "on" }) };
       if (verb !== "create" && ["--store", "--scope", "-d", "--description"].some((k) => f[k] !== undefined)) die("--store, --scope and -d are for token create", 2);
       if (verb === "create") {
         const hours = f["--expires-hours"] === undefined ? null : Number(f["--expires-hours"]);
@@ -924,11 +939,11 @@ async function admin(args) {
         const edit = {};
         for (const [flag, field] of [["--pin", "projects"], ["--scopes", "scopes"], ["--writes", "writes"]]) if (f[flag] !== undefined) edit[field] = names(f[flag]);
         Object.assign(edit, operator);
-        if (!Object.keys(edit).length) die("name what to change: --pin, --scopes, --writes or --operator", 2);
-        await adminCall("PATCH", `tokens/${encodeURIComponent(name)}`, edit);
-        return say(`updated token ${name}`);
+        if (!Object.keys(edit).length) die("name what to change: --pin, --scopes, --writes, --operator or --delegate", 2);
+        const r = await adminCall("PATCH", `tokens/${encodeURIComponent(name)}`, edit);
+        return say(`updated token ${name}${r.ended ? `; ended ${r.ended.join(", ")}, which it made and no longer covers` : ""}`);
       }
-      if (verb === "revoke") { await adminCall("DELETE", `tokens/${encodeURIComponent(name)}`); return say(`revoked token ${name}; the children it held are ended`); }
+      if (verb === "revoke") { await adminCall("DELETE", `tokens/${encodeURIComponent(name)}`); return say(`revoked token ${name}; the children it held, and any tokens it made, are ended`); }
       return die(ADMIN_USAGE, 2);
     }
     case "put": {
@@ -983,6 +998,33 @@ async function admin(args) {
   }
 }
 
+// --- token: a delegate token's own tokens, for a deployment it sets up --------------------------
+
+const TOKEN_USAGE = "usage: tumbler token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--expires-hours N] [--store KEY (-p project | --global)] [-d description] | tumbler token list [--json] | tumbler token revoke NAME";
+
+async function token(args) {
+  const [verb, ...more] = args;
+  const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--expires-hours": "value", "--store": "value", "-p": "value", "--project": "value", "--global": "bool", "-d": "value", "--description": "value", "--json": "bool" });
+  const [name] = f._, call = async (...a) => { try { return await brokerCall(...a); } catch (e) { die(e.message); } };
+  if (verb === "list" && !name) return table((await call("GET", "/v1/tokens", null)).tokens, ["name", "projects", "scopes", "writes", "expires_at", "revoked_at"], f["--json"]);
+  if (!name || f._.length > 1) die(TOKEN_USAGE, 2);
+  if (verb === "revoke") { await call("DELETE", `/v1/tokens/${encodeURIComponent(name)}`, null); return say(`revoked token ${name}; the children it held are ended`); }
+  if (verb !== "create") die(TOKEN_USAGE, 2);
+  const scope = f["--global"] ? (f["-p"] ?? f["--project"] ? die("pass -p or --global, not both", 2) : "global") : f["-p"] ?? f["--project"];
+  const desc = f["-d"] ?? f["--description"];
+  if ((f["--store"] === undefined) !== (scope === undefined) || (desc !== undefined && f["--store"] === undefined)) die("--store KEY and -p/--global go together (and -d only with them)", 2);
+  const hours = f["--expires-hours"] === undefined ? undefined : Number(f["--expires-hours"]);
+  if (hours !== undefined && !(hours > 0)) die("--expires-hours takes a number of hours", 2);
+  const r = await call("POST", "/v1/tokens", { name, projects: names(f["--pin"] ?? ""), scopes: names(f["--scopes"] ?? ""), writes: names(f["--writes"] ?? ""),
+    ...(hours !== undefined ? { expires_hours: hours } : {}), ...(f["--store"] === undefined ? {} : { store: { scope, name: f["--store"], ...(desc !== undefined ? { description: desc } : {}) } }) });
+  if (r.stored) {
+    try { await ask({ op: "reload" }); } catch {}
+    return say(`created token ${name} (expires ${r.expires_at}) and stored it as ${r.stored.name} in ${r.stored.scope}; it was never shown`);
+  }
+  process.stdout.write(r.token + "\n");
+  say(`created token ${name} (expires ${r.expires_at}); it is shown once, so store it now`);
+}
+
 function shim(tools) {
   if (!tools.length) die("usage: tumbler shim <tool>...", 2);
   mkdirSync(SHIM_DIR, { recursive: true });
@@ -1020,7 +1062,7 @@ async function ensureUrl() {
 }
 
 const [cmd, ...args] = process.argv.slice(2);
-if (["run", "auto", "keys", "whoami", "put", "rm", "scope", "admin", "ssh-keygen", "update", "__daemon"].includes(cmd)) await ensureUrl();
+if (["run", "auto", "keys", "whoami", "put", "rm", "scope", "token", "admin", "ssh-keygen", "update", "__daemon"].includes(cmd)) await ensureUrl();
 switch (cmd) {
   case "url": {
     if (args.length > 1) die("usage: tumbler url [URL]", 2);
@@ -1044,7 +1086,8 @@ switch (cmd) {
   case "scope": await scope(args); break;
   case "update": await update(); break;
   case "admin": await admin(args); break;
+  case "token": await token(args); break;
   case "reload": try { await ask({ op: "reload" }); } catch {} process.stdout.write("cache cleared\n"); break;
   case "shim": shim(args); break;
-  default: die("usage: tumbler run|auto|keys|whoami|put|rm|scope|admin|ssh-keygen|reload|shim|update|url  (see the header of this file)", 2);
+  default: die("usage: tumbler run|auto|keys|whoami|put|rm|scope|token|admin|ssh-keygen|reload|shim|update|url  (see the header of this file)", 2);
 }

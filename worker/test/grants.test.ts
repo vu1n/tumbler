@@ -998,3 +998,206 @@ test("cli: under the wrangler shim a deploy asks for workers:write itself; reads
   assert.match(r.stderr, /workers:write not granted .*running on the read token/);
   await s.catalog.setScopes("dev", ["workers:write"]);
 });
+
+test("a delegate creates tokens no wider than itself, which end when it narrows or is revoked", async () => {
+  const s = await setup();
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  const make = (b: unknown, token = s.dev) => s.call("POST", "/v1/tokens", token, b);
+  assert.match((await (await make({ name: "vps", projects: ["dev"] })).json()).error, /not a delegate.*--delegate on/);
+  assert.equal((await admin("PATCH", "tokens/dev", { delegate: true, writes: ["dev"] })).status, 200);
+  // Anything beyond the delegate is refused whole, padded or not, and nothing is created.
+  for (const b of [{ projects: ["kypp"] }, { projects: ["*"] }, { scopes: ["*"] }, { scopes: ["pages:write"] }, { writes: ["global"] }, { writes: [" global "] }, { scopes: [" pages:write"] }, { projects: [" kypp "] }, { operator: true, projects: ["kypp"] }]) {
+    const r = await make({ name: "wide", ...b });
+    assert.equal(r.status, 403, JSON.stringify(b));
+    assert.match((await r.json()).error, /beyond dev, so nothing was created/);
+  }
+  assert.equal((await make({ name: "wide", expires_hours: 24 * 91 })).status, 400);
+  assert.equal((await make({ name: "wide", projects: ["dev"], store: { scope: "global", name: "WIDE" } })).status, 403);
+  assert.equal(await s.catalog.tokenRow("wide"), null);
+  // Within it: shown once, expiring in 30 days, never an operator or delegate.
+  const r = await make({ name: "vps", projects: ["dev"], scopes: ["workers:write"], writes: ["dev"] });
+  assert.equal(r.status, 200);
+  const made = await r.json();
+  assert.equal(made.expires_at, "2026-11-19T12:00:00.000Z");
+  const who = await (await s.call("GET", "/v1/whoami", made.token)).json();
+  assert.deepEqual([who.parent, who.operator, who.delegate, who.writes], ["dev", false, false, ["dev"]]);
+  assert.equal((await (await s.env(made.token)).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+  // Stored straight into a key the delegate writes, never shown.
+  const stored = await (await make({ name: "vps2", projects: ["dev"], store: { scope: "dev", name: "VPS2_TOKEN" } })).json();
+  assert.deepEqual([stored.token, stored.stored], [undefined, { scope: "dev", name: "VPS2_TOKEN" }]);
+  assert.equal((await s.call("GET", "/v1/whoami", await s.catalog.value((await s.catalog.keyRow("dev", "VPS2_TOKEN"))!))).status, 200);
+  // A name another token holds is never taken over, and a delegate revokes only its own.
+  assert.equal((await make({ name: "other" })).status, 409);
+  assert.equal((await s.call("DELETE", "/v1/tokens/other", s.dev)).status, 404);
+  assert.deepEqual((await (await s.call("GET", "/v1/tokens", s.dev)).json()).tokens.map((t: any) => t.name), ["vps", "vps2"]);
+  // A token a delegate made never becomes a delegate or an operator, so chains stay one level deep.
+  for (const b of [{ delegate: true }, { operator: true }]) {
+    const r = await admin("PATCH", "tokens/vps", b);
+    assert.equal(r.status, 409, JSON.stringify(b));
+    assert.match((await r.json()).error, /was made by dev, so it can't be a delegate or an operator/);
+  }
+  assert.equal((await admin("PATCH", "tokens/vps", { delegate: false })).status, 200);
+  // Narrowing the delegate ends what no longer fits: vps held workers:write, vps2 reads only.
+  const narrowed = await (await admin("PATCH", "tokens/dev", { scopes: [] })).json();
+  assert.deepEqual(narrowed.ended, ["vps"]);
+  assert.equal((await s.call("GET", "/v1/whoami", made.token)).status, 401);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  // Revoking the delegate ends the rest; and a parent revoked in its row alone already stops them.
+  const vps3 = (await (await make({ name: "vps3", projects: ["dev"] })).json()).token;
+  s.db.raw.prepare("UPDATE tokens SET revoked_at = '2026-10-20T12:00:00Z' WHERE name = 'dev'").run();
+  assert.equal((await s.call("GET", "/v1/whoami", vps3)).status, 401);
+  s.db.raw.prepare("UPDATE tokens SET revoked_at = NULL WHERE name = 'dev'").run();
+  assert.equal((await admin("DELETE", "tokens/dev")).status, 200);
+  assert.ok((await s.catalog.tokens("dev")).every((t) => t.revoked_at));
+});
+
+test("a delegate's revoke cut short is finished by a retry, children included", async () => {
+  const s = await setup();
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  await admin("PATCH", "tokens/dev", { delegate: true });
+  const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"] })).json()).token;
+  assert.equal((await s.env(vps)).status, 200);
+  // The worker dies after the revoke's batch, before any grant is closed.
+  const close = s.grants.closeCaller.bind(s.grants);
+  s.grants.closeCaller = async () => { s.grants.closeCaller = close; throw new Error("worker died"); };
+  assert.equal((await admin("DELETE", "tokens/dev")).status, 500);
+  assert.deepEqual(s.fake.revoked, []);
+  assert.equal((await admin("DELETE", "tokens/dev")).status, 200);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+});
+
+test("a delegate narrowed while its child's mint runs: the child is never stored", async () => {
+  const s = await setup();
+  await s.call("PATCH", "/admin/api/tokens/dev", undefined, { delegate: true }, "vu@example.com");
+  const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"], scopes: ["workers:write"] })).json()).token;
+  // Narrowed in its row alone, as a PATCH cut short leaves it, while the provider mints.
+  const mint = s.fake.provider.mint;
+  s.fake.provider.mint = async (...a: Parameters<typeof mint>) => {
+    s.fake.provider.mint = mint;
+    s.db.raw.prepare("UPDATE tokens SET scopes = NULL WHERE name = 'dev'").run();
+    return mint(...a);
+  };
+  assert.equal((await s.call("POST", "/v1/step-up", vps, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).status, 409);
+  assert.equal((await adminGrants(s)).filter((g: any) => g.caller === "vps" && g.state === "active" && g.scopes.includes("workers:write")).length, 0);
+  assert.ok(s.fake.revoked.length >= 1, "the child minted for it is deleted at the provider");
+});
+
+test("a delegate's reused name inherits none of the old delegate's tokens", async () => {
+  const s = await setup();
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  await admin("PATCH", "tokens/dev", { delegate: true });
+  const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"] })).json()).token;
+  await admin("DELETE", "tokens/dev");
+  const fresh = (await (await admin("POST", "tokens", { name: "dev", projects: ["dev"], delegate: true })).json()).token;
+  assert.deepEqual((await (await s.call("GET", "/v1/tokens", fresh)).json()).tokens, []);
+  assert.equal((await s.call("GET", "/v1/whoami", vps)).status, 401);
+});
+
+test("a delegate's request racing a revoke and reuse of its name, or of its child's, touches nothing new", async () => {
+  const s = await setup();
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  await admin("PATCH", "tokens/dev", { delegate: true, projects: ["dev"] });
+  // The old delegate authenticated, then its name goes to a new delegate with the same bounds.
+  const create = s.catalog.createToken.bind(s.catalog);
+  s.catalog.createToken = async (...a: Parameters<typeof create>) => {
+    s.catalog.createToken = create;
+    await admin("DELETE", "tokens/dev");
+    await admin("POST", "tokens", { name: "dev", projects: ["dev"], scopes: ["workers:write"], delegate: true });
+    return create(...a);
+  };
+  assert.equal((await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"] })).status, 409);
+  assert.equal(await s.catalog.tokenRow("vps"), null);
+  // A delegate revoking its child after an admin revoked and reused the child's name.
+  const fresh = (await (await admin("POST", "tokens", { name: "boss", projects: ["dev"], delegate: true })).json()).token;
+  assert.equal((await s.call("POST", "/v1/tokens", fresh, { name: "kid", projects: ["dev"], expires: "1d" })).status, 200);
+  // The admin revokes and reuses "kid" just after the delegate's ownership check has read it.
+  let other = "";
+  const race = async () => {
+    if (other) return;
+    other = "pending";
+    await admin("DELETE", "tokens/kid");
+    other = (await (await admin("POST", "tokens", { name: "kid", projects: ["dev"] })).json()).token;
+  };
+  const { tokenRow, revokeChildOf } = s.catalog;
+  s.catalog.tokenRow = async (n: string) => { const r = await tokenRow.call(s.catalog, n); if (n === "kid") await race(); return r; };
+  s.catalog.revokeChildOf = async (...a: Parameters<typeof revokeChildOf>) => { await race(); return revokeChildOf.apply(s.catalog, a); };
+  assert.equal((await s.call("DELETE", "/v1/tokens/kid", fresh)).status, 404);
+  assert.equal((await s.env(other)).status, 200);
+});
+
+test("ending a delegate's outgrown tokens never revokes a token that took the name meanwhile", async () => {
+  const s = await setup();
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  await admin("PATCH", "tokens/dev", { delegate: true });
+  // Each cleanup lists the outgrown child, then an admin revokes it and gives its name to a new token.
+  const race = async (name: string) => {
+    const { revokeGen, revokeToken } = s.catalog;
+    let other = "";
+    const reuse = async () => {
+      if (other) return;
+      other = "pending";
+      await admin("DELETE", `tokens/${name}`);
+      other = (await (await admin("POST", "tokens", { name, projects: ["dev"] })).json()).token;
+    };
+    s.catalog.revokeGen = async (t) => { await reuse(); return revokeGen.call(s.catalog, t); };
+    s.catalog.revokeToken = async (n) => { await reuse(); return revokeToken.call(s.catalog, n); };
+    return () => { Object.assign(s.catalog, { revokeGen, revokeToken }); return other; };
+  };
+  // The narrowing PATCH's own cleanup.
+  await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"], scopes: ["workers:write"] });
+  let done = await race("vps");
+  await admin("PATCH", "tokens/dev", { scopes: [] });
+  assert.equal((await s.call("GET", "/v1/whoami", done())).status, 200);
+  // The sweep, for a narrowing whose cleanup never ran.
+  await admin("PATCH", "tokens/dev", { scopes: ["workers:write"] });
+  await s.call("POST", "/v1/tokens", s.dev, { name: "vps2", projects: ["dev"], scopes: ["workers:write"] });
+  s.db.raw.prepare("UPDATE tokens SET scopes = NULL WHERE name = 'dev'").run();
+  done = await race("vps2");
+  await s.grants.sweep();
+  assert.equal((await s.call("GET", "/v1/whoami", done())).status, 200);
+});
+
+test("a delegate's token never outlives it", async () => {
+  const s = await setup();
+  const until = "2026-10-21T12:00:00.000Z";
+  const brief = await s.catalog.createToken("brief", ["dev"], until, null, null, false, { delegate: true });
+  const made = await (await s.call("POST", "/v1/tokens", brief, { name: "short", projects: ["dev"] })).json();
+  assert.equal(made.expires_at, until);
+});
+
+test("a delegate's token stops at its parent's current bounds even when cleanup is cut short or a create races a narrowing", async () => {
+  const s = await setup();
+  await s.call("PATCH", "/admin/api/tokens/dev", undefined, { delegate: true }, "vu@example.com");
+  const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"], scopes: ["workers:write"] })).json()).token;
+  await s.call("POST", "/v1/step-up", vps, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  // Narrowed with no cleanup at all, as a PATCH cut short after its write leaves it.
+  s.db.raw.prepare("UPDATE tokens SET scopes = NULL WHERE name = 'dev'").run();
+  assert.equal((await s.call("GET", "/v1/whoami", vps)).status, 401);
+  await s.grants.sweep();
+  assert.ok((await s.catalog.tokenRow("vps"))!.revoked_at);
+  assert.equal((await adminGrants(s)).filter((g: any) => g.caller === "vps" && ["active", "pending"].includes(g.state)).length, 0);
+  // A create authorized before a narrowing that lands while it runs.
+  s.db.raw.prepare("UPDATE tokens SET projects = '[\"dev\"]' WHERE name = 'dev'").run();
+  const create = s.catalog.createToken.bind(s.catalog);
+  s.catalog.createToken = async (...a: Parameters<typeof create>) => {
+    s.catalog.createToken = create;
+    s.db.raw.prepare("UPDATE tokens SET projects = NULL WHERE name = 'dev'").run();
+    return create(...a);
+  };
+  const raced = await s.call("POST", "/v1/tokens", s.dev, { name: "vps2", projects: ["dev"] });
+  assert.equal(raced.status, 409);
+  assert.match((await raced.json()).error, /dev changed while token vps2 was being made, so nothing was created/);
+  assert.equal(await s.catalog.tokenRow("vps2"), null);
+  // Its writes taken away while a create stores into them: nothing is created, and the key is untouched.
+  s.db.raw.prepare("UPDATE tokens SET projects = '[\"dev\"]', writes = '[\"dev\"]' WHERE name = 'dev'").run();
+  await s.catalog.put("dev", "VPS_TOKEN", "old-value");
+  const into = s.catalog.createTokenInto.bind(s.catalog);
+  s.catalog.createTokenInto = async (...a: Parameters<typeof into>) => {
+    s.catalog.createTokenInto = into;
+    s.db.raw.prepare("UPDATE tokens SET writes = NULL WHERE name = 'dev'").run();
+    return into(...a);
+  };
+  assert.equal((await s.call("POST", "/v1/tokens", s.dev, { name: "vps3", projects: ["dev"], store: { scope: "dev", name: "VPS_TOKEN" } })).status, 409);
+  assert.equal(await s.catalog.tokenRow("vps3"), null);
+  assert.equal(await s.catalog.value((await s.catalog.keyRow("dev", "VPS_TOKEN"))!), "old-value");
+});

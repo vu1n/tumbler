@@ -145,6 +145,16 @@ set TUMBLER_TOKEN` never shows it. To hand a token to a machine that reads tumbl
 token is revoked, so a broken pipe never leaves a working token nobody holds. `admin put` takes its value the way `put` does, and is the CLI's way
 to set a minted key's parent.
 
+### Tokens an agent makes (delegate)
+
+An admin can mark a token as a **delegate** (`tumbler admin token edit NAME --delegate on`). From a
+session holding it, `tumbler token create vps --pin pr-review --store VPS_TUMBLER_TOKEN -p pr-review`
+makes a token for a new deployment without anyone's laptop. It can never be wider than the delegate
+(its pin, scopes and writes, and its expiry), is never an operator or delegate itself, expires (30
+days by default, at most 90), and stops working when the delegate is revoked or expires. Narrowing
+the delegate ends the tokens it made that no longer fit. `tumbler token list` and
+`tumbler token revoke NAME` cover only the delegate's own tokens.
+
 ### Writing keys from the CLI
 
 A token writes nothing until an admin gives it **writes** in `/admin` (the token list's "May write"

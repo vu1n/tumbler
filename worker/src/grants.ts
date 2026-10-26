@@ -64,6 +64,12 @@ const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as 
 const union = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort();
 const grantScope = (id: string) => `grant:${id}`; // AAD for the sealed child, apart from every key row
 const LIVE = "state IN ('pending', 'active')";
+// Token row `a` is live and its pin and ceiling still reach the grant (binds: now, then the JSON list
+// of scopes beyond reads).
+const holds = (a: string) => `${a}.revoked_at IS NULL AND (${a}.expires_at IS NULL OR ${a}.expires_at > ?)
+  AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(${a}.projects) WHERE json_each.value IN (grants.project,
+    CASE WHEN instr(grants.project, '/') > 0 THEN '*' || substr(grants.project, instr(grants.project, '/')) ELSE '*' END)))
+  AND NOT EXISTS (SELECT 1 FROM json_each(?) j WHERE NOT EXISTS (SELECT 1 FROM json_each(COALESCE(${a}.scopes, '[]')) c WHERE c.value IN (j.value, '*')))`;
 // The grant's caller name is still held by the token with this hash (a generation of that name).
 const GEN = "EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.hash = ?)";
 
@@ -243,6 +249,7 @@ export class Grants {
       .bind(this.now().toISOString()).all<any>();
     for (const r of results) await this.close(parse(r), "expired", "system");
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
+    await this.catalog.revokeOutgrown(); // a delegate's tokens an interrupted narrowing left wider than it
     await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
     await this.closeOutsideCeilings(); // grants an interrupted narrowing left behind
     await this.closeOutsidePins(); // grants an interrupted repin left behind
@@ -370,12 +377,12 @@ export class Grants {
     const t = this.now().toISOString(), beyond = scopes.filter((s) => !autoApproved(s));
     const approved = beyond.filter((s) => allowedBy(ceiling, s));
     const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who, approved }, {
+      // The token, and the delegate that made it if any, must still be live and still reach the
+      // grant's project and scopes: a narrowing or revoke of either that lands first wins.
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
-        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND (? IS NULL OR t.hash = ?) AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
-          AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value IN (grants.project,
-            CASE WHEN instr(grants.project, '/') > 0 THEN '*' || substr(grants.project, instr(grants.project, '/')) ELSE '*' END)))
-          AND NOT EXISTS (SELECT 1 FROM json_each(?) j WHERE NOT EXISTS (SELECT 1 FROM json_each(COALESCE(t.scopes, '[]')) c WHERE c.value IN (j.value, '*'))))`,
-      binds: [row.rev, row.scope, row.name, row.rev, hash ?? null, hash ?? null, t, JSON.stringify(beyond)], store: { iv, ciphertext },
+        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND (? IS NULL OR t.hash = ?) AND ${holds("t")}
+          AND (t.parent IS NULL OR EXISTS (SELECT 1 FROM tokens p WHERE p.name = t.parent AND ${holds("p")})))`,
+      binds: [row.rev, row.scope, row.name, row.rev, hash ?? null, hash ?? null, t, JSON.stringify(beyond), t, JSON.stringify(beyond)], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
     if (!done) {
       await this.revokeChild(row, m.id, m.expires_at);
