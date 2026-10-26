@@ -135,9 +135,11 @@ export class Catalog {
 
   // Returns the token once; only its hash is stored. expiresAt (ISO time) is optional: without it the
   // token lives until revoked, as every token made before expiry existed does.
-  // `replaces`: the hash of the ended token (endedToken()) whose children were closed; only that one
-  // generation's row is taken over, so a token that ends after the check can't skip its cleanup.
-  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false, replaces: string | null = null): Promise<string> {
+  async createToken(...a: Parameters<Catalog["newToken"]>): Promise<string> { return (await this.newToken(...a)).token; }
+
+  // createToken, also naming the archived token when the name was free because its token had ended
+  // (see below), so the caller can end that token's grants at once.
+  async newToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false): Promise<{ token: string; archived: string | null }> {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     checkPin(projects);
     scopes = checkCeiling(scopes);
@@ -150,24 +152,25 @@ export class Catalog {
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
     const token = randomToken();
-    // A revoked or expired token's name is free again once its children are closed: the row takes
-    // the new token whole (hash, pin, scopes, writes, operator, expiry), so nothing of the old one
-    // carries over. A live name, or one that ended after that cleanup, is refused.
-    const r = await this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(name) DO UPDATE SET hash = excluded.hash, projects = excluded.projects, scopes = excluded.scopes, writes = excluded.writes,
-        operator = excluded.operator, created_at = excluded.created_at, expires_at = excluded.expires_at, revoked_at = NULL
-      WHERE tokens.hash = ? AND (tokens.revoked_at IS NOT NULL OR tokens.expires_at <= ?)`)
-      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires, replaces ?? "", this.clock().toISOString()).run();
-    if (!r.meta.changes) {
-      throw new Refused(409, await this.endedToken(name) ? `token ${name} ended while this ran; run it again` : `token ${name} is live; revoke it first (tumbler admin token revoke ${name}) or pick another name`);
+    const insert = this.db.prepare("INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires);
+    const ended = await this.db.prepare("SELECT hash FROM tokens WHERE name = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(name, this.clock().toISOString()).first<{ hash: string }>();
+    if (!ended) {
+      await insert.run().catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} is live; revoke it first (tumbler admin token revoke ${name}) or pick another name`) : e; });
+      return { token, archived: null };
     }
-    return token;
-  }
-
-  // The hash of the token by this name when it no longer works (revoked or expired), so creating it
-  // again can reuse the name; null when there is none or it is live.
-  async endedToken(name: string): Promise<string | null> {
-    return (await this.db.prepare("SELECT hash FROM tokens WHERE name = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(name, this.clock().toISOString()).first<{ hash: string }>())?.hash ?? null;
+    // An ended token's name is reused by moving that token, with every grant under its name, to an
+    // archived name in the same transaction as the insert: the new token starts with no grants and
+    // nothing of the old one, and the sweep still ends the old grants (their token reads ended).
+    // If the name isn't that ended token's any more (a concurrent create, a revive), the insert
+    // fails on the name and the whole batch, grant moves included, rolls back.
+    const archived = `${name}~${ended.hash.slice(0, 8)}`;
+    await this.db.batch([
+      this.db.prepare("UPDATE tokens SET name = ? WHERE name = ? AND hash = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(archived, name, ended.hash, this.clock().toISOString()),
+      insert,
+      this.db.prepare("UPDATE grants SET caller = ? WHERE caller = ?").bind(archived, name),
+    ]).catch((e: Error) => { throw /UNIQUE/.test(e.message) ? new Refused(409, `token ${name} changed while this ran; run it again`) : e; });
+    return { token, archived };
   }
 
   // Changes which projects a live token reads, so widening one never means minting a new token and

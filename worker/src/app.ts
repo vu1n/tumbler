@@ -349,9 +349,9 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
       // Reusing an ended token's name: its children end first, so none is left live under a name the
       // new token holds (the sweep closes them only while the token row reads revoked or expired).
-      const replaces = await catalog.endedToken(String(b.name ?? ""));
-      if (replaces) await grants?.closeCaller(String(b.name), who);
-      const token = await catalog.createToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true, replaces);
+      const { token, archived } = await catalog.newToken(String(b.name ?? ""), projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true);
+      // The old token's children stop now rather than at the next sweep.
+      if (archived) await grants?.closeCaller(archived, who);
       await catalog.audit(who, "token-create", null, [String(b.name)]);
       return json({ name: b.name, token }); // shown once
     }

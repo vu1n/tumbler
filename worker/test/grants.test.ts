@@ -463,11 +463,21 @@ test("a request by a token whose name is reused mid-mint gets nothing, and a tok
   assert.deepEqual(s.fake.revoked, ["id-1"]);
   assert.equal((await adminGrants(s)).filter((g: any) => g.state === "active").length, 0);
   assert.equal((await (await s.env(fresh)).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
-  // Live when checked (so no cleanup ran), expired by the write: refused, not replaced.
-  await s.catalog.createToken("brief", ["dev"], "2026-10-20T12:30:00.000Z");
-  assert.equal(await s.catalog.endedToken("brief"), null);
-  s.tick(60);
-  await assert.rejects(s.catalog.createToken("brief", ["dev"], null, null, null, false, null), /token brief ended while this ran/);
+  // Two creates of one ended name: the second finds the name taken by the first's new token, and
+  // that token's grants stay its own.
+  await s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com");
+  const batch = s.db.batch.bind(s.db);
+  let second: Response | null = null;
+  (s.db as any).batch = async (stmts: any) => {
+    (s.db as any).batch = batch;
+    second = await s.call("POST", "/admin/api/tokens", undefined, { name: "dev", projects: ["dev"] }, "vu@example.com");
+    return batch(stmts);
+  };
+  const first = await s.call("POST", "/admin/api/tokens", undefined, { name: "dev", projects: ["dev"] }, "vu@example.com");
+  assert.deepEqual([second!.status, first.status], [200, 409]);
+  const winner = (await second!.json()).token;
+  assert.equal((await (await s.env(winner)).json()).env.CLOUDFLARE_API_TOKEN, "child-3");
+  assert.equal((await adminGrants(s)).filter((g: any) => g.caller === "dev" && g.state === "active").length, 1);
 });
 
 test("a request by a token whose name is reused never gets the new token's child", async () => {
