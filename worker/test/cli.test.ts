@@ -452,3 +452,22 @@ test("url saves the broker's URL so TUMBLER_URL needn't be exported; without eit
   assert.equal(JSON.parse((await exec(CLI, ["whoami"], { env: noUrl })).stdout).name, "dev");
   assert.equal((await exec(CLI, ["url", "not a url"], { env: noUrl }).then(() => null, (e) => e)).code, 2);
 });
+
+test("a delegate token creates, lists and revokes its own tokens from the CLI", async () => {
+  const agentToken = (await adminCli(["token", "create", "agent", "--pin", "dev", "--writes", "dev", "--delegate", "on"])).stdout.trim();
+  const as = (args: string[]) => cliIn(["token", ...args], "", { TUMBLER_TOKEN: agentToken });
+  const stored = await as(["create", "vps-svc", "--pin", "dev", "--store", "VPS_SVC_TOKEN", "-p", "dev"]);
+  assert.equal(stored.code, 0, stored.stderr);
+  assert.equal(stored.stdout, "");
+  assert.match(stored.stderr, /stored it as VPS_SVC_TOKEN in dev; it was never shown/);
+  const shown = await as(["create", "vps-svc2", "--pin", "dev", "--expires-hours", "2"]);
+  assert.match(shown.stdout, /^tmb_\S+\n$/);
+  assert.equal((await cliIn(["keys"], "", { TUMBLER_TOKEN: shown.stdout.trim() })).code, 0);
+  assert.match((await as(["create", "wide", "--pin", "kypp"])).stderr, /beyond agent, so nothing was created/);
+  assert.match((await as(["list"])).stdout, /vps-svc\tdev[\s\S]*vps-svc2\tdev/);
+  assert.equal((await as(["revoke", "vps-svc2"])).code, 0);
+  assert.match((await cliIn(["keys"], "", { TUMBLER_TOKEN: shown.stdout.trim() })).stderr, /broker 401/);
+  assert.match((await cliIn(["token", "list"], "", { TUMBLER_TOKEN: devToken })).stderr, /not a delegate/);
+  const listed = JSON.parse((await adminCli(["tokens", "--json"])).stdout).find((t: any) => t.name === "vps-svc");
+  assert.deepEqual([listed.parent, listed.delegate], ["agent", false]);
+});

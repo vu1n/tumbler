@@ -848,3 +848,56 @@ test("cli: under the wrangler shim a deploy asks for workers:write itself; reads
   assert.match(r.stderr, /workers:write not granted .*running on the read token/);
   await s.catalog.setScopes("dev", ["workers:write"]);
 });
+
+test("a delegate creates tokens no wider than itself, which end when it narrows or is revoked", async () => {
+  const s = await setup();
+  const admin = (m: string, path: string, b?: unknown) => s.call(m, `/admin/api/${path}`, undefined, b, "vu@example.com");
+  const make = (b: unknown, token = s.dev) => s.call("POST", "/v1/tokens", token, b);
+  assert.match((await (await make({ name: "vps", projects: ["dev"] })).json()).error, /not a delegate.*--delegate on/);
+  assert.equal((await admin("PATCH", "tokens/dev", { delegate: true, writes: ["dev"] })).status, 200);
+  // Anything beyond the delegate is refused whole, and nothing is created.
+  for (const b of [{ projects: ["kypp"] }, { projects: ["*"] }, { scopes: ["*"] }, { scopes: ["pages:write"] }, { writes: ["global"] }, { operator: true, projects: ["kypp"] }]) {
+    const r = await make({ name: "wide", ...b });
+    assert.equal(r.status, 403, JSON.stringify(b));
+    assert.match((await r.json()).error, /beyond dev, so nothing was created/);
+  }
+  assert.equal((await make({ name: "wide", expires_hours: 24 * 91 })).status, 400);
+  assert.equal((await make({ name: "wide", projects: ["dev"], store: { scope: "global", name: "WIDE" } })).status, 403);
+  assert.equal(await s.catalog.tokenRow("wide"), null);
+  // Within it: shown once, expiring in 30 days, never an operator or delegate.
+  const r = await make({ name: "vps", projects: ["dev"], scopes: ["workers:write"], writes: ["dev"] });
+  assert.equal(r.status, 200);
+  const made = await r.json();
+  assert.equal(made.expires_at, "2026-11-19T12:00:00.000Z");
+  const who = await (await s.call("GET", "/v1/whoami", made.token)).json();
+  assert.deepEqual([who.parent, who.operator, who.delegate, who.writes], ["dev", false, false, ["dev"]]);
+  assert.equal((await (await s.env(made.token)).json()).env.CLOUDFLARE_API_TOKEN, "child-1");
+  // Stored straight into a key the delegate writes, never shown.
+  const stored = await (await make({ name: "vps2", projects: ["dev"], store: { scope: "dev", name: "VPS2_TOKEN" } })).json();
+  assert.deepEqual([stored.token, stored.stored], [undefined, { scope: "dev", name: "VPS2_TOKEN" }]);
+  assert.equal((await s.call("GET", "/v1/whoami", await s.catalog.value((await s.catalog.keyRow("dev", "VPS2_TOKEN"))!))).status, 200);
+  // A name another token holds is never taken over, and a delegate revokes only its own.
+  assert.equal((await make({ name: "other" })).status, 409);
+  assert.equal((await s.call("DELETE", "/v1/tokens/other", s.dev)).status, 404);
+  assert.deepEqual((await (await s.call("GET", "/v1/tokens", s.dev)).json()).tokens.map((t: any) => t.name), ["vps", "vps2"]);
+  // Narrowing the delegate ends what no longer fits: vps held workers:write, vps2 reads only.
+  const narrowed = await (await admin("PATCH", "tokens/dev", { scopes: [] })).json();
+  assert.deepEqual(narrowed.ended, ["vps"]);
+  assert.equal((await s.call("GET", "/v1/whoami", made.token)).status, 401);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  // Revoking the delegate ends the rest; and a parent revoked in its row alone already stops them.
+  const vps3 = (await (await make({ name: "vps3", projects: ["dev"] })).json()).token;
+  s.db.raw.prepare("UPDATE tokens SET revoked_at = '2026-10-20T12:00:00Z' WHERE name = 'dev'").run();
+  assert.equal((await s.call("GET", "/v1/whoami", vps3)).status, 401);
+  s.db.raw.prepare("UPDATE tokens SET revoked_at = NULL WHERE name = 'dev'").run();
+  assert.equal((await admin("DELETE", "tokens/dev")).status, 200);
+  assert.ok((await s.catalog.tokens("dev")).every((t) => t.revoked_at));
+});
+
+test("a delegate's token never outlives it", async () => {
+  const s = await setup();
+  const until = "2026-10-21T12:00:00.000Z";
+  const brief = await s.catalog.createToken("brief", ["dev"], until, null, null, false, { delegate: true });
+  const made = await (await s.call("POST", "/v1/tokens", brief, { name: "short", projects: ["dev"] })).json();
+  assert.equal(made.expires_at, until);
+});
