@@ -96,7 +96,9 @@ export function writeReaches(writes: string[] | null | undefined, scope: string)
 // child is minted at once; outside it the request is refused. null: reads only.
 // `writes`: the scopes `tumbler put` may save static keys in (checkWrites). null: writes nothing.
 // `operator`: may add or remove permission groups on the minted keys it reads (`tumbler scope`).
-export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; expires_at?: string | null }
+// `hash`: which credential authenticated, so a mint that lands after the name was reused by a new
+// token is refused (the name alone would pass).
+export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; expires_at?: string | null; hash?: string }
 export interface KeyRow {
   scope: string; name: string; kind: string; config: string; description: string; owner: string;
   created_at: string; rotated_at: string; expires_at: string | null; checked: number;
@@ -124,15 +126,18 @@ export class Catalog {
   async caller(token: string): Promise<Caller | null> {
     // Why here and not only in the sweep: an expired token must stop at its expiry, not up to one
     // sweep later. The sweep then ends the grants it still holds.
+    const hash = await sha256hex(token);
     const row = await this.db.prepare("SELECT name, projects, scopes, writes, operator, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
-      .bind(await sha256hex(token), this.clock().toISOString()).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; expires_at: string | null }>();
+      .bind(hash, this.clock().toISOString()).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; expires_at: string | null }>();
     return row ? { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects),
-      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, expires_at: row.expires_at } : null;
+      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, expires_at: row.expires_at, hash } : null;
   }
 
   // Returns the token once; only its hash is stored. expiresAt (ISO time) is optional: without it the
   // token lives until revoked, as every token made before expiry existed does.
-  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false): Promise<string> {
+  // `replaces`: the hash of the ended token (endedToken()) whose children were closed; only that one
+  // generation's row is taken over, so a token that ends after the check can't skip its cleanup.
+  async createToken(name: string, projects: string[] | null, expiresAt: string | null = null, scopes: string[] | null = null, writes: string[] | null = null, operator = false, replaces: string | null = null): Promise<string> {
     if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw new Refused(400, `invalid token name: ${name}`);
     checkPin(projects);
     scopes = checkCeiling(scopes);
@@ -145,21 +150,24 @@ export class Catalog {
       expires = new Date(t).toISOString(); // one format, so the SQL string comparison is a time comparison
     }
     const token = randomToken();
-    // A revoked or expired token's name is free again: the row takes the new token whole (hash, pin,
-    // scopes, writes, operator, expiry), so nothing of the old one carries over. A live name is refused.
+    // A revoked or expired token's name is free again once its children are closed: the row takes
+    // the new token whole (hash, pin, scopes, writes, operator, expiry), so nothing of the old one
+    // carries over. A live name, or one that ended after that cleanup, is refused.
     const r = await this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET hash = excluded.hash, projects = excluded.projects, scopes = excluded.scopes, writes = excluded.writes,
         operator = excluded.operator, created_at = excluded.created_at, expires_at = excluded.expires_at, revoked_at = NULL
-      WHERE tokens.revoked_at IS NOT NULL OR tokens.expires_at <= ?`)
-      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires, this.clock().toISOString()).run();
-    if (!r.meta.changes) throw new Refused(409, `token ${name} is live; revoke it first (tumbler admin token revoke ${name}) or pick another name`);
+      WHERE tokens.hash = ? AND (tokens.revoked_at IS NOT NULL OR tokens.expires_at <= ?)`)
+      .bind(name, await sha256hex(token), projects === null ? null : JSON.stringify(projects), asJson(scopes), asJson(writes), operator ? 1 : 0, now(), expires, replaces ?? "", this.clock().toISOString()).run();
+    if (!r.meta.changes) {
+      throw new Refused(409, await this.endedToken(name) ? `token ${name} ended while this ran; run it again` : `token ${name} is live; revoke it first (tumbler admin token revoke ${name}) or pick another name`);
+    }
     return token;
   }
 
-  // True when a token by this name exists and no longer works (revoked or expired), so creating it
-  // again reuses the name.
-  async tokenEnded(name: string): Promise<boolean> {
-    return !!await this.db.prepare("SELECT 1 FROM tokens WHERE name = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(name, this.clock().toISOString()).first();
+  // The hash of the token by this name when it no longer works (revoked or expired), so creating it
+  // again can reuse the name; null when there is none or it is live.
+  async endedToken(name: string): Promise<string | null> {
+    return (await this.db.prepare("SELECT hash FROM tokens WHERE name = ? AND (revoked_at IS NOT NULL OR expires_at <= ?)").bind(name, this.clock().toISOString()).first<{ hash: string }>())?.hash ?? null;
   }
 
   // Changes which projects a live token reads, so widening one never means minting a new token and

@@ -448,6 +448,28 @@ test("an ended token's name is reused: the new token starts clean and the old on
   assert.equal((await s.call("POST", "/admin/api/tokens", undefined, { name: "brief" }, "vu@example.com")).status, 200);
 });
 
+test("a request by a token whose name is reused mid-mint gets nothing, and a token that ends after the check isn't replaced", async () => {
+  const s = await setup();
+  // The old token authenticated, then pauses before its grant exists, so the revoke has nothing to close.
+  const open = s.grants.open.bind(s.grants);
+  let fresh = "";
+  s.grants.open = async (...a: Parameters<typeof open>) => {
+    s.grants.open = open;
+    await s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com");
+    fresh = (await (await s.call("POST", "/admin/api/tokens", undefined, { name: "dev", projects: ["dev"], scopes: ["workers:write"] }, "vu@example.com")).json()).token;
+    return open(...a);
+  };
+  assert.equal((await s.env()).status, 409);
+  assert.deepEqual(s.fake.revoked, ["id-1"]);
+  assert.equal((await adminGrants(s)).filter((g: any) => g.state === "active").length, 0);
+  assert.equal((await (await s.env(fresh)).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
+  // Live when checked (so no cleanup ran), expired by the write: refused, not replaced.
+  await s.catalog.createToken("brief", ["dev"], "2026-10-20T12:30:00.000Z");
+  assert.equal(await s.catalog.endedToken("brief"), null);
+  s.tick(60);
+  await assert.rejects(s.catalog.createToken("brief", ["dev"], null, null, null, false, null), /token brief ended while this ran/);
+});
+
 test("a caller token revoked while its first request mints gets nothing", async () => {
   const s = await setup();
   const fresh = await s.catalog.createToken("fresh", ["dev"]);

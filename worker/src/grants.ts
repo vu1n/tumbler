@@ -150,7 +150,7 @@ export class Grants {
     if (g.requested) g = await this.apply(g, { type: "lapse", who: "system" }) ?? g;
     const want = union(g.scopes.filter((s) => allowedBy(caller.scopes ?? null, s)), scopes);
     if (!g.requested && want.length === g.scopes.length && want.every((s) => g!.scopes.includes(s))) return g;
-    const done = await this.mintFor(g, row, want, "policy", caller.scopes ?? null);
+    const done = await this.mintFor(g, row, want, "policy", caller.scopes ?? null, caller.hash);
     await this.catalog.audit(caller.name, "grant-step-up", project, [`${row.name}:${want.join("+")}`]);
     return done;
   }
@@ -321,14 +321,19 @@ export class Grants {
       await this.apply(g, { type: "abandon", who: "system" });
       throw err;
     }
-    await this.store(g, row, minted, scopes, "policy", caller.scopes ?? null);
+    // A refused landing (a revoke, a reused name, a narrowed pin) frees the slot too, or the next
+    // request would wait out the abandoned-claim window behind it.
+    try { await this.store(g, row, minted, scopes, "policy", caller.scopes ?? null, caller.hash); } catch (err) {
+      await this.apply(g, { type: "abandon", who: "system" });
+      throw err;
+    }
     await this.catalog.audit(caller.name, "grant-mint", project, [`${row.name}:${scopes.join("+")}`]);
     return (await this.get(id))!;
   }
 
-  async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string, ceiling: string[] | null): Promise<GrantRow> {
+  async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string, ceiling: string[] | null, hash?: string): Promise<GrantRow> {
     const minted = await this.mint(row, g, scopes), old = g.child_id;
-    await this.store(g, row, minted, scopes, who, ceiling);
+    await this.store(g, row, minted, scopes, who, ceiling, hash);
     if (old) await this.revokeChild(row, old, g.expires_at);
     await this.catalog.audit(g.caller, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`]);
     return (await this.get(g.id))!;
@@ -353,17 +358,19 @@ export class Grants {
   // The json_each test is pinReaches() in SQL: the scope itself, or `*` / `*/<env>` for it.
   // `ceiling`: the caller token's scopes as read before minting. Every scope beyond reads must still
   // be among the token's scopes when the child lands, so narrowing them mid-mint wins like a revoke.
-  async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string, ceiling: string[] | null) {
+  // `hash`: the credential that asked; the name's token must still be that one, or a request by a
+  // revoked token whose name was reused would land a child for the new token.
+  async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string, ceiling: string[] | null, hash?: string) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(g.id), row.name, m.value);
     const t = this.now().toISOString(), beyond = scopes.filter((s) => !autoApproved(s));
     const approved = beyond.filter((s) => allowedBy(ceiling, s));
     const done = await this.apply(g, { type: "mint", scopes, child_id: m.id, expires_at: m.expires_at, who, approved }, {
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
-        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
+        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND (? IS NULL OR t.hash = ?) AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
           AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(t.projects) WHERE json_each.value IN (grants.project,
             CASE WHEN instr(grants.project, '/') > 0 THEN '*' || substr(grants.project, instr(grants.project, '/')) ELSE '*' END)))
           AND NOT EXISTS (SELECT 1 FROM json_each(?) j WHERE NOT EXISTS (SELECT 1 FROM json_each(COALESCE(t.scopes, '[]')) c WHERE c.value IN (j.value, '*'))))`,
-      binds: [row.rev, row.scope, row.name, row.rev, t, JSON.stringify(beyond)], store: { iv, ciphertext },
+      binds: [row.rev, row.scope, row.name, row.rev, hash ?? null, hash ?? null, t, JSON.stringify(beyond)], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
     if (!done) {
       await this.revokeChild(row, m.id, m.expires_at);
