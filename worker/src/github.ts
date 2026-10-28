@@ -27,10 +27,10 @@ export const OPTIONAL_DEFAULTS: Record<string, string[]> = {
   "repo:read": ["pull_requests:read", "issues:read", "actions:read", "checks:read", "statuses:read"],
 };
 
-// Permissions an operator may never add (`tumbler scope add`): a child holding one could change who
-// has access, read or set secrets, or rewrite the workflows that hold them.
-// Matched on any spelling GitHub uses (`variables`, `actions_variables`, `dependabot_secrets`, ...).
-const UNDELEGABLE = /^(administration|members|organization_[a-z_]+|[a-z_]*secrets|[a-z_]*variables|environments|workflows|repository_hooks):/;
+// The only permissions an operator may add (`tumbler scope add`); every other one stays with an
+// admin. An allowlist because a denylist misses new or oddly named ones: secret_scanning_alerts
+// returns the leaked credentials themselves, `variables` steers workflows.
+const DELEGABLE = /^(actions|checks|contents|deployments|discussions|issues|metadata|packages|pages|pull_requests|repository_projects|statuses):/;
 
 const b64url = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const der = (tag: number, body: Uint8Array) => {
@@ -163,8 +163,8 @@ export function github(fetcher: typeof fetch = fetch): Provider {
       for (const [s, groups] of Object.entries(config.defaults === true ? {} : config.scopes ?? {})) check("config.scopes", s, groups);
       for (const [s, groups] of Object.entries(config.extra ?? {})) {
         check("config.extra", s, groups);
-        const bad = groups.filter((g) => UNDELEGABLE.test(g));
-        if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (administration, members, organization, secrets, variables, environments, workflows and hooks stay with an admin)`);
+        const bad = groups.filter((g) => !DELEGABLE.test(g));
+        if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (only actions, checks, contents, deployments, discussions, issues, metadata, packages, pages, pull_requests, repository_projects and statuses can)`);
       }
     },
     async mint(parent, config, scopes, _expiresAt, _label) {
@@ -194,8 +194,8 @@ export function github(fetcher: typeof fetch = fetch): Provider {
       const lower = names.map((n) => n.trim().toLowerCase());
       const bad = lower.filter((n) => !GROUP.test(n));
       if (bad.length) throw new Refused(400, `${bad.join(", ")}: name a permission as name:read or name:write (contents:read)`);
-      const held = lower.filter((n) => UNDELEGABLE.test(n));
-      if (held.length) throw new Refused(403, `${held.join(", ")} can't be added from the CLI: a child with it could change access, secrets or workflows. An admin adds it to the key's config`);
+      const held = lower.filter((n) => !DELEGABLE.test(n));
+      if (held.length) throw new Refused(403, `${held.join(", ")} can't be added from the CLI: only repository content, PR, issue and CI permissions can; an admin adds others to the key's config`);
       lacking(await installed(parent, config), lower);
       return lower;
     },
@@ -203,7 +203,7 @@ export function github(fetcher: typeof fetch = fetch): Provider {
     async listGroups(parent, config): Promise<GroupInfo[]> {
       const perms = await installed(parent, config);
       return Object.entries(perms).flatMap(([p, level]) => ["read", "write"].filter((l) => LEVEL[l] <= (LEVEL[level] ?? 0)).map((l) => `${p}:${l}`))
-        .map((name) => ({ name, scopes: ["installation"], delegable: !UNDELEGABLE.test(name) })).sort((a, b) => a.name.localeCompare(b.name));
+        .map((name) => ({ name, scopes: ["installation"], delegable: DELEGABLE.test(name) })).sort((a, b) => a.name.localeCompare(b.name));
     },
     // Before a parent is saved: GitHub must accept the App's JWT for this installation.
     async verify(parent, config) {

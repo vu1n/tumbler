@@ -94,7 +94,7 @@ test("github provider: validate keeps reads on :read scopes, an hour's TTL and r
   assert.throws(() => p.validate({ ...CONFIG, ttl_minutes: 120 }), /at most 60/);
   assert.throws(() => p.validate({ ...CONFIG, repositories: ["vu1n/pillbox"] }), /repository names/);
   assert.throws(() => p.validate({ ...CONFIG, installation_id: "x" }), /installation_id/);
-  for (const g of ["secrets:write", "variables:write", "variables:read", "actions_variables:write", "organization_secrets:read", "workflows:write"]) {
+  for (const g of ["secrets:write", "variables:write", "variables:read", "actions_variables:write", "organization_secrets:read", "workflows:write", "secret_scanning_alerts:read", "administration:read"]) {
     assert.throws(() => p.validate({ ...CONFIG, extra: { "repo:write": [g] } }), /can't be added from the CLI/, g);
   }
 });

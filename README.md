@@ -368,8 +368,9 @@ To choose, give a config. Permissions are `<name>:read` or `<name>:write`, GitHu
 ```
 
 A `:read` scope holds reads only, since every token gets it. `ttl_minutes` is at most 60. An operator
-token adds permissions the installation has with `tumbler scope add`, never administration, members,
-organization, secrets, variables, environments, workflows or hooks. Revoking a grant stops handing
+token adds permissions the installation has with `tumbler scope add`, only repository content, PR,
+issue, CI, deployment, package and pages ones; secrets, variables, secret scanning, workflows,
+administration and the rest stay with an admin's config. Revoking a grant stops handing
 its token out at once, but GitHub revokes an installation token only when called with that token,
 so it keeps working until its own expiry, within the hour.
 
