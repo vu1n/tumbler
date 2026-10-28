@@ -18,7 +18,8 @@ export const errorClass = (e: unknown) => e instanceof Error && KNOWN_ERRORS.has
 
 export { autoApproved };
 
-export interface Minted { id: string; value: string }
+// `expires_at`: when the provider says the child dies, for a provider that sets its own lifetime.
+export interface Minted { id: string; value: string; expires_at?: string }
 // `extra`: permission groups an operator token added on top of `scopes` (`tumbler scope add`), by
 // the provider's names; a scope only there is a new scope. The admin's `scopes` stay the base.
 export interface MintConfig { ttl_minutes?: number; start?: string[]; scopes?: Record<string, unknown>; extra?: Record<string, string[]>; [k: string]: unknown }
@@ -27,9 +28,13 @@ export const scopeNames = (config: MintConfig) => [...new Set([...Object.keys(co
 export interface Provider {
   validate(config: MintConfig): void;
   mint(parent: string, config: MintConfig, scopes: string[], expiresAt: Date, label: string): Promise<Minted>;
-  revoke(parent: string, config: MintConfig, childId: string): Promise<void>;
+  // `child`: the credential itself, when tumbler still holds it, for a provider that revokes with it.
+  revoke(parent: string, config: MintConfig, childId: string, child?: string): Promise<void>;
   // Whether a parent works, before it is saved (verify.ts). Optional: without it a key saves unchecked.
   verify?(parent: string, config: MintConfig): Promise<Outcome>;
+  // The parent as it is stored, from what an admin pasted (a PEM key becomes one printable line).
+  // Optional: without it the pasted value is stored as is.
+  canonical?(value: string): string;
   // Completes a config before a new parent is saved, so pasting only the parent is enough: fills
   // defaults (`setting` reads a static key the admin saved, such as the account id) and resolves
   // anything named for people into the ids the provider needs.
@@ -84,6 +89,11 @@ export class Grants {
     const p = kind.startsWith("mint:") ? this.providers[kind.slice(5)] : undefined;
     if (!p) throw new Refused(400, `unknown key kind: ${kind}`);
     return p;
+  }
+
+  canonical(kind: string, value: string) {
+    const p = this.provider(kind);
+    return p.canonical ? p.canonical(value) : value;
   }
 
   async prepare(kind: string, parent: string, config: MintConfig, setting: (name: string) => Promise<string | undefined>) {
@@ -344,9 +354,12 @@ export class Grants {
   }
 
   async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string, ceiling: string[] | null, hash?: string): Promise<GrantRow> {
-    const minted = await this.mint(row, g, scopes), old = g.child_id;
+    const old = g.child_id;
+    // Read before store() overwrites it: a provider may revoke the old child only with the child itself.
+    const was = old ? await this.child(g).catch(() => undefined) : undefined;
+    const minted = await this.mint(row, g, scopes);
     await this.store(g, row, minted, scopes, who, ceiling, hash);
-    if (old) await this.revokeChild(row, old, g.expires_at);
+    if (old) await this.revokeChild(row, old, g.expires_at, was === undefined ? undefined : { grant: g.id, value: was });
     await this.catalog.audit(g.caller, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`]);
     return (await this.get(g.id))!;
   }
@@ -356,7 +369,9 @@ export class Grants {
     const expires = new Date(this.now().getTime() + ttl * 60_000);
     const parent = await this.parent(row);
     const minted = await this.provider(row.kind).mint(parent, config, scopes, expires, `tumbler ${g.id} ${g.caller}`);
-    return { ...minted, expires_at: expires.toISOString() };
+    // The provider's own expiry wins: the grant, and any queued revoke, must last as long as the child does.
+    const own = minted.expires_at && Date.parse(minted.expires_at);
+    return { ...minted, expires_at: own && own > this.now().getTime() ? new Date(own).toISOString() : expires.toISOString() };
   }
 
   // The new child lands only if the grant is still in the state `g` was read in: still live, holding
@@ -383,9 +398,9 @@ export class Grants {
         AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND (? IS NULL OR t.hash = ?) AND ${holds("t")}
           AND (t.parent IS NULL OR EXISTS (SELECT 1 FROM tokens p WHERE p.name = t.parent AND ${holds("p")})))`,
       binds: [row.rev, row.scope, row.name, row.rev, hash ?? null, hash ?? null, t, JSON.stringify(beyond), t, JSON.stringify(beyond)], store: { iv, ciphertext },
-    }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at); throw e; });
+    }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at, { grant: g.id, value: m.value }); throw e; });
     if (!done) {
-      await this.revokeChild(row, m.id, m.expires_at);
+      await this.revokeChild(row, m.id, m.expires_at, { grant: g.id, value: m.value });
       throw new Refused(409, `grant ${g.id} changed while minting; run again`);
     }
   }
@@ -414,20 +429,32 @@ export class Grants {
   }
 
   // A failed delete is queued, never swallowed: sweep() retries it, and /admin shows the backlog.
-  async revokeChild(row: KeyRow, childId: string, expiresAt: string | null = null) {
+  // `held`: the child itself when the caller has it; otherwise the sealed copy its queue row kept.
+  // A queued child stays sealed until its delete succeeds, so a retry can still revoke with it.
+  async revokeChild(row: KeyRow, childId: string, expiresAt: string | null = null, held?: { grant: string; value: string }) {
     try {
-      await this.provider(row.kind).revoke(await this.parent(row), this.config(row), childId);
+      const value = held?.value ?? await this.queuedChild(childId, row.name);
+      await this.provider(row.kind).revoke(await this.parent(row), this.config(row), childId, value);
       await this.db.prepare("DELETE FROM pending_revokes WHERE child_id = ?").bind(childId).run();
       return true;
     } catch (e) {
       // The class only, never the message: a provider error can quote the parent it was sent.
       console.error("tumbler: revoke failed, queued for retry", row.name, errorClass(e));
+      const sealed = held ? await seal(this.catalog.key, grantScope(held.grant), row.name, held.value) : null;
       await this.db.prepare(
-        `INSERT INTO pending_revokes (child_id, key_scope, name, key_rev, expires_at, last_at) VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT (child_id) DO UPDATE SET attempts = attempts + 1, last_at = excluded.last_at`,
-      ).bind(childId, row.scope, row.name, row.rev, expiresAt, this.now().toISOString()).run();
+        `INSERT INTO pending_revokes (child_id, key_scope, name, key_rev, expires_at, last_at, grant_id, iv, ciphertext) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (child_id) DO UPDATE SET attempts = attempts + 1, last_at = excluded.last_at,
+           grant_id = COALESCE(pending_revokes.grant_id, excluded.grant_id), iv = COALESCE(pending_revokes.iv, excluded.iv),
+           ciphertext = COALESCE(pending_revokes.ciphertext, excluded.ciphertext)`,
+      ).bind(childId, row.scope, row.name, row.rev, expiresAt, this.now().toISOString(), held?.grant ?? null, sealed?.iv ?? null, sealed?.ciphertext ?? null).run();
       return false;
     }
+  }
+
+  // The sealed child a queued delete kept, if any.
+  async queuedChild(childId: string, name: string): Promise<string | undefined> {
+    const r = await this.db.prepare("SELECT grant_id, iv, ciphertext FROM pending_revokes WHERE child_id = ?").bind(childId).first<any>();
+    return r?.iv && r.grant_id ? open(this.catalog.key, grantScope(r.grant_id), name, bytes(r.iv), bytes(r.ciphertext)) : undefined;
   }
 
   // Retry queued deletes. A child past its expiry is dead at the provider anyway, so it leaves the queue.
@@ -494,8 +521,8 @@ export class Grants {
     // Ending a live grant records its child's delete in the same write, so a crash before the
     // provider call still leaves it for sweep() to retry; revokeChild() clears the row on success.
     const intent = extra.live ? [this.db.prepare(
-      `INSERT INTO pending_revokes (child_id, key_scope, name, key_rev, expires_at, attempts, last_at)
-        SELECT child_id, key_scope, name, key_rev, expires_at, 0, ? FROM grants WHERE ${where} AND child_id IS NOT NULL
+      `INSERT INTO pending_revokes (child_id, key_scope, name, key_rev, expires_at, attempts, last_at, grant_id, iv, ciphertext)
+        SELECT child_id, key_scope, name, key_rev, expires_at, 0, ?, id, iv, ciphertext FROM grants WHERE ${where} AND child_id IS NOT NULL
         ON CONFLICT (child_id) DO NOTHING`).bind(t, ...binds)] : [];
     const r = (await this.db.batch([
       ...intent,

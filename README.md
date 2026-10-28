@@ -344,6 +344,36 @@ writes or a key's parent. A change ends the children holding the old groups, so 
 with the new ones, and it's audited (`mint-scope`). A new scope name makes a new scope, which a
 token can hold only if its own scopes allow it.
 
+## Minted keys (`mint:github`)
+
+A key of kind `mint:github` holds a **GitHub App's private key**, and every caller gets an
+installation token: only the permissions its scopes name, only the repos the App is installed on
+(or the ones `repositories` names), for an hour at most. GitHub can't mint fine-grained PATs by API;
+an App can mint these.
+
+Set one up once:
+1. Create a GitHub App with the read permissions you want to hand out (at least Contents: read) and
+   install it on the repos it may reach. Download its private key.
+2. `tumbler admin put GITHUB_APP_ID --scope global` with the App's id.
+3. `tumbler admin put GH_TOKEN --scope global --kind mint:github --from-file app.private-key.pem`.
+   Just the key: the broker finds the installation (`"owner": "LOGIN"` picks one when there are
+   several) and callers get `repo:read` (contents and metadata, plus pull requests, issues, Actions,
+   checks and statuses read where the App has them).
+
+To choose, give a config. Permissions are `<name>:read` or `<name>:write`, GitHub's names:
+
+```json
+{ "start": ["repo:read"], "repositories": ["pillbox", "kypp"],
+  "scopes": { "repo:read": ["contents:read", "metadata:read"], "pr:write": ["pull_requests:write"] } }
+```
+
+A `:read` scope holds reads only, since every token gets it. A token lives the hour GitHub gives it (`ttl_minutes` is 60 or left out). An operator
+token adds permissions the installation has with `tumbler scope add`, only repository content, PR,
+issue, CI, deployment, package and pages ones; secrets, variables, secret scanning, workflows,
+administration and the rest stay with an admin's config. GitHub revokes an installation token
+only when called with that token, so a revoke uses the sealed child; a queued retry keeps it sealed
+until GitHub takes the delete or the token expires.
+
 Other providers plug in as a `Provider` (`mint`, `revoke`, `validate` and optionally `verify` in
 `worker/src/grants.ts`). The state machine is the same for each. It lives in `worker/src/machine.ts`
 as one pure function, `transition(grant, event)`. Every change is written along with its event in
@@ -368,7 +398,7 @@ Every read and change is audited by key name, never by value.
 
 ## Not in this slice
 
-Providers beyond Cloudflare (AWS STS, GitHub App tokens, OpenRouter, Tailscale).
+Providers beyond Cloudflare and GitHub (AWS STS, OpenRouter, Tailscale).
 
 ## Develop
 
