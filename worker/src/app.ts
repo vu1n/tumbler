@@ -372,9 +372,10 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         const kind = b.kind ? String(b.kind) : undefined, config = b.config && typeof b.config === "object" ? b.config : undefined;
         const prev = await catalog.keyRow(scope, name), effective = kind ?? prev?.kind ?? "static";
         let cfg = config ?? JSON.parse(prev?.config || "{}");
-        const value = String(b.value ?? "");
+        let value = String(b.value ?? "");
         if (effective !== "static") {
           if (!grants) return json({ error: "minting is off" }, 501);
+          if (value) value = grants.canonical(effective, value);
           // A static key the admin saved, read here and never returned: the nearest of the scope's chain.
           const setting = async (n: string) => {
             const row = await catalog.nearest(scope === GLOBAL ? null : scope, n);

@@ -30,6 +30,9 @@ export interface Provider {
   revoke(parent: string, config: MintConfig, childId: string): Promise<void>;
   // Whether a parent works, before it is saved (verify.ts). Optional: without it a key saves unchecked.
   verify?(parent: string, config: MintConfig): Promise<Outcome>;
+  // The parent as it is stored, from what an admin pasted (a PEM key becomes one printable line).
+  // Optional: without it the pasted value is stored as is.
+  canonical?(value: string): string;
   // Completes a config before a new parent is saved, so pasting only the parent is enough: fills
   // defaults (`setting` reads a static key the admin saved, such as the account id) and resolves
   // anything named for people into the ids the provider needs.
@@ -84,6 +87,11 @@ export class Grants {
     const p = kind.startsWith("mint:") ? this.providers[kind.slice(5)] : undefined;
     if (!p) throw new Refused(400, `unknown key kind: ${kind}`);
     return p;
+  }
+
+  canonical(kind: string, value: string) {
+    const p = this.provider(kind);
+    return p.canonical ? p.canonical(value) : value;
   }
 
   async prepare(kind: string, parent: string, config: MintConfig, setting: (name: string) => Promise<string | undefined>) {
