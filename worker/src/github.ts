@@ -17,6 +17,7 @@ const APP = /^([1-9][0-9]{0,11}|Iv[0-9A-Za-z.]{8,40})$/, GROUP = /^[a-z_]{1,64}:
 const LEVEL: Record<string, number> = { read: 1, write: 2, admin: 3 };
 // GitHub mints installation tokens for an hour, whatever tumbler asks.
 export const GITHUB_TTL_MIN = 60;
+const INSTALL_PAGES = 20;
 
 // Read is granted on request (machine.ts autoApproved). Required: a save fails if the App lacks one.
 export const DEFAULT_SCOPES: Record<string, string[]> = { "repo:read": ["contents:read", "metadata:read"] };
@@ -28,7 +29,8 @@ export const OPTIONAL_DEFAULTS: Record<string, string[]> = {
 
 // Permissions an operator may never add (`tumbler scope add`): a child holding one could change who
 // has access, read or set secrets, or rewrite the workflows that hold them.
-const UNDELEGABLE = /^(administration|members|organization_[a-z_]+|secrets|dependabot_secrets|codespaces_secrets|actions_variables|environments|workflows|repository_hooks):/;
+// Matched on any spelling GitHub uses (`variables`, `actions_variables`, `dependabot_secrets`, ...).
+const UNDELEGABLE = /^(administration|members|organization_[a-z_]+|[a-z_]*secrets|[a-z_]*variables|environments|workflows|repository_hooks):/;
 
 const b64url = (b: Uint8Array) => btoa(String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 const der = (tag: number, body: Uint8Array) => {
@@ -109,11 +111,18 @@ export function github(fetcher: typeof fetch = fetch): Provider {
       }
       if (!APP.test(String(c.app_id))) throw new Refused(400, "config.app_id must be the App's numeric id or client id");
       if (c.installation_id === undefined || c.installation_id === "") {
-        const list = await call("GET", "/app/installations?per_page=100", await jwt(parent, c)).catch((e) => {
-          if (e.ghStatus === 401) throw new Refused(400, "GitHub refused this App key (401); paste the private key of the App in config.app_id");
-          throw e;
-        }) as { id: number; account?: { login?: string } }[];
-        const all = Array.isArray(list) ? list : [];
+        const token = await jwt(parent, c), all: { id: number; account?: { login?: string } }[] = [];
+        // Every page, so an owner past the first hundred installations is still found.
+        for (let page = 1; page <= INSTALL_PAGES; page++) {
+          const list = await call("GET", `/app/installations?per_page=100&page=${page}`, token).catch((e) => {
+            if (e.ghStatus === 401) throw new Refused(400, "GitHub refused this App key (401); paste the private key of the App in config.app_id");
+            throw e;
+          });
+          if (!Array.isArray(list)) break;
+          all.push(...list);
+          if (list.length < 100) break;
+          if (page === INSTALL_PAGES) throw new Refused(400, `the App has over ${INSTALL_PAGES * 100} installations; set config.installation_id`);
+        }
         const owner = typeof c.owner === "string" ? c.owner.toLowerCase() : null;
         const hits = owner ? all.filter((i) => i.account?.login?.toLowerCase() === owner) : all;
         if (hits.length !== 1) {

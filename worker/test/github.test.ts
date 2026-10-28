@@ -25,7 +25,12 @@ function fakeGitHub(perms: Record<string, string> = { contents: "read", metadata
     if (!ok) return new Response("{}", { status: 401 });
     const path = new URL(url).pathname + new URL(url).search, body = init.body ? JSON.parse(String(init.body)) : null;
     calls.push({ method: init.method ?? "GET", path, body, iss: JSON.parse(Buffer.from(p, "base64url").toString()).iss });
-    if (path.startsWith("/app/installations?")) return Response.json([{ id: 77, account: { login: "vu1n" } }]);
+    if (path.startsWith("/app/installations?")) {
+      // 150 installations: vu1n is on the second page.
+      const all = [...Array.from({ length: 149 }, (_, i) => ({ id: 1000 + i, account: { login: `other${i}` } })), { id: 77, account: { login: "vu1n" } }];
+      const page = Number(new URL(url).searchParams.get("page") ?? 1);
+      return Response.json(all.slice((page - 1) * 100, page * 100));
+    }
     if (path === "/app/installations/77") return Response.json({ id: 77, permissions: perms });
     if (path === "/app/installations/77/access_tokens") {
       if (Object.entries(body.permissions).some(([k]) => !(k in perms))) return new Response('{"message":"bad"}', { status: 422 });
@@ -46,11 +51,12 @@ test("github key: a PKCS#1 or PKCS#8 PEM is stored as one printable line, the sa
 
 test("github provider: prepare finds the installation and takes the read defaults", async () => {
   const gh = fakeGitHub(), p = github(gh.fetcher);
-  const c = await p.prepare!(PARENT, {}, async (n) => n === "GITHUB_APP_ID" ? "123456" : undefined);
-  assert.deepEqual(c, { app_id: "123456", installation_id: 77, ttl_minutes: 60, defaults: true, start: ["repo:read"], scopes: { "repo:read": ["contents:read", "metadata:read"] } });
+  const c = await p.prepare!(PARENT, { owner: "vu1n" }, async (n) => n === "GITHUB_APP_ID" ? "123456" : undefined);
+  assert.deepEqual(c, { owner: "vu1n", app_id: "123456", installation_id: 77, ttl_minutes: 60, defaults: true, start: ["repo:read"], scopes: { "repo:read": ["contents:read", "metadata:read"] } });
   assert.equal(gh.calls[0].iss, "123456");
   p.validate(c);
-  await assert.rejects(p.prepare!(PARENT, { owner: "someone-else" }, async () => "123456"), /no installation of the App for someone-else \(it is installed on: vu1n\)/);
+  await assert.rejects(p.prepare!(PARENT, {}, async () => "123456"), /several installations/);
+  await assert.rejects(p.prepare!(PARENT, { owner: "someone-else" }, async () => "123456"), /no installation of the App for someone-else \(it is installed on: other0, .*vu1n\)/);
   // An App installed without contents can't hold the defaults, so the save fails loud.
   await assert.rejects(github(fakeGitHub({ metadata: "read" }).fetcher).prepare!(PARENT, { installation_id: 77 }, async () => "123456"), /lacks contents:read/);
 });
@@ -88,13 +94,16 @@ test("github provider: validate keeps reads on :read scopes, an hour's TTL and r
   assert.throws(() => p.validate({ ...CONFIG, ttl_minutes: 120 }), /at most 60/);
   assert.throws(() => p.validate({ ...CONFIG, repositories: ["vu1n/pillbox"] }), /repository names/);
   assert.throws(() => p.validate({ ...CONFIG, installation_id: "x" }), /installation_id/);
-  assert.throws(() => p.validate({ ...CONFIG, extra: { "repo:write": ["secrets:write"] } }), /can't be added from the CLI/);
+  for (const g of ["secrets:write", "variables:write", "variables:read", "actions_variables:write", "organization_secrets:read", "workflows:write"]) {
+    assert.throws(() => p.validate({ ...CONFIG, extra: { "repo:write": [g] } }), /can't be added from the CLI/, g);
+  }
 });
 
 test("github provider: an operator adds only permissions the installation has and may delegate", async () => {
   const p = github(fakeGitHub({ metadata: "read", contents: "write", administration: "write" }).fetcher);
   assert.deepEqual(await p.groups!(PARENT, CONFIG, ["Contents:Write"]), ["contents:write"]);
   await assert.rejects(p.groups!(PARENT, CONFIG, ["administration:read"]), (e: any) => e.status === 403);
+  await assert.rejects(p.groups!(PARENT, CONFIG, ["variables:write"]), (e: any) => e.status === 403);
   await assert.rejects(p.groups!(PARENT, CONFIG, ["issues:read"]), /lacks issues:read/);
   const listed = await p.listGroups!(PARENT, CONFIG);
   assert.deepEqual(listed.map((g) => `${g.name}${g.delegable ? "" : "!"}`), ["administration:read!", "administration:write!", "contents:read", "contents:write", "metadata:read"]);
@@ -109,7 +118,7 @@ test("github key end to end: an admin saves the PEM, a caller's run gets an inst
     headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(admin ? { "x-test-admin": "vu@example.com", "x-tumbler-admin": "1" } : {}) },
   }), deps);
   await catalog.put("global", "GITHUB_APP_ID", "123456");
-  const saved = await call("PUT", "/admin/api/keys/global/GH_TOKEN", undefined, { value: PKCS1, kind: "mint:github" }, true);
+  const saved = await call("PUT", "/admin/api/keys/global/GH_TOKEN", undefined, { value: PKCS1, kind: "mint:github", config: { owner: "vu1n" } }, true);
   assert.equal(saved.status, 200, await saved.text());
   const row = (await catalog.keyRow("global", "GH_TOKEN"))!;
   assert.equal(row.kind, "mint:github");
