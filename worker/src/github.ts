@@ -218,9 +218,16 @@ export function github(fetcher: typeof fetch = fetch): Provider {
         return byStatus(r.status);
       } catch { return { status: "error", detail: "could not check (request failed)" }; }
     },
-    // Why nothing is called: GitHub revokes an installation token only when called with that token,
-    // and tumbler forgets the child before revoking. It stops being handed out at once and dies at
-    // GitHub's own expiry, an hour after minting at most.
-    async revoke() {},
+    // GitHub revokes an installation token only when called with that token, never by an id, so
+    // tumbler keeps the child sealed until this succeeds. Without it the delete stays queued.
+    async revoke(_parent, _config, _childId, child) {
+      if (!child) throw new Refused(502, "github: no child credential left to revoke with");
+      const r = await fetcher(`${API}/installation/token`, { method: "DELETE", redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS),
+        headers: { authorization: `Bearer ${child}`, accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "tumbler" } })
+        .catch(() => { throw new Refused(502, "github DELETE /installation/token: request failed"); });
+      await r.body?.cancel().catch(() => {});
+      // 401: the token is already expired or revoked.
+      if (r.status !== 204 && r.status !== 401 && !r.ok) throw new Refused(502, `github DELETE /installation/token: ${r.status}`);
+    },
   };
 }

@@ -370,9 +370,9 @@ To choose, give a config. Permissions are `<name>:read` or `<name>:write`, GitHu
 A `:read` scope holds reads only, since every token gets it. `ttl_minutes` is at most 60. An operator
 token adds permissions the installation has with `tumbler scope add`, only repository content, PR,
 issue, CI, deployment, package and pages ones; secrets, variables, secret scanning, workflows,
-administration and the rest stay with an admin's config. Revoking a grant stops handing
-its token out at once, but GitHub revokes an installation token only when called with that token,
-so it keeps working until its own expiry, within the hour.
+administration and the rest stay with an admin's config. GitHub revokes an installation token
+only when called with that token, so a revoke uses the sealed child; a queued retry keeps it sealed
+until GitHub takes the delete or the token expires.
 
 Other providers plug in as a `Provider` (`mint`, `revoke`, `validate` and optionally `verify` in
 `worker/src/grants.ts`). The state machine is the same for each. It lives in `worker/src/machine.ts`

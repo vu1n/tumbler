@@ -18,8 +18,14 @@ const CONFIG = { app_id: "123456", installation_id: 77, ttl_minutes: 60, start: 
 
 // A GitHub API stand-in: one installation with `perms`; records each call and checks the JWT it carries.
 function fakeGitHub(perms: Record<string, string> = { contents: "read", metadata: "read", pull_requests: "read", issues: "write" }) {
-  const calls: { method: string; path: string; body: any; iss: string }[] = [];
+  const calls: { method: string; path: string; body: any; iss: string }[] = [], revoked: string[] = [];
+  const state = { revokeStatus: 204 };
   const fetcher = (async (url: string, init: RequestInit) => {
+    // An installation token revokes itself; no JWT on this one.
+    if (new URL(url).pathname === "/installation/token" && init.method === "DELETE") {
+      if (state.revokeStatus === 204) revoked.push(String((init.headers as any).authorization).replace(/^Bearer /, ""));
+      return new Response(null, { status: state.revokeStatus });
+    }
     const jwt = String((init.headers as any).authorization).replace(/^Bearer /, ""), [h, p, sig] = jwt.split(".");
     const ok = createVerify("RSA-SHA256").update(`${h}.${p}`).verify(publicKey, Buffer.from(sig, "base64url"));
     if (!ok) return new Response("{}", { status: 401 });
@@ -38,7 +44,7 @@ function fakeGitHub(perms: Record<string, string> = { contents: "read", metadata
     }
     return new Response("{}", { status: 404 });
   }) as unknown as typeof fetch;
-  return { calls, fetcher };
+  return { calls, revoked, state, fetcher };
 }
 
 test("github key: a PKCS#1 or PKCS#8 PEM is stored as one printable line, the same either way", () => {
@@ -109,6 +115,17 @@ test("github provider: an operator adds only permissions the installation has an
   assert.deepEqual(listed.map((g) => `${g.name}${g.delegable ? "" : "!"}`), ["administration:read!", "administration:write!", "contents:read", "contents:write", "metadata:read"]);
 });
 
+test("github provider: revokes an installation token with the token itself", async () => {
+  const gh = fakeGitHub(), p = github(gh.fetcher);
+  await p.revoke(PARENT, CONFIG, "gh-1", CHILD);
+  assert.deepEqual(gh.revoked, [CHILD]);
+  gh.state.revokeStatus = 401; // already expired or revoked
+  await p.revoke(PARENT, CONFIG, "gh-1", CHILD);
+  gh.state.revokeStatus = 503;
+  await assert.rejects(p.revoke(PARENT, CONFIG, "gh-1", CHILD), (e: any) => /503/.test(e.message) && !e.message.includes(CHILD));
+  await assert.rejects(p.revoke(PARENT, CONFIG, "gh-1"), /no child credential/);
+});
+
 test("github key end to end: an admin saves the PEM, a caller's run gets an installation token, never the key", async () => {
   const gh = fakeGitHub(), db = memoryD1(), catalog = new Catalog(db, await masterKey(Buffer.alloc(32, 5).toString("base64")));
   const grants = new Grants(catalog, { github: github(gh.fetcher) });
@@ -128,4 +145,17 @@ test("github key end to end: an admin saves the PEM, a caller's run gets an inst
   assert.deepEqual((await r.json()).env, { GH_TOKEN: CHILD });
   const texts = await Promise.all(["/admin/api/keys", "/admin/api/grants", "/admin/api/audit"].map(async (p) => (await call("GET", p, undefined, undefined, true)).text()));
   for (const t of texts) { assert.ok(!t.includes(PARENT) && !t.includes(CHILD) && !t.includes("PRIVATE KEY")); }
+
+  // A revoke that GitHub can't take yet stays queued with the child sealed, and the retry revokes with it.
+  const [g] = (await (await call("GET", "/admin/api/grants", undefined, undefined, true)).json()).grants;
+  gh.state.revokeStatus = 503;
+  assert.equal((await call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, true)).status, 200);
+  const queued = db.raw.prepare("SELECT * FROM pending_revokes").all() as any[];
+  assert.equal(queued.length, 1);
+  assert.ok(queued[0].ciphertext && !JSON.stringify(queued[0]).includes(CHILD));
+  assert.deepEqual(gh.revoked, []);
+  gh.state.revokeStatus = 204;
+  await grants.retryRevokes();
+  assert.deepEqual(gh.revoked, [CHILD]);
+  assert.equal(db.raw.prepare("SELECT COUNT(*) AS n FROM pending_revokes").get().n, 0);
 });
