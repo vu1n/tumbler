@@ -367,7 +367,7 @@ To choose, give a config. Permissions are `<name>:read` or `<name>:write`, GitHu
   "scopes": { "repo:read": ["contents:read", "metadata:read"], "pr:write": ["pull_requests:write"] } }
 ```
 
-A `:read` scope holds reads only, since every token gets it. `ttl_minutes` is at most 60. An operator
+A `:read` scope holds reads only, since every token gets it. A token lives the hour GitHub gives it (`ttl_minutes` is 60 or left out). An operator
 token adds permissions the installation has with `tumbler scope add`, only repository content, PR,
 issue, CI, deployment, package and pages ones; secrets, variables, secret scanning, workflows,
 administration and the rest stay with an admin's config. GitHub revokes an installation token

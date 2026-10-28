@@ -142,8 +142,9 @@ export function github(fetcher: typeof fetch = fetch): Provider {
     validate(config) {
       if (!APP.test(String(config.app_id ?? ""))) throw new Refused(400, "config.app_id must be the App's numeric id or client id");
       if (!/^[1-9][0-9]{0,15}$/.test(String(config.installation_id ?? ""))) throw new Refused(400, "config.installation_id must be the installation's numeric id");
-      if (config.ttl_minutes !== undefined && Number(config.ttl_minutes) > GITHUB_TTL_MIN) {
-        throw new Refused(400, `ttl_minutes can be at most ${GITHUB_TTL_MIN}: GitHub's tokens last an hour`);
+      // GitHub sets the lifetime, and mint() hands its expiry to the grant, so another TTL would mislead.
+      if (config.ttl_minutes !== undefined && Number(config.ttl_minutes) !== GITHUB_TTL_MIN) {
+        throw new Refused(400, `ttl_minutes must be ${GITHUB_TTL_MIN} or left out: GitHub's tokens last an hour`);
       }
       if (config.owner !== undefined && !(typeof config.owner === "string" && /^[A-Za-z0-9-]{1,39}$/.test(config.owner))) {
         throw new Refused(400, "config.owner must be a GitHub account login");
@@ -188,7 +189,7 @@ export function github(fetcher: typeof fetch = fetch): Provider {
       });
       if (typeof j?.token !== "string" || !j.token) throw new Refused(502, "github minted no token");
       // GitHub gives an installation token no id; this one only names the child in tumbler's rows.
-      return { id: `gh-${crypto.randomUUID()}`, value: j.token };
+      return { id: `gh-${crypto.randomUUID()}`, value: j.token, ...(typeof j.expires_at === "string" ? { expires_at: j.expires_at } : {}) };
     },
     async groups(parent, config, names) {
       const lower = names.map((n) => n.trim().toLowerCase());

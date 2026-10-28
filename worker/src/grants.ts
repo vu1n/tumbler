@@ -18,7 +18,8 @@ export const errorClass = (e: unknown) => e instanceof Error && KNOWN_ERRORS.has
 
 export { autoApproved };
 
-export interface Minted { id: string; value: string }
+// `expires_at`: when the provider says the child dies, for a provider that sets its own lifetime.
+export interface Minted { id: string; value: string; expires_at?: string }
 // `extra`: permission groups an operator token added on top of `scopes` (`tumbler scope add`), by
 // the provider's names; a scope only there is a new scope. The admin's `scopes` stay the base.
 export interface MintConfig { ttl_minutes?: number; start?: string[]; scopes?: Record<string, unknown>; extra?: Record<string, string[]>; [k: string]: unknown }
@@ -368,7 +369,9 @@ export class Grants {
     const expires = new Date(this.now().getTime() + ttl * 60_000);
     const parent = await this.parent(row);
     const minted = await this.provider(row.kind).mint(parent, config, scopes, expires, `tumbler ${g.id} ${g.caller}`);
-    return { ...minted, expires_at: expires.toISOString() };
+    // The provider's own expiry wins: the grant, and any queued revoke, must last as long as the child does.
+    const own = minted.expires_at && Date.parse(minted.expires_at);
+    return { ...minted, expires_at: own && own > this.now().getTime() ? new Date(own).toISOString() : expires.toISOString() };
   }
 
   // The new child lands only if the grant is still in the state `g` was read in: still live, holding

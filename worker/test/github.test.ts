@@ -71,6 +71,7 @@ test("github provider: mints an installation token with the scope's permissions 
   const gh = fakeGitHub(), p = github(gh.fetcher);
   const m = await p.mint(PARENT, { ...CONFIG, repositories: ["pillbox"] }, ["repo:read", "repo:write"], new Date(), "tumbler g_1 dev");
   assert.equal(m.value, CHILD);
+  assert.equal(m.expires_at, "2026-10-28T09:00:00Z");
   assert.match(m.id, /^gh-[0-9a-f-]{36}$/);
   assert.deepEqual(gh.calls[0], { method: "POST", path: "/app/installations/77/access_tokens", iss: "123456",
     body: { permissions: { contents: "write", metadata: "read", pull_requests: "write" }, repositories: ["pillbox"] } });
@@ -97,7 +98,8 @@ test("github provider: validate keeps reads on :read scopes, an hour's TTL and r
   p.validate(CONFIG);
   assert.throws(() => p.validate({ ...CONFIG, scopes: { "repo:read": ["contents:write"] } }), /isn't a read/);
   assert.throws(() => p.validate({ ...CONFIG, scopes: { "repo:write": ["contents"] } }), /name:read or name:write/);
-  assert.throws(() => p.validate({ ...CONFIG, ttl_minutes: 120 }), /at most 60/);
+  assert.throws(() => p.validate({ ...CONFIG, ttl_minutes: 120 }), /must be 60/);
+  assert.throws(() => p.validate({ ...CONFIG, ttl_minutes: 15 }), /must be 60/);
   assert.throws(() => p.validate({ ...CONFIG, repositories: ["vu1n/pillbox"] }), /repository names/);
   assert.throws(() => p.validate({ ...CONFIG, installation_id: "x" }), /installation_id/);
   for (const g of ["secrets:write", "variables:write", "variables:read", "actions_variables:write", "organization_secrets:read", "workflows:write", "secret_scanning_alerts:read", "administration:read"]) {
@@ -128,7 +130,7 @@ test("github provider: revokes an installation token with the token itself", asy
 
 test("github key end to end: an admin saves the PEM, a caller's run gets an installation token, never the key", async () => {
   const gh = fakeGitHub(), db = memoryD1(), catalog = new Catalog(db, await masterKey(Buffer.alloc(32, 5).toString("base64")));
-  const grants = new Grants(catalog, { github: github(gh.fetcher) });
+  const grants = new Grants(catalog, { github: github(gh.fetcher) }, () => new Date("2026-10-28T08:00:30Z"));
   const deps = { catalog, grants, admin: async (r: Request) => r.headers.get("x-test-admin") };
   const call = (method: string, path: string, token?: string, body?: unknown, admin = false) => handle(new Request(`https://t.example${path}`, {
     method, body: body === undefined ? undefined : JSON.stringify(body),
@@ -148,6 +150,8 @@ test("github key end to end: an admin saves the PEM, a caller's run gets an inst
 
   // A revoke that GitHub can't take yet stays queued with the child sealed, and the retry revokes with it.
   const [g] = (await (await call("GET", "/admin/api/grants", undefined, undefined, true)).json()).grants;
+  // The grant lasts as long as GitHub's token, so a queued revoke is kept until the token dies.
+  assert.equal(g.expires_at, "2026-10-28T09:00:00.000Z");
   gh.state.revokeStatus = 503;
   assert.equal((await call("DELETE", `/admin/api/grants/${g.id}`, undefined, undefined, true)).status, 200);
   const queued = db.raw.prepare("SELECT * FROM pending_revokes").all() as any[];
