@@ -374,6 +374,36 @@ administration and the rest stay with an admin's config. GitHub revokes an insta
 only when called with that token, so a revoke uses the sealed child; a queued retry keeps it sealed
 until GitHub takes the delete or the token expires.
 
+## Minted keys (`mint:keycard`)
+
+A key of kind `mint:keycard` holds a **Keycard Application's client secret**, and every caller gets a
+token Keycard's STS issues for one Resource (client credentials, with the Resource as an RFC 8707
+`resource`). Keycard's Policies decide what the Application may reach and record every issuance;
+tumbler decides which callers get a child, for which scopes, in which project. One key is one
+Resource, the way one `[[credentials.default]]` entry in a `keycard.toml` is one env var for one Resource.
+
+Set one up once:
+1. In Keycard Console, create an Application for the broker, give it the Resource under
+   **Dependencies**, and generate a client secret.
+2. `tumbler admin put KEYCARD_ZONE_URL --scope global` (Settings > Connection, the Issuer URL) and
+   `tumbler admin put KEYCARD_CLIENT_ID --scope global`.
+3. `tumbler admin put GH_TOKEN --scope global --kind mint:keycard --config '{"resource":"https://api.github.com"}'`
+   with the secret. Callers get `resource:read`: a token for the Resource alone.
+
+To ask for OAuth scopes on top, name them per scope; a `:read` scope asks for the Resource alone:
+
+```json
+{ "resource": "https://api.github.com", "start": ["resource:read"],
+  "scopes": { "resource:read": [], "repo:write": ["repo"] } }
+```
+
+Keycard sets the lifetime (24 hours unless the Resource sets a shorter **Credential Lifetime**, which
+you should: the grant lives as long as the token), so `ttl_minutes` is left out. A refusal on policy
+(`access_denied`, `invalid_target`) stops the command with a 403 that says to change the Policy, never
+the zone's description. Revoke uses the zone's RFC 7009 endpoint with the child itself when the zone
+publishes one; when it doesn't, the revoke stays queued on the Grants tab until the child expires,
+because nothing can end it sooner. Operators can't add to a Keycard key: its reach is Keycard Policy's.
+
 Other providers plug in as a `Provider` (`mint`, `revoke`, `validate` and optionally `verify` in
 `worker/src/grants.ts`). The state machine is the same for each. It lives in `worker/src/machine.ts`
 as one pure function, `transition(grant, event)`. Every change is written along with its event in
@@ -398,7 +428,7 @@ Every read and change is audited by key name, never by value.
 
 ## Not in this slice
 
-Providers beyond Cloudflare and GitHub (AWS STS, OpenRouter, Tailscale).
+Providers beyond Cloudflare, GitHub and Keycard (AWS STS, OpenRouter, Tailscale).
 
 ## Develop
 
