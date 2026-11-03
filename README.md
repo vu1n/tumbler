@@ -32,6 +32,12 @@ npm run deploy
 #    TUMBLER_ADMINS=<your email>
 ```
 
+To hear when a caller token does what a script dumping secrets would (one read of 10 or more keys,
+creating a token, or changing a minted key's permission groups), set a webhook:
+`cd worker && npx wrangler secret put TUMBLER_ALERT_WEBHOOK` (an ntfy topic URL, a Slack incoming
+webhook, anything that takes a JSON POST). Each alert carries the token's name, the action, the
+project and the key names, plus a one-line `text`; never a value. An admin's own actions never alert.
+
 Nothing account-specific lives in the repo: the store id is looked up at deploy time
 (`TUMBLER_STORE_ID` overrides it) and the vars above stay on the Worker across deploys.
 

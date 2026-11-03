@@ -1,6 +1,7 @@
 // catalog.ts — keys, tokens and audit in D1. Values go in sealed and come out only through resolve().
 import { open, randomToken, seal, sha256hex } from "./crypto.ts";
 import { staticCheck } from "./verify.ts";
+import { alarming, type Alert } from "./alerts.ts";
 
 export const GLOBAL = "global";
 const NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
@@ -152,10 +153,16 @@ type PutMeta = { description?: string; owner?: string; expires_at?: string | nul
 export class Catalog {
   db: D1Database; key: CryptoKey;
   clock: () => Date = () => new Date(); // what token expiry is checked against; tests move it
+  alert?: (a: Alert) => void; // where alarming() rows go (alerts.ts); none set, none sent
   constructor(db: D1Database, key: CryptoKey) { this.db = db; this.key = key; }
 
   async audit(actor: string, action: string, project: string | null, names: string[] = []) {
     await this.auditRow(actor, action, project, names).run();
+    this.raise(actor, action, project, names);
+  }
+  raise(actor: string, action: string, project: string | null, names: string[]) {
+    const a = this.alert && alarming(actor, action, project, names, now());
+    if (a) this.alert!(a);
   }
   auditRow(actor: string, action: string, project: string | null, names: string[] = []) {
     return this.db.prepare("INSERT INTO audit (at, actor, action, project, names) VALUES (?, ?, ?, ?, ?)").bind(now(), actor, action, project, names.join(","));
@@ -221,6 +228,7 @@ export class Catalog {
         console.error("tumbler: token create --store failed", e.name); // never the message: it may quote a bound value
         throw new Refused(500, `token ${name} could not be stored, so nothing was created and ${into.name} is unchanged`);
       });
+    this.raise(who, "token-create", null, created);
   }
 
   // Reusing an ended token's name moves that token (matched by its hash), and the parent its
