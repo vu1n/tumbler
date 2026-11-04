@@ -7,6 +7,7 @@ import { s1Client } from "./auto.ts";
 import { cloudflare } from "./cloudflare.ts";
 import { github } from "./github.ts";
 import { Grants } from "./grants.ts";
+import { webhookAlerts } from "./alerts.ts";
 // Bundled as text by the "rules" entry in wrangler.jsonc.
 import CLI from "../../cli/tumbler";
 import SETUP from "../../scripts/setup.sh";
@@ -20,6 +21,7 @@ export interface Env {
   TUMBLER_ADMINS: string;     // comma-separated emails allowed into /admin
   AI?: Ai;                    // Workers AI, for Clef in /v1/auto; without it auto uses rules only
   TUMBLER_AUTO_MODEL?: string; // "clef" (default) or "clef-flash"
+  TUMBLER_ALERT_WEBHOOK?: string; // a secret: where alerts.ts POSTs (ntfy, Slack, ...); unset sends none
 }
 
 const grantsFor = (catalog: Catalog) => new Grants(catalog, providers);
@@ -34,8 +36,9 @@ async function loadKey(env: Env) {
 const providers = { cloudflare: cloudflare(), github: github() };
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const catalog = new Catalog(env.DB, await loadKey(env));
+    catalog.alert = webhookAlerts(env.TUMBLER_ALERT_WEBHOOK, (p) => ctx.waitUntil(p));
     const grants = grantsFor(catalog);
     const admins = (env.TUMBLER_ADMINS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
     return handle(request, {
@@ -48,8 +51,10 @@ export default {
     });
   },
   // Expire grants whose children are past expiry (and delete those children at the provider),
-  // and lapse requests nobody answered. The cron is in wrangler.jsonc.
+  // lapse requests nobody answered, and drop bulk-read reach rows past their window. The cron is in
+  // wrangler.jsonc.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(grantsFor(new Catalog(env.DB, await loadKey(env))).sweep());
+    const catalog = new Catalog(env.DB, await loadKey(env));
+    ctx.waitUntil(Promise.all([grantsFor(catalog).sweep(), catalog.sweepReach()]));
   },
 };
