@@ -9,19 +9,22 @@ export interface Alert { kind: "bulk-read" | "token-create" | "scope-change"; ac
 export const BULK_READ = 10;
 export const READ_WINDOW_MS = 60 * 60 * 1000;
 
-// The audit row an alert answers, or null. `earlier` is the key names this actor read in the window
-// before this row. An admin (an Access email, never a caller token) is the person the alert would go
-// to, so their own actions never alert.
-export function alarming(actor: string, action: string, project: string | null, names: string[], at: string, earlier: string[] = []): Alert | null {
+// The audit row an alert answers, or null; a read spread over many calls is caught by
+// Catalog.trackReach instead. An admin (an Access email, never a caller token) is the person the
+// alert would go to, so their own actions never alert.
+export function alarming(actor: string, action: string, project: string | null, names: string[], at: string): Alert | null {
   if (actor.includes("@")) return null;
-  if (action === "read") {
-    const before = new Set(earlier).size, reached = [...new Set([...earlier, ...names])].sort();
-    if (names.length >= BULK_READ) return { kind: "bulk-read", actor, project, names, at };
-    // Once per crossing: the read that takes the window's count to the threshold, not every read after.
-    return before < BULK_READ && reached.length >= BULK_READ ? { kind: "bulk-read", actor, project, names: reached, at } : null;
-  }
-  const kind = action === "token-create" ? "token-create" : action === "mint-scope" ? "scope-change" : null;
+  const kind = action === "read" && names.length >= BULK_READ ? "bulk-read"
+    : action === "token-create" ? "token-create"
+    : action === "mint-scope" ? "scope-change"
+    : null;
   return kind ? { kind, actor, project, names, at } : null;
+}
+
+// Whether a read that added `added` new keys to a window now holding `total` is the one that crossed
+// BULK_READ. Smaller reads only: a read that size alone already alerted through alarming().
+export function crossed(total: number, added: number, read: number): boolean {
+  return read < BULK_READ && total >= BULK_READ && total - added < BULK_READ;
 }
 
 const SUMMARY: Record<Alert["kind"], string> = {

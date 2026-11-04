@@ -1,7 +1,7 @@
 // catalog.ts — keys, tokens and audit in D1. Values go in sealed and come out only through resolve().
 import { open, randomToken, seal, sha256hex } from "./crypto.ts";
 import { staticCheck } from "./verify.ts";
-import { alarming, READ_WINDOW_MS, type Alert } from "./alerts.ts";
+import { alarming, crossed, READ_WINDOW_MS, type Alert } from "./alerts.ts";
 
 export const GLOBAL = "global";
 const NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
@@ -157,25 +157,33 @@ export class Catalog {
   constructor(db: D1Database, key: CryptoKey) { this.db = db; this.key = key; }
 
   async audit(actor: string, action: string, project: string | null, names: string[] = []) {
-    if (action !== "read" || !this.alert || actor.includes("@")) {
-      await this.auditRow(actor, action, project, names).run();
-      return this.raise(actor, action, project, names);
-    }
-    // Record first, then count every read ordered before this row: D1 hands out ids one write at a
-    // time, so of any reads racing each other exactly one sees the count cross the threshold.
-    const row = await this.db.prepare("INSERT INTO audit (at, actor, action, project, names) VALUES (?, ?, ?, ?, ?) RETURNING id")
-      .bind(now(), actor, action, project, names.join(",")).first<{ id: number }>();
-    this.raise(actor, action, project, names, await this.readsBefore(actor, row!.id, READ_WINDOW_MS));
+    await this.auditRow(actor, action, project, names).run();
+    this.raise(actor, action, project, names);
   }
-  raise(actor: string, action: string, project: string | null, names: string[], earlier: string[] = []) {
-    const a = this.alert && alarming(actor, action, project, names, now(), earlier);
+  raise(actor: string, action: string, project: string | null, names: string[]) {
+    const a = this.alert && alarming(actor, action, project, names, now());
     if (a) this.alert!(a);
   }
-  // The key names an actor read in the last `ms` in audit rows before `id` (the bulk-read count spans calls).
-  async readsBefore(actor: string, id: number, ms: number) {
-    const since = new Date(Date.now() - ms).toISOString();
-    const { results } = await this.db.prepare("SELECT names FROM audit WHERE at >= ? AND actor = ? AND action = 'read' AND id < ?").bind(since, actor, id).all<{ names: string }>();
-    return results.flatMap((r) => r.names ? r.names.split(",") : []);
+  // The bulk-read count across calls: each key a token read in the window is one read_reach row,
+  // named by scope and name (a project's key and a global of the same name are different secrets;
+  // a global read through two projects is one). One transaction per read, so of reads racing each
+  // other the last to commit sees every key, and the work is bounded by the keys a token reaches.
+  async trackReach(actor: string, project: string | null, keys: string[]) {
+    if (!this.alert || actor.includes("@") || keys.length === 0) return;
+    const at = now(), since = new Date(Date.now() - READ_WINDOW_MS).toISOString();
+    // D1 binds at most 100 values a statement: 30 keys (90 values) per insert.
+    const chunks = Array.from({ length: Math.ceil(keys.length / 30) }, (_, i) => keys.slice(i * 30, i * 30 + 30));
+    const out = await this.db.batch([
+      this.db.prepare("DELETE FROM read_reach WHERE actor = ? AND first_at < ?").bind(actor, since),
+      ...chunks.map((c) => this.db.prepare(`INSERT INTO read_reach (actor, key, first_at) VALUES ${c.map(() => "(?, ?, ?)").join(", ")} ON CONFLICT DO NOTHING RETURNING key`)
+        .bind(...c.flatMap((k) => [actor, k, at]))),
+      this.db.prepare("SELECT COUNT(*) AS n FROM read_reach WHERE actor = ?").bind(actor),
+      this.db.prepare("SELECT key FROM read_reach WHERE actor = ? ORDER BY key LIMIT 50").bind(actor),
+    ]);
+    const added = out.slice(1, -2).reduce((n, r) => n + r.results.length, 0);
+    const total = (out.at(-2)!.results[0] as { n: number }).n;
+    const names = (out.at(-1)!.results as { key: string }[]).map((r) => r.key);
+    if (crossed(total, added, keys.length)) this.alert({ kind: "bulk-read", actor, project, names, at });
   }
   auditRow(actor: string, action: string, project: string | null, names: string[] = []) {
     return this.db.prepare("INSERT INTO audit (at, actor, action, project, names) VALUES (?, ?, ?, ?, ?)").bind(now(), actor, action, project, names.join(","));
@@ -585,6 +593,7 @@ export class Catalog {
     const missing = names.filter((n) => !(n in out));
     if (missing.length) throw new Refused(404, `unknown keys: ${missing.join(", ")}`);
     await this.audit(caller.name, "read", project, Object.keys(out).sort());
+    await this.trackReach(caller.name, project, [...win.values()].map((r) => `${r.scope}/${r.name}`));
     return out;
   }
 

@@ -2,7 +2,7 @@
 // names and never values; an ordinary read and an admin's own actions don't.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { alarming, BULK_READ, webhookAlerts, type Alert } from "../src/alerts.ts";
+import { alarming, BULK_READ, crossed, webhookAlerts, type Alert } from "../src/alerts.ts";
 import { handle } from "../src/app.ts";
 import { Catalog } from "../src/catalog.ts";
 import { masterKey } from "../src/crypto.ts";
@@ -15,8 +15,9 @@ test("alarming() picks out bulk reads, token creation and scope changes, never a
   const many = Array.from({ length: BULK_READ }, (_, i) => `K${i}`);
   assert.equal(alarming("dev", "read", "huddles", many, AT)?.kind, "bulk-read");
   assert.equal(alarming("dev", "read", "huddles", many.slice(1), AT), null);
-  assert.deepEqual(alarming("dev", "read", "huddles", ["K9"], AT, many.slice(0, 9))?.names, many);
-  assert.equal(alarming("dev", "read", "huddles", ["K10"], AT, many), null);
+  assert.ok(crossed(10, 3, 3));
+  assert.ok(!crossed(13, 3, 3)); // already past the threshold before this read
+  assert.ok(!crossed(10, 10, 10)); // a read this size alerted on its own
   assert.equal(alarming("dev", "token-create", null, ["child", "parent:dev"], AT)?.kind, "token-create");
   assert.equal(alarming("dev", "mint-scope", "huddles", ["CF", "workers:write"], AT)?.kind, "scope-change");
   assert.equal(alarming("vu@example.com", "token-create", null, ["t"], AT), null);
@@ -71,6 +72,26 @@ test("concurrent small reads still raise exactly one alert", async () => {
   assert.ok(rs.every((r) => r.status === 200));
   assert.equal(raised.length, 1);
   assert.equal(raised[0].kind, "bulk-read");
+});
+
+test("the same names in two projects are different secrets; a global read through two is one", async () => {
+  const catalog = new Catalog(memoryD1(), await masterKey(KEY));
+  for (const proj of ["alpha", "beta"]) for (let i = 0; i < 6; i++) await catalog.put(proj, `KEY_${i}`, `${proj}-${i}`);
+  await catalog.put("global", "SHARED", "shared");
+  const token = await catalog.createToken("dev", ["alpha", "beta"]);
+  const raised: Alert[] = [];
+  catalog.alert = (a) => raised.push(a);
+  const get = (path: string) => handle(new Request(`https://t.example${path}`, { headers: { authorization: `Bearer ${token}` } }), { catalog, admin: async () => null });
+  const keys = "SHARED,KEY_0,KEY_1,KEY_2,KEY_3";
+
+  assert.equal((await get(`/v1/env?project=alpha&keys=${keys}`)).status, 200);
+  assert.equal((await get(`/v1/env?project=alpha&keys=${keys}`)).status, 200);
+  assert.equal(raised.length, 0); // rereading the same keys adds nothing
+  assert.equal((await get(`/v1/env?project=beta&keys=${keys}`)).status, 200);
+  assert.equal(raised.length, 0); // 4 + 4 project keys and one global: 9
+  assert.equal((await get("/v1/env?project=beta&keys=KEY_4")).status, 200);
+  assert.equal(raised.length, 1);
+  assert.equal(raised[0].names.length, BULK_READ);
 });
 
 test("webhookAlerts POSTs JSON in the background, and sends nothing without a URL", async () => {
