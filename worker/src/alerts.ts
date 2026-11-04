@@ -3,23 +3,29 @@
 
 export interface Alert { kind: "bulk-read" | "token-create" | "scope-change"; actor: string; project: string | null; names: string[]; at: string }
 
-// One read of this many keys or more is an alert: `tumbler run` names what a repo needs (.tumbler), so a
-// read of everything a token reaches is what a script dumping secrets looks like.
+// A token reading this many distinct keys within READ_WINDOW_MS is an alert: `tumbler run` names what a
+// repo needs (.tumbler), so a read of everything a token reaches is what a script dumping secrets looks
+// like. Counted across calls, so asking for a few keys at a time does not slip under it.
 export const BULK_READ = 10;
+export const READ_WINDOW_MS = 60 * 60 * 1000;
 
-// The audit row an alert answers, or null. An admin (an Access email, never a caller token) is the
-// person the alert would go to, so their own actions never alert.
-export function alarming(actor: string, action: string, project: string | null, names: string[], at: string): Alert | null {
+// The audit row an alert answers, or null. `earlier` is the key names this actor read in the window
+// before this row. An admin (an Access email, never a caller token) is the person the alert would go
+// to, so their own actions never alert.
+export function alarming(actor: string, action: string, project: string | null, names: string[], at: string, earlier: string[] = []): Alert | null {
   if (actor.includes("@")) return null;
-  const kind = action === "read" && names.length >= BULK_READ ? "bulk-read"
-    : action === "token-create" ? "token-create"
-    : action === "mint-scope" ? "scope-change"
-    : null;
+  if (action === "read") {
+    const before = new Set(earlier).size, reached = [...new Set([...earlier, ...names])].sort();
+    if (names.length >= BULK_READ) return { kind: "bulk-read", actor, project, names, at };
+    // Once per crossing: the read that takes the window's count to the threshold, not every read after.
+    return before < BULK_READ && reached.length >= BULK_READ ? { kind: "bulk-read", actor, project, names: reached, at } : null;
+  }
+  const kind = action === "token-create" ? "token-create" : action === "mint-scope" ? "scope-change" : null;
   return kind ? { kind, actor, project, names, at } : null;
 }
 
 const SUMMARY: Record<Alert["kind"], string> = {
-  "bulk-read": "read many keys in one call",
+  "bulk-read": "read many keys",
   "token-create": "created a token",
   "scope-change": "changed a minted key's permission groups",
 };

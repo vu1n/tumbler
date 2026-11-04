@@ -1,7 +1,7 @@
 // catalog.ts — keys, tokens and audit in D1. Values go in sealed and come out only through resolve().
 import { open, randomToken, seal, sha256hex } from "./crypto.ts";
 import { staticCheck } from "./verify.ts";
-import { alarming, type Alert } from "./alerts.ts";
+import { alarming, READ_WINDOW_MS, type Alert } from "./alerts.ts";
 
 export const GLOBAL = "global";
 const NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
@@ -157,12 +157,20 @@ export class Catalog {
   constructor(db: D1Database, key: CryptoKey) { this.db = db; this.key = key; }
 
   async audit(actor: string, action: string, project: string | null, names: string[] = []) {
+    const earlier = action === "read" && this.alert ? await this.readsSince(actor, READ_WINDOW_MS) : [];
     await this.auditRow(actor, action, project, names).run();
-    this.raise(actor, action, project, names);
+    this.raise(actor, action, project, names, earlier);
   }
-  raise(actor: string, action: string, project: string | null, names: string[]) {
-    const a = this.alert && alarming(actor, action, project, names, now());
+  raise(actor: string, action: string, project: string | null, names: string[], earlier: string[] = []) {
+    const a = this.alert && alarming(actor, action, project, names, now(), earlier);
     if (a) this.alert!(a);
+  }
+  // The key names an actor read in the last `ms`, from the audit log (the bulk-read count spans calls).
+  async readsSince(actor: string, ms: number) {
+    if (actor.includes("@")) return [];
+    const since = new Date(Date.now() - ms).toISOString();
+    const { results } = await this.db.prepare("SELECT names FROM audit WHERE at >= ? AND actor = ? AND action = 'read'").bind(since, actor).all<{ names: string }>();
+    return results.flatMap((r) => r.names ? r.names.split(",") : []);
   }
   auditRow(actor: string, action: string, project: string | null, names: string[] = []) {
     return this.db.prepare("INSERT INTO audit (at, actor, action, project, names) VALUES (?, ?, ?, ?, ?)").bind(now(), actor, action, project, names.join(","));

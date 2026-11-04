@@ -15,6 +15,8 @@ test("alarming() picks out bulk reads, token creation and scope changes, never a
   const many = Array.from({ length: BULK_READ }, (_, i) => `K${i}`);
   assert.equal(alarming("dev", "read", "huddles", many, AT)?.kind, "bulk-read");
   assert.equal(alarming("dev", "read", "huddles", many.slice(1), AT), null);
+  assert.deepEqual(alarming("dev", "read", "huddles", ["K9"], AT, many.slice(0, 9))?.names, many);
+  assert.equal(alarming("dev", "read", "huddles", ["K10"], AT, many), null);
   assert.equal(alarming("dev", "token-create", null, ["child", "parent:dev"], AT)?.kind, "token-create");
   assert.equal(alarming("dev", "mint-scope", "huddles", ["CF", "workers:write"], AT)?.kind, "scope-change");
   assert.equal(alarming("vu@example.com", "token-create", null, ["t"], AT), null);
@@ -36,6 +38,24 @@ test("a caller reading every key it reaches raises one alert with the names and 
   assert.equal(raised[0].kind, "bulk-read");
   assert.equal(raised[0].actor, "dev");
   assert.equal(raised[0].names.length, BULK_READ);
+  assert.ok(!JSON.stringify(raised).includes("value-"));
+});
+
+test("reading a few keys at a time still alerts once the token has read BULK_READ of them", async () => {
+  const catalog = new Catalog(memoryD1(), await masterKey(KEY));
+  for (let i = 0; i < BULK_READ + 3; i++) await catalog.put("global", `KEY_${i}`, `value-${i}`);
+  const token = await catalog.createToken("dev", null);
+  const raised: Alert[] = [];
+  catalog.alert = (a) => raised.push(a);
+  const get = (path: string) => handle(new Request(`https://t.example${path}`, { headers: { authorization: `Bearer ${token}` } }), { catalog, admin: async () => null });
+
+  for (let i = 0; i < BULK_READ + 3; i += 3) {
+    const keys = [i, i + 1, i + 2].filter((k) => k < BULK_READ + 3).map((k) => `KEY_${k}`).join(",");
+    assert.equal((await get(`/v1/env?keys=${keys}`)).status, 200);
+  }
+  assert.equal(raised.length, 1);
+  assert.equal(raised[0].kind, "bulk-read");
+  assert.ok(raised[0].names.length >= BULK_READ);
   assert.ok(!JSON.stringify(raised).includes("value-"));
 });
 
