@@ -168,20 +168,21 @@ export class Catalog {
   // named by scope and name (a project's key and a global of the same name are different secrets;
   // a global read through two projects is one). One transaction per read, so of reads racing each
   // other the last to commit sees every key, and the work is bounded by the keys a token reaches.
-  async trackReach(actor: string, project: string | null, keys: string[]) {
+  async trackReach(caller: Caller, project: string | null, keys: string[]) {
+    const actor = caller.name, token = caller.hash ?? caller.name;
     if (!this.alert || actor.includes("@") || keys.length === 0) return;
     const at = now(), since = new Date(Date.now() - READ_WINDOW_MS).toISOString();
     // D1 binds at most 100 values a statement: 30 keys (90 values) per insert.
     const chunks = Array.from({ length: Math.ceil(keys.length / 30) }, (_, i) => keys.slice(i * 30, i * 30 + 30));
-    const count = () => this.db.prepare("SELECT COUNT(*) AS n FROM read_reach WHERE actor = ?").bind(actor);
+    const count = () => this.db.prepare("SELECT COUNT(*) AS n FROM read_reach WHERE token = ?").bind(token);
     // A reread refreshes its key's time, so a key stays counted for an hour after its latest read.
     const out = await this.db.batch([
-      this.db.prepare("DELETE FROM read_reach WHERE actor = ? AND last_at < ?").bind(actor, since),
+      this.db.prepare("DELETE FROM read_reach WHERE token = ? AND last_at < ?").bind(token, since),
       count(),
-      ...chunks.map((c) => this.db.prepare(`INSERT INTO read_reach (actor, key, last_at) VALUES ${c.map(() => "(?, ?, ?)").join(", ")} ON CONFLICT DO UPDATE SET last_at = excluded.last_at`)
-        .bind(...c.flatMap((k) => [actor, k, at]))),
+      ...chunks.map((c) => this.db.prepare(`INSERT INTO read_reach (token, key, last_at) VALUES ${c.map(() => "(?, ?, ?)").join(", ")} ON CONFLICT DO UPDATE SET last_at = excluded.last_at`)
+        .bind(...c.flatMap((k) => [token, k, at]))),
       count(),
-      this.db.prepare("SELECT key FROM read_reach WHERE actor = ? ORDER BY key LIMIT 50").bind(actor),
+      this.db.prepare("SELECT key FROM read_reach WHERE token = ? ORDER BY key LIMIT 50").bind(token),
     ]);
     const n = (i: number) => (out.at(i)!.results[0] as { n: number }).n;
     const total = n(-2), added = total - n(1);
@@ -596,7 +597,7 @@ export class Catalog {
     const missing = names.filter((n) => !(n in out));
     if (missing.length) throw new Refused(404, `unknown keys: ${missing.join(", ")}`);
     await this.audit(caller.name, "read", project, Object.keys(out).sort());
-    await this.trackReach(caller.name, project, [...win.values()].map((r) => `${r.scope}/${r.name}`));
+    await this.trackReach(caller, project, [...win.values()].map((r) => `${r.scope}/${r.name}`));
     return out;
   }
 

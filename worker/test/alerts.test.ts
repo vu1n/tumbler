@@ -114,6 +114,23 @@ test("rereading keys keeps them in the window, so a tenth read an hour after the
   assert.equal(raised.length, 1);
 });
 
+test("a token replaced under the same name starts its count at zero", async () => {
+  const catalog = new Catalog(memoryD1(), await masterKey(KEY));
+  for (let i = 0; i < 12; i++) await catalog.put("global", `KEY_${i}`, `value-${i}`);
+  const raised: Alert[] = [];
+  catalog.alert = (a) => raised.push(a);
+  const reads = async (token: string) => {
+    for (let i = 0; i < 12; i += 3) {
+      const r = await handle(new Request(`https://t.example/v1/env?keys=KEY_${i},KEY_${i + 1},KEY_${i + 2}`, { headers: { authorization: `Bearer ${token}` } }), { catalog, admin: async () => null });
+      assert.equal(r.status, 200);
+    }
+  };
+  await reads(await catalog.createToken("dev", null));
+  await catalog.revokeToken("dev");
+  await reads(await catalog.createToken("dev", null, null, null, null, false, { ended: await catalog.endedToken("dev") }));
+  assert.equal(raised.length, 2);
+});
+
 test("webhookAlerts POSTs JSON in the background, and sends nothing without a URL", async () => {
   assert.equal(webhookAlerts(undefined, () => {}), undefined);
   const sent: { url: string; body: string }[] = [], waited: Promise<unknown>[] = [];

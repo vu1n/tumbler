@@ -1,8 +1,9 @@
 -- The distinct keys each caller token read in the alert window (alerts.ts bulk-read), one row per
--- (actor, scope/name): bounded by the keys a token reaches, however many reads it makes.
+-- (token, scope/name): bounded by the keys a token reaches, however many reads it makes. `token` is
+-- the token's hash, not its name, so a replacement under the same name starts at zero.
 CREATE TABLE read_reach (
-  actor    TEXT NOT NULL,
+  token    TEXT NOT NULL,
   key      TEXT NOT NULL,
   last_at TEXT NOT NULL,
-  PRIMARY KEY (actor, key)
+  PRIMARY KEY (token, key)
 );
