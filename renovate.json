@@ -1,4 +1,14 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>vu1n/renovate-config"]
+  "extends": ["github>vu1n/renovate-config"],
+  "packageRules": [
+    {
+      "description": "Keep the deploy tooling current: the shared preset turns routine bumps off, so wrangler would otherwise stay on the version first locked. Minor and patch merge on green CI, after the preset's 7-day release age.",
+      "matchPackageNames": ["wrangler", "@cloudflare/workers-types"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "enabled": true,
+      "groupName": "cloudflare tooling",
+      "automerge": true
+    }
+  ]
 }
