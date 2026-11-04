@@ -157,19 +157,24 @@ export class Catalog {
   constructor(db: D1Database, key: CryptoKey) { this.db = db; this.key = key; }
 
   async audit(actor: string, action: string, project: string | null, names: string[] = []) {
-    const earlier = action === "read" && this.alert ? await this.readsSince(actor, READ_WINDOW_MS) : [];
-    await this.auditRow(actor, action, project, names).run();
-    this.raise(actor, action, project, names, earlier);
+    if (action !== "read" || !this.alert || actor.includes("@")) {
+      await this.auditRow(actor, action, project, names).run();
+      return this.raise(actor, action, project, names);
+    }
+    // Record first, then count every read ordered before this row: D1 hands out ids one write at a
+    // time, so of any reads racing each other exactly one sees the count cross the threshold.
+    const row = await this.db.prepare("INSERT INTO audit (at, actor, action, project, names) VALUES (?, ?, ?, ?, ?) RETURNING id")
+      .bind(now(), actor, action, project, names.join(",")).first<{ id: number }>();
+    this.raise(actor, action, project, names, await this.readsBefore(actor, row!.id, READ_WINDOW_MS));
   }
   raise(actor: string, action: string, project: string | null, names: string[], earlier: string[] = []) {
     const a = this.alert && alarming(actor, action, project, names, now(), earlier);
     if (a) this.alert!(a);
   }
-  // The key names an actor read in the last `ms`, from the audit log (the bulk-read count spans calls).
-  async readsSince(actor: string, ms: number) {
-    if (actor.includes("@")) return [];
+  // The key names an actor read in the last `ms` in audit rows before `id` (the bulk-read count spans calls).
+  async readsBefore(actor: string, id: number, ms: number) {
     const since = new Date(Date.now() - ms).toISOString();
-    const { results } = await this.db.prepare("SELECT names FROM audit WHERE at >= ? AND actor = ? AND action = 'read'").bind(since, actor).all<{ names: string }>();
+    const { results } = await this.db.prepare("SELECT names FROM audit WHERE at >= ? AND actor = ? AND action = 'read' AND id < ?").bind(since, actor, id).all<{ names: string }>();
     return results.flatMap((r) => r.names ? r.names.split(",") : []);
   }
   auditRow(actor: string, action: string, project: string | null, names: string[] = []) {

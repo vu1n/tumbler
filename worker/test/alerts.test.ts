@@ -59,6 +59,20 @@ test("reading a few keys at a time still alerts once the token has read BULK_REA
   assert.ok(!JSON.stringify(raised).includes("value-"));
 });
 
+test("concurrent small reads still raise exactly one alert", async () => {
+  const catalog = new Catalog(memoryD1(), await masterKey(KEY));
+  for (let i = 0; i < 12; i++) await catalog.put("global", `KEY_${i}`, `value-${i}`);
+  const token = await catalog.createToken("dev", null);
+  const raised: Alert[] = [];
+  catalog.alert = (a) => raised.push(a);
+  const get = (path: string) => handle(new Request(`https://t.example${path}`, { headers: { authorization: `Bearer ${token}` } }), { catalog, admin: async () => null });
+
+  const rs = await Promise.all([0, 3, 6, 9].map((i) => get(`/v1/env?keys=KEY_${i},KEY_${i + 1},KEY_${i + 2}`)));
+  assert.ok(rs.every((r) => r.status === 200));
+  assert.equal(raised.length, 1);
+  assert.equal(raised[0].kind, "bulk-read");
+});
+
 test("webhookAlerts POSTs JSON in the background, and sends nothing without a URL", async () => {
   assert.equal(webhookAlerts(undefined, () => {}), undefined);
   const sent: { url: string; body: string }[] = [], waited: Promise<unknown>[] = [];
