@@ -3,6 +3,6 @@
 CREATE TABLE read_reach (
   actor    TEXT NOT NULL,
   key      TEXT NOT NULL,
-  first_at TEXT NOT NULL,
+  last_at TEXT NOT NULL,
   PRIMARY KEY (actor, key)
 );

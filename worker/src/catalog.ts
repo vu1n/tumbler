@@ -173,15 +173,18 @@ export class Catalog {
     const at = now(), since = new Date(Date.now() - READ_WINDOW_MS).toISOString();
     // D1 binds at most 100 values a statement: 30 keys (90 values) per insert.
     const chunks = Array.from({ length: Math.ceil(keys.length / 30) }, (_, i) => keys.slice(i * 30, i * 30 + 30));
+    const count = () => this.db.prepare("SELECT COUNT(*) AS n FROM read_reach WHERE actor = ?").bind(actor);
+    // A reread refreshes its key's time, so a key stays counted for an hour after its latest read.
     const out = await this.db.batch([
-      this.db.prepare("DELETE FROM read_reach WHERE actor = ? AND first_at < ?").bind(actor, since),
-      ...chunks.map((c) => this.db.prepare(`INSERT INTO read_reach (actor, key, first_at) VALUES ${c.map(() => "(?, ?, ?)").join(", ")} ON CONFLICT DO NOTHING RETURNING key`)
+      this.db.prepare("DELETE FROM read_reach WHERE actor = ? AND last_at < ?").bind(actor, since),
+      count(),
+      ...chunks.map((c) => this.db.prepare(`INSERT INTO read_reach (actor, key, last_at) VALUES ${c.map(() => "(?, ?, ?)").join(", ")} ON CONFLICT DO UPDATE SET last_at = excluded.last_at`)
         .bind(...c.flatMap((k) => [actor, k, at]))),
-      this.db.prepare("SELECT COUNT(*) AS n FROM read_reach WHERE actor = ?").bind(actor),
+      count(),
       this.db.prepare("SELECT key FROM read_reach WHERE actor = ? ORDER BY key LIMIT 50").bind(actor),
     ]);
-    const added = out.slice(1, -2).reduce((n, r) => n + r.results.length, 0);
-    const total = (out.at(-2)!.results[0] as { n: number }).n;
+    const n = (i: number) => (out.at(i)!.results[0] as { n: number }).n;
+    const total = n(-2), added = total - n(1);
     const names = (out.at(-1)!.results as { key: string }[]).map((r) => r.key);
     if (crossed(total, added, keys.length)) this.alert({ kind: "bulk-read", actor, project, names, at });
   }
