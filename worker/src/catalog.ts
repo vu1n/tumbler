@@ -168,6 +168,11 @@ export class Catalog {
   // named by scope and name (a project's key and a global of the same name are different secrets;
   // a global read through two projects is one). One transaction per read, so of reads racing each
   // other the last to commit sees every key, and the work is bounded by the keys a token reaches.
+  // Rows past the window for every token: one that stopped reading (expired, revoked, replaced)
+  // never clears its own. Run by the scheduled sweep.
+  async sweepReach() {
+    await this.db.prepare("DELETE FROM read_reach WHERE last_at < ?").bind(new Date(Date.now() - READ_WINDOW_MS).toISOString()).run();
+  }
   async trackReach(caller: Caller, project: string | null, keys: string[]) {
     const actor = caller.name, token = caller.hash ?? caller.name;
     if (!this.alert || actor.includes("@") || keys.length === 0) return;

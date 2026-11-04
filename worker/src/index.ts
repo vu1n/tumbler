@@ -51,8 +51,10 @@ export default {
     });
   },
   // Expire grants whose children are past expiry (and delete those children at the provider),
-  // and lapse requests nobody answered. The cron is in wrangler.jsonc.
+  // lapse requests nobody answered, and drop bulk-read reach rows past their window. The cron is in
+  // wrangler.jsonc.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(grantsFor(new Catalog(env.DB, await loadKey(env))).sweep());
+    const catalog = new Catalog(env.DB, await loadKey(env));
+    ctx.waitUntil(Promise.all([grantsFor(catalog).sweep(), catalog.sweepReach()]));
   },
 };

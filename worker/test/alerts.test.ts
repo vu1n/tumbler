@@ -131,6 +131,22 @@ test("a token replaced under the same name starts its count at zero", async () =
   assert.equal(raised.length, 2);
 });
 
+test("the sweep clears reach rows past the window for tokens that never read again", async () => {
+  const catalog = new Catalog(memoryD1(), await masterKey(KEY));
+  await catalog.put("global", "KEY_0", "value-0");
+  catalog.alert = () => {};
+  const token = await catalog.createToken("dev", null);
+  const get = (path: string) => handle(new Request(`https://t.example${path}`, { headers: { authorization: `Bearer ${token}` } }), { catalog, admin: async () => null });
+  assert.equal((await get("/v1/env?keys=KEY_0")).status, 200);
+  const rows = async () => (await catalog.db.prepare("SELECT COUNT(*) AS n FROM read_reach").first<{ n: number }>())!.n;
+  await catalog.sweepReach();
+  assert.equal(await rows(), 1); // still in the window
+  await catalog.db.prepare("UPDATE read_reach SET last_at = ?").bind(new Date(Date.now() - 2 * 60 * 60_000).toISOString()).run();
+  await catalog.revokeToken("dev");
+  await catalog.sweepReach();
+  assert.equal(await rows(), 0);
+});
+
 test("webhookAlerts POSTs JSON in the background, and sends nothing without a URL", async () => {
   assert.equal(webhookAlerts(undefined, () => {}), undefined);
   const sent: { url: string; body: string }[] = [], waited: Promise<unknown>[] = [];

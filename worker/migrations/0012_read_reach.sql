@@ -7,3 +7,4 @@ CREATE TABLE read_reach (
   last_at TEXT NOT NULL,
   PRIMARY KEY (token, key)
 );
+CREATE INDEX read_reach_last_at ON read_reach (last_at);
