@@ -136,8 +136,12 @@ through its `/.well-known/openid-configuration`, which must name the same issuer
 of the clock. A subject is exact or a `prefix*` (at least three characters before the `*`, since a bare
 `*` would take every job on GitHub); an exact subject wins over a prefix, and the longer prefix over the
 shorter. End a prefix at the issuer's delimiter: `repo:vu1n/kypp:*` is one repo, `repo:vu1n/kypp*` is
-also `kypp-fork`. Signing keys are cached ten minutes per issuer, and a key id the cache doesn't have refetches
-at most once a minute. The audit keeps the subject beside the token's name (`via`), so a row shared by
+also `kypp-fork`. The most specific binding is chosen before its liveness is checked, so revoking an exact binding (or
+letting it expire) cuts that subject off rather than handing it to a broader `prefix*` row; bind the
+subject again to restore it. Only keys the JWKS publishes for signing with the token's alg are used
+(`use`, `key_ops`, `alg` are honoured). Signing keys are cached ten minutes per issuer; a refresh,
+for expiry or a key id the cache doesn't have, starts at most once a minute per issuer, is shared by
+concurrent requests, and counts even when it fails, so the keys already held keep working. The audit keeps the subject beside the token's name (`via`), so a row shared by
 every branch of a repo still says which branch read what.
 
 ## CLI

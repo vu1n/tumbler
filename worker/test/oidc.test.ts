@@ -25,15 +25,16 @@ function jwt(claims: Record<string, unknown>, opts: { alg?: string; kid?: string
 
 // The issuer: an OpenID discovery document and a JWKS with one RSA and one EC key. Counts fetches.
 function fakeIssuer() {
-  const fetched: string[] = [];
+  const fetched: string[] = [], state = { down: false };
   const jwks = { keys: [{ ...rsa.publicKey.export({ format: "jwk" }), kid: "rsa1", alg: "RS256", use: "sig" }, { ...ec.publicKey.export({ format: "jwk" }), kid: "ec1" }] };
   const fetcher = (async (url: string) => {
     fetched.push(new URL(url).host + new URL(url).pathname);
+    if (state.down) return new Response("down", { status: 503 });
     if (url === `${ISS}/.well-known/openid-configuration`) return Response.json({ issuer: ISS, jwks_uri: `${ISS}/.well-known/jwks` });
     if (url === `${ISS}/.well-known/jwks`) return Response.json(jwks);
     return new Response("{}", { status: 404 });
   }) as unknown as typeof fetch;
-  return { fetched, fetcher, jwks };
+  return { fetched, fetcher, jwks, state };
 }
 
 async function setup() {
@@ -138,4 +139,65 @@ test("oidc: without an audience configured, no JWT is ever a caller", async () =
   await catalog.updateToken("ci", { oidc: { issuer: ISS, subject: "repo:vu1n/kypp:*" } });
   catalog.oidc = undefined;
   assert.equal((await call("GET", "/v1/env?keys=KYPP_DB", jwt({}))).status, 401);
+});
+
+test("oidc: revoking the most specific binding never falls back to a broader one", async () => {
+  const { catalog, call } = await setup();
+  await catalog.createToken("ci-main", ["kypp"]);
+  await catalog.updateToken("ci-main", { oidc: { issuer: ISS, subject: "repo:vu1n/kypp:ref:refs/heads/main" } });
+  await catalog.createToken("ci-any", ["kypp", "huddles"], null, ["*"]);
+  await catalog.updateToken("ci-any", { oidc: { issuer: ISS, subject: "repo:vu1n/*" } });
+  assert.equal((await (await call("GET", "/v1/whoami", jwt({}))).json()).name, "ci-main");
+  await catalog.revokeToken("ci-main");
+  assert.equal((await call("GET", "/v1/whoami", jwt({}))).status, 401);
+  // Other subjects still reach the prefix row.
+  assert.equal((await (await call("GET", "/v1/whoami", jwt({ sub: "repo:vu1n/kypp:pull_request" }))).json()).name, "ci-any");
+});
+
+test("oidc: an expired binding is replaced by recreating the token; concurrent binds can't both land", async () => {
+  const { catalog, call } = await setup();
+  const t0 = new Date();
+  const first = await call("POST", "/admin/api/tokens", undefined, { name: "ci", projects: ["kypp"], expires_at: new Date(t0.getTime() + 3600_000).toISOString(), oidc: { issuer: ISS, subject: "repo:vu1n/kypp:*" } }, true);
+  assert.equal(first.status, 200);
+  catalog.clock = () => new Date(t0.getTime() + 2 * 3600_000);
+  assert.equal((await call("GET", "/v1/whoami", jwt({}))).status, 401);
+  const again = await call("POST", "/admin/api/tokens", undefined, { name: "ci", projects: ["kypp"], oidc: { issuer: ISS, subject: "repo:vu1n/kypp:*" } }, true);
+  assert.equal(again.status, 200, await again.clone().text());
+  assert.equal((await (await call("GET", "/v1/whoami", jwt({}))).json()).name, "ci");
+  catalog.clock = () => new Date();
+  await catalog.createToken("a", null);
+  await catalog.createToken("b", null);
+  const binds = await Promise.allSettled(["a", "b"].map((n) => catalog.updateToken(n, { oidc: { issuer: ISS, subject: "repo:vu1n/other:*" } })));
+  assert.deepEqual(binds.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+  assert.match(String((binds.find((r) => r.status === "rejected") as PromiseRejectedResult).reason), /already bound/);
+});
+
+test("oidc: key refreshes are shared, start at most once a minute, and a failed one counts", async () => {
+  const iss = fakeIssuer(), base = Date.now();
+  let at = base;
+  const v = oidcVerifier(AUD, iss.fetcher, () => at), trusted = async () => true;
+  assert.ok(await v.verify(jwt({}), trusted));
+  assert.equal(iss.fetched.length, 2); // discovery + JWKS
+  at = base + 61_000;
+  await Promise.all(Array.from({ length: 5 }, (_, i) => v.verify(jwt({}, { kid: `new-${i}` }), trusted)));
+  assert.equal(iss.fetched.length, 4, "five concurrent unknown kids share one refresh");
+  at = base + 122_000;
+  iss.state.down = true;
+  assert.equal(await v.verify(jwt({}, { kid: "new-x" }), trusted), null);
+  const failed = iss.fetched.length;
+  assert.equal(await v.verify(jwt({}, { kid: "new-y" }), trusted), null);
+  assert.equal(iss.fetched.length, failed, "a failed refresh still counts as this minute's");
+  assert.ok(await v.verify(jwt({}), trusted), "the keys already held keep working while the issuer is down");
+});
+
+test("oidc: a key published for encryption, other operations or another alg never verifies", async () => {
+  for (const restrict of [{ use: "enc" }, { key_ops: ["encrypt"] }, { alg: "RS384" }]) {
+    const iss = fakeIssuer();
+    iss.jwks.keys[0] = { ...iss.jwks.keys[0], use: undefined, alg: undefined, ...restrict } as any;
+    const v = oidcVerifier(AUD, iss.fetcher);
+    assert.equal(await v.verify(jwt({}), async () => true), null, JSON.stringify(restrict));
+  }
+  const ok = fakeIssuer();
+  ok.jwks.keys[0] = { ...ok.jwks.keys[0], key_ops: ["verify"] } as any;
+  assert.ok(await oidcVerifier(AUD, ok.fetcher).verify(jwt({}), async () => true));
 });

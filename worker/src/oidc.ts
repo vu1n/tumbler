@@ -39,7 +39,8 @@ export function checkIssuer(iss: string): string {
 }
 
 export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, now = () => Date.now()): OidcVerifier {
-  const keys = new Map<string, { at: number; tried: number; jwks: Jwk[] }>();
+  type KeyCache = { at: number; tried: number; jwks: Jwk[]; inflight?: Promise<void> };
+  const keys = new Map<string, KeyCache>();
   const get = async (url: string) => {
     const r = await fetcher(url, { redirect: "manual", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), headers: { accept: "application/json" } });
     if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`oidc fetch ${r.status}`); }
@@ -54,14 +55,29 @@ export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, no
     const jwks = await get(jwksUri.toString());
     return Array.isArray(jwks?.keys) ? jwks.keys : [];
   };
-  const keyFor = async (iss: string, kid: string | undefined, kty: string): Promise<Jwk | undefined> => {
-    const pick = (list: Jwk[]) => list.find((k) => k.kty === kty && (kid === undefined ? list.filter((x) => x.kty === kty).length === 1 : k.kid === kid));
+  // One fetch at a time per issuer, and at most one start a minute, failed or not: the attempt is
+  // recorded before it is awaited, and concurrent callers share it, so unauthenticated requests can
+  // neither fan out fetches nor hammer an issuer that is down. A failure keeps the keys already held.
+  const refresh = (iss: string, c: KeyCache) => {
+    if (c.inflight) return c.inflight;
+    c.tried = now();
+    return c.inflight = fetchKeys(iss).then((jwks) => { c.jwks = jwks; c.at = now(); })
+      .catch((e) => console.error("tumbler: oidc keys fetch failed", e instanceof Error ? e.name : "other"))
+      .finally(() => { c.inflight = undefined; });
+  };
+  const keyFor = async (iss: string, kid: string | undefined, alg: string, kty: string): Promise<Jwk | undefined> => {
+    // Only keys published for signing with this algorithm: a key marked for encryption, for other
+    // operations or for another alg never verifies a caller.
+    const usable = (k: Jwk & { use?: string }) => k.kty === kty && (k.use === undefined || k.use === "sig")
+      && (k.key_ops === undefined || (Array.isArray(k.key_ops) && k.key_ops.includes("verify"))) && (k.alg === undefined || k.alg === alg);
+    const pick = (list: Jwk[]) => { const ok = list.filter(usable); return kid === undefined ? (ok.length === 1 ? ok[0] : undefined) : ok.find((k) => k.kid === kid); };
     let c = keys.get(iss);
-    const t = now();
-    if (!c || t - c.at > JWKS_TTL_MS) { c = { at: t, tried: t, jwks: await fetchKeys(iss) }; keys.set(iss, c); }
+    if (!c) keys.set(iss, c = { at: 0, tried: -Infinity, jwks: [] });
+    const due = () => now() - c!.tried > REFETCH_MS;
+    if (now() - c.at > JWKS_TTL_MS && (c.inflight || due())) await refresh(iss, c);
     let k = pick(c.jwks);
     // A rotation the cache hasn't seen: one refetch, at most once a minute per issuer.
-    if (!k && t - c.tried > REFETCH_MS) { c = { at: t, tried: t, jwks: await fetchKeys(iss) }; keys.set(iss, c); k = pick(c.jwks); }
+    if (!k && (c.inflight || due())) { await refresh(iss, c); k = pick(c.jwks); }
     return k;
   };
 
@@ -83,7 +99,7 @@ export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, no
       if (typeof payload.exp !== "number" || payload.exp <= t || payload.exp > t + MAX_LIFETIME_S + SKEW_S) return null;
       if ((typeof payload.nbf === "number" && payload.nbf > t + SKEW_S) || (typeof payload.iat === "number" && payload.iat > t + SKEW_S)) return null;
       try {
-        const jwk = await keyFor(iss, typeof header.kid === "string" ? header.kid : undefined, alg.kty);
+        const jwk = await keyFor(iss, typeof header.kid === "string" ? header.kid : undefined, header.alg, alg.kty);
         if (!jwk) return null;
         const { kid: _kid, alg: _alg, use: _use, key_ops: _ops, ...bare } = jwk as Jwk & { use?: string };
         const key = await crypto.subtle.importKey("jwk", bare, alg.import, false, ["verify"]);

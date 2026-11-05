@@ -234,14 +234,20 @@ export class Catalog {
   private async federated(jwt: string): Promise<Caller | null> {
     if (!this.oidc) return null;
     const t = this.clock().toISOString();
-    const rows = async (iss: string) => (await this.db.prepare(`SELECT name, hash, projects, scopes, writes, operator, delegate, parent, expires_at, oidc_subject FROM tokens WHERE oidc_issuer = ? AND ${LIVE_TOKEN}`)
-      .bind(iss, t, t).all<CallerRow & { oidc_subject: string }>()).results;
-    const v = await this.oidc.verify(jwt, async (iss) => (await rows(iss)).length > 0);
+    const v = await this.oidc.verify(jwt, async (iss) => !!(await this.db.prepare(`SELECT 1 FROM tokens WHERE oidc_issuer = ? AND ${LIVE_TOKEN}`).bind(iss, t, t).first()));
     if (!v) return null;
-    const hits = (await rows(v.iss)).filter((r) => r.oidc_subject === v.sub || (r.oidc_subject.endsWith("*") && v.sub.startsWith(r.oidc_subject.slice(0, -1))));
-    hits.sort((a, b) => (b.oidc_subject === v.sub ? 1 : 0) - (a.oidc_subject === v.sub ? 1 : 0) || b.oidc_subject.length - a.oidc_subject.length);
-    if (!hits.length) return null;
-    const me = await this.asCaller(hits[0]);
+    // Every row bound to the issuer, live or not, so the most specific binding is chosen before its
+    // liveness is checked: revoking an exact binding (or its parent) never hands the same JWT a
+    // broader prefix row instead. Among rows with that same subject (a revoked one and the one that
+    // replaced it), a live one acts.
+    const { results } = await this.db.prepare(`SELECT name, hash, projects, scopes, writes, operator, delegate, parent, expires_at, oidc_subject,
+      CASE WHEN ${LIVE_TOKEN} THEN 1 ELSE 0 END AS live FROM tokens WHERE oidc_issuer = ?`).bind(t, t, v.iss).all<CallerRow & { oidc_subject: string; live: number }>();
+    const rank = (sub: string) => sub === v.sub ? Infinity : sub.endsWith("*") && v.sub.startsWith(sub.slice(0, -1)) ? sub.length : -1;
+    const best = Math.max(-1, ...results.map((r) => rank(r.oidc_subject)));
+    if (best < 0) return null;
+    const row = results.find((r) => rank(r.oidc_subject) === best && r.live);
+    if (!row) return null;
+    const me = await this.asCaller(row);
     return me && { ...me, subject: v.sub };
   }
 
@@ -363,9 +369,6 @@ export class Catalog {
         try { issuer = checkIssuer(String(edit.oidc.issuer ?? "")); } catch (e) { throw new Refused(400, (e as Error).message); }
         const subject = String(edit.oidc.subject ?? "");
         checkSubject(subject);
-        // Why: two live rows on one issuer and subject would leave which one a token gets to row order.
-        const twin = await this.db.prepare("SELECT name FROM tokens WHERE oidc_issuer = ? AND oidc_subject = ? AND name != ? AND revoked_at IS NULL").bind(issuer, subject, name).first<{ name: string }>();
-        if (twin) throw new Refused(409, `token ${twin.name} is already bound to ${issuer} ${subject}`);
         done.oidc = { issuer, subject };
       } else done.oidc = null;
       sets.push("oidc_issuer = ?", "oidc_subject = ?"); binds.push(done.oidc?.issuer ?? null, done.oidc?.subject ?? null);
@@ -374,8 +377,18 @@ export class Catalog {
     // A token a delegate made is never itself a delegate or an operator: delegation stays one level
     // deep, so its parent's revoke and bounds (checked one level up) always reach it.
     const raise = done.delegate === true || done.operator === true ? 1 : 0;
-    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL AND (? = 0 OR parent IS NULL) RETURNING hash`).bind(...binds, name, raise).first<{ hash: string }>();
+    // Why in the UPDATE itself: two live rows on one issuer and subject would leave which one a token
+    // gets to row order, and a separate lookup lets two concurrent binds both pass. One statement is
+    // one write, so the second bind finds the first. An ended row's binding never blocks a new one.
+    const twin = done.oidc ? `AND NOT EXISTS (SELECT 1 FROM tokens o WHERE o.oidc_issuer = ? AND o.oidc_subject = ? AND o.name != tokens.name AND o.revoked_at IS NULL AND (o.expires_at IS NULL OR o.expires_at > ?))` : "";
+    const twinBinds = done.oidc ? [done.oidc.issuer, done.oidc.subject, this.clock().toISOString()] : [];
+    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL AND (? = 0 OR parent IS NULL) ${twin} RETURNING hash`).bind(...binds, name, raise, ...twinBinds).first<{ hash: string }>();
     if (!r) {
+      if (done.oidc) {
+        const o = await this.db.prepare("SELECT name FROM tokens WHERE oidc_issuer = ? AND oidc_subject = ? AND name != ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
+          .bind(done.oidc.issuer, done.oidc.subject, name, this.clock().toISOString()).first<{ name: string }>();
+        if (o) throw new Refused(409, `token ${o.name} is already bound to ${done.oidc.issuer} ${done.oidc.subject}`);
+      }
       const t = await this.db.prepare("SELECT parent FROM tokens WHERE name = ? AND revoked_at IS NULL").bind(name).first<{ parent: string | null }>();
       if (t?.parent) throw new Refused(409, `token ${name} was made by ${t.parent}, so it can't be a delegate or an operator; create it as an admin token instead`);
       throw new Refused(404, `no live token ${name}`);
