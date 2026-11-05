@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { handle } from "../src/app.ts";
 import { Catalog } from "../src/catalog.ts";
 import { masterKey } from "../src/crypto.ts";
-import { MAX_LIFETIME_S, oidcVerifier } from "../src/oidc.ts";
+import { MAX_KEY_AGE_MS, MAX_LIFETIME_S, oidcVerifier } from "../src/oidc.ts";
 import { memoryD1 } from "./d1.ts";
 
 const ISS = "https://token.actions.example.com", AUD = "https://tumbler.example.com";
@@ -188,6 +188,13 @@ test("oidc: key refreshes are shared, start at most once a minute, and a failed 
   assert.equal(await v.verify(jwt({}, { kid: "new-y" }), trusted), null);
   assert.equal(iss.fetched.length, failed, "a failed refresh still counts as this minute's");
   assert.ok(await v.verify(jwt({}), trusted), "the keys already held keep working while the issuer is down");
+  // Held past MAX_KEY_AGE_MS with every refresh failing, they verify nothing: the issuer may have revoked them.
+  at = base + 61_000 + MAX_KEY_AGE_MS + 1; // the last good refresh was at base + 61s
+  const fresh = () => jwt({ iat: Math.floor(at / 1000), exp: Math.floor(at / 1000) + 300 });
+  assert.equal(await v.verify(fresh(), trusted), null, "keys older than the max age are refused while the issuer is down");
+  iss.state.down = false;
+  at += 61_000;
+  assert.ok(await v.verify(fresh(), trusted), "the issuer back up, a refresh restores them");
 });
 
 test("oidc: a key published for encryption, other operations or another alg never verifies", async () => {
@@ -200,4 +207,15 @@ test("oidc: a key published for encryption, other operations or another alg neve
   const ok = fakeIssuer();
   ok.jwks.keys[0] = { ...ok.jwks.keys[0], key_ops: ["verify"] } as any;
   assert.ok(await oidcVerifier(AUD, ok.fetcher).verify(jwt({}), async () => true));
+});
+
+test("oidc: a delegate's OIDC caller that stores a token is named in both audit rows", async () => {
+  const { catalog, call } = await setup();
+  await catalog.createToken("ci-dev", ["kypp"], null, null, ["kypp"]);
+  await catalog.updateToken("ci-dev", { delegate: true, oidc: { issuer: ISS, subject: "repo:vu1n/kypp:*" } });
+  const r = await call("POST", "/v1/tokens", jwt({}), { name: "vps", projects: ["kypp"], store: { scope: "kypp", name: "VPS_TOKEN" } });
+  assert.equal(r.status, 200);
+  const rows = (await catalog.recentAudit()).filter((a: any) => a.action === "token-create" || a.action === "put") as any[];
+  assert.deepEqual(rows.filter((a) => a.actor === "ci-dev").map((a) => [a.action, a.via]).sort(),
+    [["put", "repo:vu1n/kypp:ref:refs/heads/main"], ["token-create", "repo:vu1n/kypp:ref:refs/heads/main"]]);
 });

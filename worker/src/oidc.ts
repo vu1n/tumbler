@@ -18,6 +18,9 @@ const JWKS_TTL_MS = 10 * 60_000;
 // An unknown kid refetches the JWKS at most this often per issuer, so tokens with made-up kids can't
 // make the broker fetch on every request.
 const REFETCH_MS = 60_000;
+// Keys held past this age, because every refresh since has failed, verify nothing: an issuer that
+// stays unreachable may have revoked a key we still hold. An hour rides out a short outage.
+export const MAX_KEY_AGE_MS = 60 * 60_000;
 const FETCH_TIMEOUT_MS = 5_000;
 const ALGS: Record<string, { import: Parameters<SubtleCrypto["importKey"]>[2]; verify: Parameters<SubtleCrypto["verify"]>[0]; kty: string }> = {
   RS256: { import: { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, verify: "RSASSA-PKCS1-v1_5", kty: "RSA" },
@@ -57,7 +60,7 @@ export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, no
   };
   // One fetch at a time per issuer, and at most one start a minute, failed or not: the attempt is
   // recorded before it is awaited, and concurrent callers share it, so unauthenticated requests can
-  // neither fan out fetches nor hammer an issuer that is down. A failure keeps the keys already held.
+  // neither fan out fetches nor hammer an issuer that is down. A failure keeps the keys already held, up to MAX_KEY_AGE_MS.
   const refresh = (iss: string, c: KeyCache) => {
     if (c.inflight) return c.inflight;
     c.tried = now();
@@ -78,7 +81,7 @@ export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, no
     let k = pick(c.jwks);
     // A rotation the cache hasn't seen: one refetch, at most once a minute per issuer.
     if (!k && (c.inflight || due())) { await refresh(iss, c); k = pick(c.jwks); }
-    return k;
+    return now() - c.at > MAX_KEY_AGE_MS ? undefined : k;
   };
 
   return {

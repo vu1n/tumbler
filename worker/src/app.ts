@@ -271,7 +271,7 @@ async function delegateCreate(catalog: Catalog, grants: Grants | undefined, call
   }
   const created = [name, `parent:${caller.name}`], kin = { parent: caller };
   const token = into ? null : await catalog.createToken(name, child.projects, expires, child.scopes, child.writes, false, kin);
-  if (into) await catalog.createTokenInto(caller.name, into, created, name, child.projects, expires, child.scopes, child.writes, false, kin);
+  if (into) await catalog.createTokenInto(caller.name, into, created, name, child.projects, expires, child.scopes, child.writes, false, kin, caller.subject);
   if (into) return { name, expires_at: expires, stored: into }; // never shown: it went straight into the key
   await catalog.audit(caller.name, "token-create", null, created, caller.subject);
   return { name, expires_at: expires, token }; // shown once

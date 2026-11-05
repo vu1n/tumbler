@@ -286,14 +286,14 @@ export class Catalog {
   // all lands or none of it does, so a failure never leaves a working token nobody holds, nor a key
   // overwritten for a token that doesn't exist. `kin` as for createToken().
   async createTokenInto(who: string, into: { scope: string; name: string; description?: string }, created: string[], name: string, projects: string[] | null, expiresAt: string | null = null,
-    scopes: string[] | null = null, writes: string[] | null = null, operator = false, kin: Kin = {}) {
+    scopes: string[] | null = null, writes: string[] | null = null, operator = false, kin: Kin = {}, via?: string) {
     // The target is checked again inside the transaction: a key that became minted, or gained a
     // check, while this ran holds another service's credential and is never overwritten.
     const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, kin, {
       sql: "NOT EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND (kind != 'static' OR json_extract(COALESCE(NULLIF(config, ''), '{}'), '$.check') IS NOT NULL))",
       binds: [into.scope, into.name] });
     await this.db.batch([...this.reuse(name, kin.ended), insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
-      this.auditRow(who, "token-create", null, created), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name])])
+      this.auditRow(who, "token-create", null, created, via), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name], via)])
       .catch((e: Error) => {
         const refused = insertRefusal(e, name, kin, into);
         if (refused) throw refused;
