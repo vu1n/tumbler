@@ -837,8 +837,8 @@ const ADMIN_USAGE = `usage: tumbler admin <command>
                                           with --oidc no secret exists: tokens ISSUER signs for SUB
                                           (exact, or prefix*) act as it
   token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off] [--delegate on|off]
-      [--oidc ISSUER --subject SUB | --oidc off]
-                                          (an empty list clears it; binding --oidc ends its secret)
+      [--oidc ISSUER --subject SUB]
+                                          (an empty list clears it; binding --oidc ends its secret, and a binding never changes: revoke and create another)
                                           --operator on: the token may change minted keys' groups
                                           with tumbler scope (never tokens, parents or token groups)
                                           --delegate on: the token may create tokens no wider than
@@ -921,8 +921,8 @@ async function admin(args) {
       const [verb, ...more] = rest;
       const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--operator": "value", "--delegate": "value", "--expires-hours": "value", "--store": "value", "--scope": "value", "-d": "value", "--description": "value", "--oidc": "value", "--subject": "value" });
       const [name] = f._;
-      if ((f["--subject"] !== undefined) !== (f["--oidc"] !== undefined && f["--oidc"] !== "off") || (f["--oidc"] === "off" && verb !== "edit")) die("--oidc ISSUER and --subject SUB go together (--oidc off only on edit)", 2);
-      const oidc = f["--oidc"] === undefined ? {} : { oidc: f["--oidc"] === "off" ? null : { issuer: f["--oidc"], subject: f["--subject"] } };
+      if ((f["--subject"] !== undefined) !== (f["--oidc"] !== undefined)) die("--oidc ISSUER and --subject SUB go together", 2);
+      const oidc = f["--oidc"] === undefined ? {} : { oidc: { issuer: f["--oidc"], subject: f["--subject"] } };
       if (!name || f._.length > 1) die(ADMIN_USAGE, 2);
       if (f["--operator"] !== undefined && !["on", "off"].includes(f["--operator"])) die("--operator takes on or off", 2);
       if (f["--delegate"] !== undefined && !["on", "off"].includes(f["--delegate"])) die("--delegate takes on or off", 2);

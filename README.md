@@ -119,7 +119,9 @@ the JWT only proves who is asking. Revoke the row and its JWTs stop on their nex
    Unset, no JWT is ever a caller.
 2. `tumbler admin token create ci-kypp --pin kypp --oidc https://token.actions.githubusercontent.com --subject 'repo:vu1n/kypp:*'`
    prints no token: none exists. `token edit NAME --oidc ISSUER --subject SUB` binds an existing
-   token (its own secret stops working), and `--oidc off` unbinds it.
+   token (its own secret stops working). A binding never changes or comes off: to move it, revoke
+   the token and create another, so the revoked row keeps denying the old subject rather than
+   letting it fall through to a broader prefix.
 3. The caller presents the JWT as `TUMBLER_TOKEN`, or names a file a platform mounts and rotates in
    `TUMBLER_TOKEN_FILE` (read on every call). In GitHub Actions, with `permissions: id-token: write`:
 

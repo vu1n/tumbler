@@ -224,7 +224,10 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     // Values go out only if the credential that asked still works now: a revoke (or its name reused
     // by a new token, whose grants share the name) while this ran wins over the request.
     if ((await catalog.caller(token!))?.hash !== caller.hash) return json({ error: "unauthorized" }, 401);
-    return json(minted ? { env, max_age: MINTED_MAX_AGE_S } : { env });
+    // max_age bounds the CLI's cache: a minted child's margin, and an OIDC caller's JWT expiry, so a
+    // cached env never outlives the credential that read it.
+    const ages = [...(minted ? [MINTED_MAX_AGE_S] : []), ...(caller.until !== undefined ? [Math.max(0, Math.floor(caller.until - catalog.clock().getTime() / 1000))] : [])];
+    return json(ages.length ? { env, max_age: Math.min(...ages) } : { env });
   }
   return json({ error: "not found" }, 404);
 }

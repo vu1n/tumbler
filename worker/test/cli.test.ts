@@ -498,7 +498,6 @@ test("admin token create --oidc binds an issuer and subject and prints no secret
   assert.match(made.stderr, /signs for repo:vu1n\/kypp:\* act as it/);
   const row = await catalog.tokenRow("ci-oidc");
   assert.deepEqual([row?.oidc_issuer, row?.oidc_subject], ["https://token.actions.githubusercontent.com", "repo:vu1n/kypp:*"]);
-  assert.equal((await adminCli(["token", "edit", "ci-oidc", "--oidc", "off"])).code, 0);
-  assert.equal((await catalog.tokenRow("ci-oidc"))?.oidc_issuer, null);
+  assert.match((await adminCli(["token", "edit", "ci-oidc", "--oidc", "https://token.actions.githubusercontent.com", "--subject", "repo:vu1n/other:*"])).stderr, /a binding never changes/);
   assert.match((await adminCli(["token", "create", "x", "--subject", "abc"])).stderr, /go together/);
 });

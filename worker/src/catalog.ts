@@ -117,8 +117,9 @@ export function writeReaches(writes: string[] | null | undefined, scope: string)
 // `delegate`: may create tokens no wider than itself (`tumbler token create`); `parent`: the delegate
 // that created this one, if any. `hash`: which credential authenticated, so a mint that lands after
 // the name was reused by a new token is refused (the name alone would pass).
-// `subject`: the OIDC subject this request proved (oidc.ts), for a token row bound to an issuer.
-export interface Caller { subject?: string; name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; parent?: string | null; expires_at?: string | null; hash?: string }
+// `subject`: the OIDC subject this request proved (oidc.ts), for a token row bound to an issuer;
+// `until`: when that JWT expires (epoch seconds), so nothing served to it is cached past it.
+export interface Caller { subject?: string; until?: number; name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; parent?: string | null; expires_at?: string | null; hash?: string }
 
 // What a delegate's new token would hold beyond the delegate itself, as reasons; empty: within it.
 // A pin or write entry is within when the delegate reaches that exact scope (`*` and `*/env` only
@@ -248,7 +249,7 @@ export class Catalog {
     const row = results.find((r) => rank(r.oidc_subject) === best && r.live);
     if (!row) return null;
     const me = await this.asCaller(row);
-    return me && { ...me, subject: v.sub };
+    return me && { ...me, subject: v.sub, until: v.exp };
   }
 
   private async asCaller(row: CallerRow): Promise<Caller | null> {
@@ -382,8 +383,18 @@ export class Catalog {
     // one write, so the second bind finds the first. An ended row's binding never blocks a new one.
     const twin = done.oidc ? `AND NOT EXISTS (SELECT 1 FROM tokens o WHERE o.oidc_issuer = ? AND o.oidc_subject = ? AND o.name != tokens.name AND o.revoked_at IS NULL AND (o.expires_at IS NULL OR o.expires_at > ?))` : "";
     const twinBinds = done.oidc ? [done.oidc.issuer, done.oidc.subject, this.clock().toISOString()] : [];
-    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL AND (? = 0 OR parent IS NULL) ${twin} RETURNING hash`).bind(...binds, name, raise, ...twinBinds).first<{ hash: string }>();
+    // A binding, once set, never changes or comes off: dropping a row's subject would hand that
+    // subject's next JWT to a broader prefix row, the fallback federated() refuses for a revoked row.
+    // A new binding is a new token, and the revoked one stays to deny its subject. Same binding again: no change.
+    const fixed = "oidc" in edit ? (done.oidc ? "AND (oidc_issuer IS NULL OR (oidc_issuer = ? AND oidc_subject = ?))" : "AND oidc_issuer IS NULL") : "";
+    const fixedBinds = done.oidc ? [done.oidc.issuer, done.oidc.subject] : [];
+    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL AND (? = 0 OR parent IS NULL) ${fixed} ${twin} RETURNING hash`).bind(...binds, name, raise, ...fixedBinds, ...twinBinds).first<{ hash: string }>();
     if (!r) {
+      if ("oidc" in edit) {
+        const b = await this.db.prepare("SELECT oidc_issuer, oidc_subject FROM tokens WHERE name = ? AND revoked_at IS NULL AND oidc_issuer IS NOT NULL").bind(name).first<{ oidc_issuer: string; oidc_subject: string }>();
+        if (b && (b.oidc_issuer !== done.oidc?.issuer || b.oidc_subject !== done.oidc?.subject))
+          throw new Refused(409, `token ${name} is bound to ${b.oidc_issuer} ${b.oidc_subject}, and a binding never changes; revoke ${name} (it keeps denying that subject) and create another token`);
+      }
       if (done.oidc) {
         const o = await this.db.prepare("SELECT name FROM tokens WHERE oidc_issuer = ? AND oidc_subject = ? AND name != ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
           .bind(done.oidc.issuer, done.oidc.subject, name, this.clock().toISOString()).first<{ name: string }>();

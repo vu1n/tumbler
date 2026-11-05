@@ -58,6 +58,9 @@ test("oidc: an admin binds a token to an issuer and subject; the job's JWT reads
   assert.deepEqual(made, { name: "ci-kypp", oidc: { issuer: ISS, subject: "repo:vu1n/kypp:*" } });
   const env = await call("GET", "/v1/env?keys=KYPP_DB", jwt({}));
   assert.deepEqual((await env.json()).env, { KYPP_DB: "fake-kypp-db" });
+  // The env's max_age, which bounds the CLI's cache, never runs past the JWT's own expiry.
+  const short = await (await call("GET", "/v1/env?keys=KYPP_DB", jwt({ exp: nowS() + 30 }))).json();
+  assert.ok(short.max_age <= 30 && short.max_age >= 28, `max_age ${short.max_age}`);
   // The pin still decides: the JWT proves who, never what.
   assert.equal((await call("GET", "/v1/env?project=huddles&keys=HUDDLES_DB", jwt({}))).status, 403);
   const who = await (await call("GET", "/v1/whoami", jwt({ alg: "ES256" }))).json();
@@ -218,4 +221,23 @@ test("oidc: a delegate's OIDC caller that stores a token is named in both audit 
   const rows = (await catalog.recentAudit()).filter((a: any) => a.action === "token-create" || a.action === "put") as any[];
   assert.deepEqual(rows.filter((a) => a.actor === "ci-dev").map((a) => [a.action, a.via]).sort(),
     [["put", "repo:vu1n/kypp:ref:refs/heads/main"], ["token-create", "repo:vu1n/kypp:ref:refs/heads/main"]]);
+});
+
+test("oidc: a binding never changes or comes off, so its subject can't fall through to a broader row", async () => {
+  const { catalog, call } = await setup();
+  await catalog.createToken("broad", ["kypp", "huddles"]);
+  await catalog.updateToken("broad", { oidc: { issuer: ISS, subject: "repo:vu1n/*" } });
+  await catalog.createToken("narrow", ["kypp"]);
+  await catalog.updateToken("narrow", { oidc: { issuer: ISS, subject: "repo:vu1n/kypp:ref:refs/heads/main" } });
+  for (const oidc of [{ issuer: ISS, subject: "repo:vu1n/kypp:ref:refs/heads/dev" }, null]) {
+    await assert.rejects(catalog.updateToken("narrow", { oidc }), /a binding never changes/);
+    const r = await call("PATCH", "/admin/api/tokens/narrow", undefined, { oidc }, true);
+    assert.equal(r.status, 409);
+  }
+  await catalog.updateToken("narrow", { oidc: { issuer: ISS + "/", subject: "repo:vu1n/kypp:ref:refs/heads/main" } }); // the same binding: no change
+  assert.equal((await (await call("GET", "/v1/whoami", jwt({}))).json()).name, "narrow");
+  // An unbound token binds once; binding nothing on it changes nothing.
+  await catalog.createToken("plain", ["kypp"]);
+  await catalog.updateToken("plain", { oidc: null });
+  assert.equal((await catalog.tokenRow("plain"))?.oidc_issuer, null);
 });

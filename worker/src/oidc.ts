@@ -7,7 +7,7 @@
 // other issuer costs no fetch), RS256 or ES256 only, a signature by a key in the issuer's JWKS (found
 // through its OpenID discovery document), `aud` holding this broker's audience exactly, `exp` in the
 // future and at most MAX_LIFETIME_S away, `nbf` and `iat` not ahead of the clock.
-export type Verified = { iss: string; sub: string };
+export type Verified = { iss: string; sub: string; exp: number };
 export interface OidcVerifier { audience: string; verify(jwt: string, trusts: (iss: string) => Promise<boolean>): Promise<Verified | null> }
 
 const SKEW_S = 60;
@@ -107,7 +107,7 @@ export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, no
         const { kid: _kid, alg: _alg, use: _use, key_ops: _ops, ...bare } = jwk as Jwk & { use?: string };
         const key = await crypto.subtle.importKey("jwk", bare, alg.import, false, ["verify"]);
         const ok = await crypto.subtle.verify(alg.verify, key, b64url(s), new TextEncoder().encode(`${h}.${p}`));
-        return ok ? { iss, sub: payload.sub } : null;
+        return ok ? { iss, sub: payload.sub, exp: payload.exp } : null;
       } catch (e) {
         // An issuer we can't reach refuses the token; never its error text, which can quote a URL.
         console.error("tumbler: oidc verify failed", e instanceof Error ? e.name : "other");
