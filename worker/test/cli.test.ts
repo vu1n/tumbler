@@ -501,3 +501,24 @@ test("admin token create --oidc binds an issuer and subject and prints no secret
   assert.match((await adminCli(["token", "edit", "ci-oidc", "--oidc", "https://token.actions.githubusercontent.com", "--subject", "repo:vu1n/other:*"])).stderr, /a binding never changes/);
   assert.match((await adminCli(["token", "create", "x", "--subject", "abc"])).stderr, /go together/);
 });
+
+test("a cached env's max_age counts from the request, so a slow answer never stretches it", async () => {
+  let served = 0;
+  const broker = createServer(async (req, res) => {
+    if (!req.url?.startsWith("/v1/env")) { res.writeHead(404); return res.end("{}"); }
+    served++;
+    await new Promise((ok) => setTimeout(ok, 2000)); // 2s in transit, of a 3s max_age
+    res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ env: { SLOW_KEY: "v" }, max_age: 3 }));
+  });
+  await new Promise<void>((ok) => broker.listen(0, "127.0.0.1", ok));
+  try {
+    const env = { ...baseEnv, HOME: home, XDG_RUNTIME_DIR: mkdtempSync(join(tmpdir(), "tumbler-run-")), TUMBLER_URL: `http://127.0.0.1:${(broker.address() as any).port}`,
+      TUMBLER_TOKEN: "slow-token", TUMBLER_AUTO: "off", TUMBLER_UPDATE_CHECK: "off", TUMBLER_IDLE: "10" };
+    const start = Date.now(), run = () => exec(CLI, ["run", "-k", "SLOW_KEY", "--", "node", "-e", "process.stdout.write(process.env.SLOW_KEY)"], { env });
+    assert.equal((await run()).stdout, "v");
+    await new Promise((ok) => setTimeout(ok, Math.max(0, start + 3500 - Date.now())));
+    // 3.5s after asking: past max_age from the request, though only 1.5s after the answer arrived.
+    assert.equal((await run()).stdout, "v");
+    assert.equal(served, 2, "the second run fetched again");
+  } finally { broker.close(); }
+});

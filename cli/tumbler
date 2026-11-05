@@ -207,8 +207,11 @@ function daemon() {
         // Why: the caller's TTL, not the one the helper started with, so lowering it takes effect. An
         // env with a minted child also carries the broker's max_age, so it never outlives the child.
         if (hit && !req.fresh && Date.now() - hit.at < Math.min(req.ttl, hit.maxAge)) return reply({ env: hit.env, cli: hit.cli });
+        // Why `asked`, taken before the request: max_age counts from when the broker answered, so
+        // counting from receipt would stretch it by the transit time, past an OIDC token's expiry.
+        const asked = Date.now();
         const { env, max_age } = await brokerGet(path, { url: req.url, token: req.token });
-        cache.set(slot, { at: Date.now(), env, cli: lastServed, maxAge: max_age === undefined ? Infinity : Number(max_age) * 1000 });
+        cache.set(slot, { at: asked, env, cli: lastServed, maxAge: max_age === undefined ? Infinity : Number(max_age) * 1000 });
         reply({ env, cli: lastServed });
       } catch (e) { reply({ error: e.message }); }
     });

@@ -63,7 +63,8 @@ test("oidc: an admin binds a token to an issuer and subject; the job's JWT reads
   assert.ok(short.max_age <= 30 && short.max_age >= 28, `max_age ${short.max_age}`);
   // The pin still decides: the JWT proves who, never what.
   assert.equal((await call("GET", "/v1/env?project=huddles&keys=HUDDLES_DB", jwt({}))).status, 403);
-  const who = await (await call("GET", "/v1/whoami", jwt({ alg: "ES256" }))).json();
+  const who = await (await call("GET", "/v1/whoami", jwt({}, { alg: "ES256" }))).json();
+  assert.equal((await call("GET", "/v1/whoami", jwt({}, { alg: "ES256", key: generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey }))).status, 401, "an EC signature by another key");
   assert.equal(who.name, "ci-kypp");
   assert.equal(who.oidc_subject, "repo:vu1n/kypp:ref:refs/heads/main");
   // The audit names the token and the subject it proved.
