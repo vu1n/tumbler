@@ -1201,3 +1201,16 @@ test("a delegate's token stops at its parent's current bounds even when cleanup 
   assert.equal(await s.catalog.tokenRow("vps3"), null);
   assert.equal(await s.catalog.value((await s.catalog.keyRow("dev", "VPS_TOKEN"))!), "old-value");
 });
+
+test("an OIDC caller's mint and step-up name the subject it proved in the audit", async () => {
+  const s = await setup();
+  const iss = "https://token.actions.example.com", sub = "repo:vu1n/kypp:ref:refs/heads/main", jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
+  // A stand-in verifier: oidc.test.ts covers the real one. It accepts this one JWT for a trusted issuer.
+  s.catalog.oidc = { audience: "https://t.example", verify: async (t, trusts) => t === jwt && await trusts(iss) ? { iss, sub, exp: Date.now() / 1000 + 300 } : null };
+  await s.catalog.updateToken("dev", { oidc: { issuer: iss, subject: "repo:vu1n/kypp:*" } });
+  assert.equal((await s.env(jwt)).status, 200);
+  assert.equal((await s.call("POST", "/v1/step-up", jwt, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] })).status, 200);
+  const rows = (await s.catalog.recentAudit()).filter((a: any) => a.action.startsWith("grant-")) as any[];
+  assert.deepEqual(rows.map((a) => a.action).sort(), ["grant-mint", "grant-mint", "grant-step-up"]);
+  assert.ok(rows.every((a) => a.actor === "dev" && a.via === sub), JSON.stringify(rows));
+});

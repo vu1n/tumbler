@@ -173,6 +173,11 @@ export class Catalog {
   constructor(db: D1Database, key: CryptoKey) { this.db = db; this.key = key; }
 
   // `via`: the OIDC subject a federated caller proved, kept beside its token's name.
+  // What a caller did: always with the OIDC subject it proved, so no path can drop it. Use this for
+  // any action a request's caller takes; audit() is for admins and the system.
+  auditBy(caller: Caller, action: string, project: string | null, names: string[] = []) {
+    return this.audit(caller.name, action, project, names, caller.subject);
+  }
   async audit(actor: string, action: string, project: string | null, names: string[] = [], via?: string) {
     await this.auditRow(actor, action, project, names, via).run();
     this.raise(actor, action, project, names);
@@ -674,7 +679,7 @@ export class Catalog {
     }
     const missing = names.filter((n) => !(n in out));
     if (missing.length) throw new Refused(404, `unknown keys: ${missing.join(", ")}`);
-    await this.audit(caller.name, "read", project, Object.keys(out).sort(), caller.subject);
+    await this.auditBy(caller, "read", project, Object.keys(out).sort());
     await this.trackReach(caller, project, [...win.values()].map((r) => `${r.scope}/${r.name}`));
     return out;
   }

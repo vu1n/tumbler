@@ -70,7 +70,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
     const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
     const picks = await autoKeys(s1 ?? null, cleanSignals(body.signals), keys);
-    await catalog.audit(caller.name, "auto", project, picks.map((p) => p.name), caller.subject);
+    await catalog.auditBy(caller, "auto", project, picks.map((p) => p.name));
     return json({ project, keys: picks });
   }
   // Ask for more scopes on the minted keys in a set: {"keys": [...], "scopes": ["workers:write"]}.
@@ -111,7 +111,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       // A minted key is checked through its parent, not the child the caller holds; say so.
       checks[name] = found.row.kind === "static" || outcome.status === "none" ? outcome : { ...outcome, of: "parent" };
     }
-    await catalog.audit(caller.name, "check", project, names, caller.subject);
+    await catalog.auditBy(caller, "check", project, names);
     return json({ project, checks });
   }
   // Save a static key: PUT /v1/keys/NAME {"scope", "value", "description"?}, what `tumbler put` sends.
@@ -137,7 +137,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     const now = await catalog.caller(token!);
     if (!now || !writeReaches(now.writes, scope)) return json({ error: `this token may no longer write ${scope}; nothing was saved` }, 403);
     await catalog.put(scope, name, value, { kind: "static", config: cfg, checked: check.status === "ok", ...(typeof b.description === "string" ? { description: b.description } : {}) });
-    await catalog.audit(caller.name, "put", scope === GLOBAL ? null : scope, [name], caller.subject);
+    await catalog.auditBy(caller, "put", scope === GLOBAL ? null : scope, [name]);
     return json({ scope, name, action: prev ? "rotated" : "created", checked: check.status === "ok" });
   }
   // Delete a static key: DELETE /v1/keys/NAME?scope=..., what `tumbler rm` sends. Within the token's writes.
@@ -150,7 +150,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     // Why: deleting a parent ends every child it minted; that stays an admin's call.
     if (prev.kind !== "static") return json({ error: `${scope}/${name} is a ${prev.kind} key; delete it in /admin` }, 409);
     if (!await catalog.removeStatic(scope, name)) return json({ error: `${scope}/${name} changed while it was being deleted; nothing was deleted` }, 409);
-    await catalog.audit(caller.name, "delete", scope === GLOBAL ? null : scope, [name], caller.subject);
+    await catalog.auditBy(caller, "delete", scope === GLOBAL ? null : scope, [name]);
     return json({ scope, name, action: "deleted" });
   }
   // A minted key's scopes, and an operator's changes to them: what `tumbler scope` sends. Only for an
@@ -182,7 +182,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       if (!await catalog.setConfig(row.scope, row.name, row.rev, cfg)) return json({ error: `${row.name} changed meanwhile; nothing was saved, run again` }, 409);
       // Its children carry the old groups: end them, so the next run mints with the new ones.
       await grants.closeStale(row.scope, row.name);
-      await catalog.audit(caller.name, "mint-scope", row.scope === GLOBAL ? null : row.scope, [row.name, scope, ...added.map((g) => `+${g}`), ...remove.map((g) => `-${g}`)], caller.subject);
+      await catalog.auditBy(caller, "mint-scope", row.scope === GLOBAL ? null : row.scope, [row.name, scope, ...added.map((g) => `+${g}`), ...remove.map((g) => `-${g}`)]);
     }
     const base = (cfg.scopes ?? {}) as Record<string, unknown[]>, extra = cfg.extra ?? {};
     return json({ scope: row.scope, name: row.name, kind: row.kind, defaults: cfg.defaults === true,
@@ -200,7 +200,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       if (!done) return json({ error: `${caller.name} made no token ${name}; only an admin revokes others` }, 404);
       const { fresh, hash } = done;
       await grants?.closeCaller(name, caller.name, hash); // only the token revoked, never one that took the name
-      if (fresh) await catalog.audit(caller.name, "token-revoke", null, [name], caller.subject);
+      if (fresh) await catalog.auditBy(caller, "token-revoke", null, [name]);
       return json({ ok: true });
     }
     return json({ error: "method not allowed" }, 405);
@@ -276,7 +276,7 @@ async function delegateCreate(catalog: Catalog, grants: Grants | undefined, call
   const token = into ? null : await catalog.createToken(name, child.projects, expires, child.scopes, child.writes, false, kin);
   if (into) await catalog.createTokenInto(caller.name, into, created, name, child.projects, expires, child.scopes, child.writes, false, kin, caller.subject);
   if (into) return { name, expires_at: expires, stored: into }; // never shown: it went straight into the key
-  await catalog.audit(caller.name, "token-create", null, created, caller.subject);
+  await catalog.auditBy(caller, "token-create", null, created);
   return { name, expires_at: expires, token }; // shown once
 }
 
