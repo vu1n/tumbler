@@ -285,7 +285,7 @@ async function load(mine) {
   $('nTokens').textContent = tokens.filter(t => !t.revoked_at && !past(t.expires_at)).length + ' live';
   fill('tokens', tokens.map(t => { const gone = !!t.revoked_at, done = gone || past(t.expires_at);
     const exp = !t.expires_at ? when('never', '', 'muted') : past(t.expires_at) ? when('expired ' + stamp(t.expires_at)) : when(stamp(t.expires_at), soon(t.expires_at) ? until(t.expires_at) : '', soon(t.expires_at) ? 'warn' : '');
-    const tr = row([td(t.name), td(reach(t)), td(t.scopes ? t.scopes.join(', ') : 'reads only'), td(t.writes ? t.writes.join(', ') : 'nothing'), td(t.operator ? 'yes' : 'no'), when(day(t.created_at)), exp], done ? 'off' : '');
+    const tr = row([td(t.oidc_issuer ? t.name + ' (OIDC ' + new URL(t.oidc_issuer).host + ' ' + t.oidc_subject + ')' : t.name), td(reach(t)), td(t.scopes ? t.scopes.join(', ') : 'reads only'), td(t.writes ? t.writes.join(', ') : 'nothing'), td(t.operator ? 'yes' : 'no'), when(day(t.created_at)), exp], done ? 'off' : '');
     const ended = td('revoked ', 'ended'); ended.append(nw(day(t.revoked_at)));
     tr.append(gone ? ended : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name, 'Revoking…')));
     return tr; }),
