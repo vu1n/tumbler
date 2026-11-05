@@ -481,3 +481,24 @@ test("a delegate token creates, lists and revokes its own tokens from the CLI", 
   const listed = JSON.parse((await adminCli(["tokens", "--json"])).stdout).find((t: any) => t.name === "vps-svc");
   assert.deepEqual([listed.parent, listed.delegate], ["agent", false]);
 });
+
+test("TUMBLER_TOKEN_FILE: a token a platform mounts is read on each call, after TUMBLER_TOKEN", async () => {
+  const file = join(home, "oidc-token");
+  writeFileSync(file, devToken + "\n");
+  // Earlier tests rotate PYTH_API_KEY; the global AWS_REGION reaching the child proves the file's token was used.
+  const { stdout } = await cli(["run", "--", ...printEnv], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: file, TUMBLER_TTL: "0" });
+  assert.match(stdout, / us-east-1$/);
+  await assert.rejects(cli(["whoami"], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: join(home, "missing") }), /TUMBLER_TOKEN_FILE .* can't be read/);
+});
+
+test("admin token create --oidc binds an issuer and subject and prints no secret", async () => {
+  const made = await adminCli(["token", "create", "ci-oidc", "--pin", "dev", "--oidc", "https://token.actions.githubusercontent.com", "--subject", "repo:vu1n/kypp:*"]);
+  assert.equal(made.code, 0, made.stderr);
+  assert.equal(made.stdout, "");
+  assert.match(made.stderr, /signs for repo:vu1n\/kypp:\* act as it/);
+  const row = await catalog.tokenRow("ci-oidc");
+  assert.deepEqual([row?.oidc_issuer, row?.oidc_subject], ["https://token.actions.githubusercontent.com", "repo:vu1n/kypp:*"]);
+  assert.equal((await adminCli(["token", "edit", "ci-oidc", "--oidc", "off"])).code, 0);
+  assert.equal((await catalog.tokenRow("ci-oidc"))?.oidc_issuer, null);
+  assert.match((await adminCli(["token", "create", "x", "--subject", "abc"])).stderr, /go together/);
+});

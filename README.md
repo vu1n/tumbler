@@ -108,6 +108,38 @@ sets it outright, and an exported `TUMBLER_URL` wins over both. When the broker 
 CLI than the one you're running, the CLI says so once; `tumbler update` replaces it in place
 (`TUMBLER_UPDATE_CHECK=off` quiets the notice).
 
+## OIDC callers (no tumbler secret at all)
+
+A token row can be bound to an OIDC issuer and subject instead of carrying a secret. Then a
+short-lived token that issuer signs for that subject acts as the row: a GitHub Actions job's, a Fly,
+Render or Vercel service's, or a Keycard-issued one. The row's pin, scopes and writes are what it gets;
+the JWT only proves who is asking. Revoke the row and its JWTs stop on their next request.
+
+1. Set the Worker var `TUMBLER_OIDC_AUDIENCE` to the broker's URL (`https://tumbler.example.com`).
+   Unset, no JWT is ever a caller.
+2. `tumbler admin token create ci-kypp --pin kypp --oidc https://token.actions.githubusercontent.com --subject 'repo:vu1n/kypp:*'`
+   prints no token: none exists. `token edit NAME --oidc ISSUER --subject SUB` binds an existing
+   token (its own secret stops working), and `--oidc off` unbinds it.
+3. The caller presents the JWT as `TUMBLER_TOKEN`, or names a file a platform mounts and rotates in
+   `TUMBLER_TOKEN_FILE` (read on every call). In GitHub Actions, with `permissions: id-token: write`:
+
+```sh
+export TUMBLER_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+  "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://tumbler.example.com" | jq -r .value)
+tumbler run -- npm run deploy
+```
+
+What the broker checks, or it refuses the token: the issuer is one a live row names (so a JWT from any
+other issuer costs no fetch), RS256 or ES256 only, a signature by a key from the issuer's JWKS (found
+through its `/.well-known/openid-configuration`, which must name the same issuer), `aud` holding
+`TUMBLER_OIDC_AUDIENCE` exactly, `exp` in the future and at most a day away, `nbf` and `iat` not ahead
+of the clock. A subject is exact or a `prefix*` (at least three characters before the `*`, since a bare
+`*` would take every job on GitHub); an exact subject wins over a prefix, and the longer prefix over the
+shorter. End a prefix at the issuer's delimiter: `repo:vu1n/kypp:*` is one repo, `repo:vu1n/kypp*` is
+also `kypp-fork`. Signing keys are cached ten minutes per issuer, and a key id the cache doesn't have refetches
+at most once a minute. The audit keeps the subject beside the token's name (`via`), so a row shared by
+every branch of a repo still says which branch read what.
+
 ## CLI
 
 ```
@@ -392,7 +424,7 @@ as one pure function, `transition(grant, event)`. Every change is written along 
 
 | Route | Auth | |
 |---|---|---|
-| `GET /v1/env?project=&keys=A,B` | caller token | `{"env": {...}}`, project over global; unknown names are a 404 |
+| `GET /v1/env?project=&keys=A,B` | caller token (a tumbler token, or an OIDC token for a bound row) | `{"env": {...}}`, project over global; unknown names are a 404 |
 | `GET /v1/whoami` | caller token | `{"name", "projects", "scopes"}` |
 | `POST /v1/auto?project=` | caller token | body `{"signals": ["file:…", "dep:…"]}`; returns `{"project", "keys": [{"name", "why"}]}` |
 | `GET /v1/keys?project=` | caller token | `{"project", "keys": [names]}`; never values, never mints |

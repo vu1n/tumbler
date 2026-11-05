@@ -7,6 +7,7 @@ import { s1Client } from "./auto.ts";
 import { cloudflare } from "./cloudflare.ts";
 import { github } from "./github.ts";
 import { Grants } from "./grants.ts";
+import { oidcVerifier, type OidcVerifier } from "./oidc.ts";
 import { webhookAlerts } from "./alerts.ts";
 // Bundled as text by the "rules" entry in wrangler.jsonc.
 import CLI from "../../cli/tumbler";
@@ -22,7 +23,12 @@ export interface Env {
   AI?: Ai;                    // Workers AI, for Clef in /v1/auto; without it auto uses rules only
   TUMBLER_AUTO_MODEL?: string; // "clef" (default) or "clef-flash"
   TUMBLER_ALERT_WEBHOOK?: string; // a secret: where alerts.ts POSTs (ntfy, Slack, ...); unset sends none
+  TUMBLER_OIDC_AUDIENCE?: string; // the `aud` OIDC caller tokens must carry (the broker's URL); unset, no JWT is a caller
 }
+
+// One verifier per audience for the isolate's life, so issuers' signing keys stay cached across requests.
+let oidc: OidcVerifier | undefined;
+const verifierFor = (audience?: string) => !audience ? undefined : oidc?.audience === audience ? oidc : (oidc = oidcVerifier(audience));
 
 const grantsFor = (catalog: Catalog) => new Grants(catalog, providers);
 
@@ -39,6 +45,7 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const catalog = new Catalog(env.DB, await loadKey(env));
     catalog.alert = webhookAlerts(env.TUMBLER_ALERT_WEBHOOK, (p) => ctx.waitUntil(p));
+    catalog.oidc = verifierFor(env.TUMBLER_OIDC_AUDIENCE);
     const grants = grantsFor(catalog);
     const admins = (env.TUMBLER_ADMINS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
     return handle(request, {
