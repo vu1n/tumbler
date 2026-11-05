@@ -1,6 +1,7 @@
 // catalog.ts — keys, tokens and audit in D1. Values go in sealed and come out only through resolve().
 import { open, randomToken, seal, sha256hex } from "./crypto.ts";
 import { staticCheck } from "./verify.ts";
+import { checkIssuer, looksLikeJwt, type OidcVerifier } from "./oidc.ts";
 import { alarming, crossed, READ_WINDOW_MS, type Alert } from "./alerts.ts";
 
 export const GLOBAL = "global";
@@ -116,7 +117,9 @@ export function writeReaches(writes: string[] | null | undefined, scope: string)
 // `delegate`: may create tokens no wider than itself (`tumbler token create`); `parent`: the delegate
 // that created this one, if any. `hash`: which credential authenticated, so a mint that lands after
 // the name was reused by a new token is refused (the name alone would pass).
-export interface Caller { name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; parent?: string | null; expires_at?: string | null; hash?: string }
+// `subject`: the OIDC subject this request proved (oidc.ts), for a token row bound to an issuer;
+// `until`: when that JWT expires (epoch seconds), so nothing served to it is cached past it.
+export interface Caller { subject?: string; until?: number; name: string; projects: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; parent?: string | null; expires_at?: string | null; hash?: string }
 
 // What a delegate's new token would hold beyond the delegate itself, as reasons; empty: within it.
 // A pin or write entry is within when the delegate reaches that exact scope (`*` and `*/env` only
@@ -138,7 +141,7 @@ export interface KeyRow {
   created_at: string; rotated_at: string; expires_at: string | null; checked: number;
 }
 export interface MintRow { scope: string; name: string; kind: string; config: string; rev: string; iv: ArrayBuffer; ciphertext: ArrayBuffer }
-export interface TokenRow { name: string; projects: string[] | null; scopes: string[] | null; writes: string[] | null; operator: boolean; delegate: boolean; parent: string | null; created_at: string; revoked_at: string | null; expires_at: string | null }
+export interface TokenRow { oidc_issuer?: string | null; oidc_subject?: string | null; name: string; projects: string[] | null; scopes: string[] | null; writes: string[] | null; operator: boolean; delegate: boolean; parent: string | null; created_at: string; revoked_at: string | null; expires_at: string | null }
 
 const now = () => new Date().toISOString();
 // Children live at most 24h (MAX_TTL_MIN in grants.ts); a retired parent is kept a little longer.
@@ -150,14 +153,33 @@ const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as 
 type Kin = { delegate?: boolean; parent?: Pick<Caller, "name" | "projects" | "scopes" | "writes" | "expires_at" | "hash"> | null; ended?: string | null };
 type PutMeta = { description?: string; owner?: string; expires_at?: string | null; kind?: string; config?: Record<string, unknown>; checked?: boolean };
 
+type CallerRow = { name: string; hash: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; delegate: number; parent: string | null; expires_at: string | null };
+// A token row that may act now (binds: now, now): not revoked or expired, and a delegate's child only
+// while its parent is live too.
+const LIVE_TOKEN = `revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+  AND (parent IS NULL OR EXISTS (SELECT 1 FROM tokens p WHERE p.name = tokens.parent AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)))`;
+// What an admin may bind a token row to: an issuer (oidc.ts checkIssuer) and a subject, exact or a
+// `prefix*`. A bare `*` would take every token the issuer signs (every GitHub Actions job anywhere).
+export function checkSubject(sub: string) {
+  if (!/^[\x21-\x7e]{1,255}$/.test(sub) || sub.indexOf("*") !== -1 && sub.indexOf("*") !== sub.length - 1) throw new Refused(400, `invalid OIDC subject: ${sub}; printable, no spaces, * only at the end`);
+  if (sub.length < 4 && sub.endsWith("*")) throw new Refused(400, "an OIDC subject prefix needs at least 3 characters before *, or it trusts most of what the issuer signs");
+}
+
 export class Catalog {
   db: D1Database; key: CryptoKey;
   clock: () => Date = () => new Date(); // what token expiry is checked against; tests move it
   alert?: (a: Alert) => void; // where alarming() rows go (alerts.ts); none set, none sent
+  oidc?: OidcVerifier; // checks OIDC caller tokens (oidc.ts); none set, a JWT is never a caller
   constructor(db: D1Database, key: CryptoKey) { this.db = db; this.key = key; }
 
-  async audit(actor: string, action: string, project: string | null, names: string[] = []) {
-    await this.auditRow(actor, action, project, names).run();
+  // `via`: the OIDC subject a federated caller proved, kept beside its token's name.
+  // What a caller did: always with the OIDC subject it proved, so no path can drop it. Use this for
+  // any action a request's caller takes; audit() is for admins and the system.
+  auditBy(caller: Caller, action: string, project: string | null, names: string[] = []) {
+    return this.audit(caller.name, action, project, names, caller.subject);
+  }
+  async audit(actor: string, action: string, project: string | null, names: string[] = [], via?: string) {
+    await this.auditRow(actor, action, project, names, via).run();
     this.raise(actor, action, project, names);
   }
   raise(actor: string, action: string, project: string | null, names: string[]) {
@@ -194,24 +216,50 @@ export class Catalog {
     const names = (out.at(-1)!.results as { key: string }[]).map((r) => r.key);
     if (crossed(total, added, keys.length)) this.alert({ kind: "bulk-read", actor, project, names, at });
   }
-  auditRow(actor: string, action: string, project: string | null, names: string[] = []) {
-    return this.db.prepare("INSERT INTO audit (at, actor, action, project, names) VALUES (?, ?, ?, ?, ?)").bind(now(), actor, action, project, names.join(","));
+  auditRow(actor: string, action: string, project: string | null, names: string[] = [], via?: string) {
+    return this.db.prepare("INSERT INTO audit (at, actor, action, project, names, via) VALUES (?, ?, ?, ?, ?, ?)").bind(now(), actor, action, project, names.join(","), via ?? null);
   }
 
   // --- caller tokens ---
 
   async caller(token: string): Promise<Caller | null> {
+    if (looksLikeJwt(token)) return this.federated(token);
     // Why here and not only in the sweep: an expired token must stop at its expiry, not up to one
     // sweep later. The sweep then ends the grants it still holds.
     // A delegate's token stops with its parent: checked here too, so a revoke whose cascade was cut
     // short (or a parent that expired) never leaves a child working.
+    // A row bound to an OIDC issuer takes only that issuer's tokens: its own secret stops working.
     const t = this.clock().toISOString(), hash = await sha256hex(token);
-    const row = await this.db.prepare(`SELECT name, projects, scopes, writes, operator, delegate, parent, expires_at FROM tokens WHERE hash = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
-      AND (parent IS NULL OR EXISTS (SELECT 1 FROM tokens p WHERE p.name = tokens.parent AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)))`)
-      .bind(hash, t, t).first<{ name: string; projects: string | null; scopes: string | null; writes: string | null; operator: number; delegate: number; parent: string | null; expires_at: string | null }>();
+    const row = await this.db.prepare(`SELECT name, hash, projects, scopes, writes, operator, delegate, parent, expires_at FROM tokens WHERE hash = ? AND oidc_issuer IS NULL AND ${LIVE_TOKEN}`)
+      .bind(hash, t, t).first<CallerRow>();
+    return row ? this.asCaller(row) : null;
+  }
+
+  // An OIDC caller token: verified by this.oidc against the issuer a live row trusts, then that row,
+  // matched by subject: an exact subject first, else the longest `prefix*`.
+  private async federated(jwt: string): Promise<Caller | null> {
+    if (!this.oidc) return null;
+    const t = this.clock().toISOString();
+    const v = await this.oidc.verify(jwt, async (iss) => !!(await this.db.prepare(`SELECT 1 FROM tokens WHERE oidc_issuer = ? AND ${LIVE_TOKEN}`).bind(iss, t, t).first()));
+    if (!v) return null;
+    // Every row bound to the issuer, live or not, so the most specific binding is chosen before its
+    // liveness is checked: revoking an exact binding (or its parent) never hands the same JWT a
+    // broader prefix row instead. Among rows with that same subject (a revoked one and the one that
+    // replaced it), a live one acts.
+    const { results } = await this.db.prepare(`SELECT name, hash, projects, scopes, writes, operator, delegate, parent, expires_at, oidc_subject,
+      CASE WHEN ${LIVE_TOKEN} THEN 1 ELSE 0 END AS live FROM tokens WHERE oidc_issuer = ?`).bind(t, t, v.iss).all<CallerRow & { oidc_subject: string; live: number }>();
+    const rank = (sub: string) => sub === v.sub ? Infinity : sub.endsWith("*") && v.sub.startsWith(sub.slice(0, -1)) ? sub.length : -1;
+    const best = Math.max(-1, ...results.map((r) => rank(r.oidc_subject)));
+    if (best < 0) return null;
+    const row = results.find((r) => rank(r.oidc_subject) === best && r.live);
     if (!row) return null;
+    const me = await this.asCaller(row);
+    return me && { ...me, subject: v.sub, until: v.exp };
+  }
+
+  private async asCaller(row: CallerRow): Promise<Caller | null> {
     const me: Caller = { name: row.name, projects: row.projects === null ? null : JSON.parse(row.projects),
-      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, delegate: !!row.delegate, parent: row.parent, expires_at: row.expires_at, hash };
+      scopes: row.scopes === null ? null : JSON.parse(row.scopes), writes: row.writes === null ? null : JSON.parse(row.writes), operator: !!row.operator, delegate: !!row.delegate, parent: row.parent, expires_at: row.expires_at, hash: row.hash };
     // A delegate's token never works beyond its parent as the parent is now: a narrowing whose
     // cleanup was cut short, or a create that raced it, is refused here (the sweep then revokes it).
     if (me.parent) {
@@ -244,14 +292,14 @@ export class Catalog {
   // all lands or none of it does, so a failure never leaves a working token nobody holds, nor a key
   // overwritten for a token that doesn't exist. `kin` as for createToken().
   async createTokenInto(who: string, into: { scope: string; name: string; description?: string }, created: string[], name: string, projects: string[] | null, expiresAt: string | null = null,
-    scopes: string[] | null = null, writes: string[] | null = null, operator = false, kin: Kin = {}) {
+    scopes: string[] | null = null, writes: string[] | null = null, operator = false, kin: Kin = {}, via?: string) {
     // The target is checked again inside the transaction: a key that became minted, or gained a
     // check, while this ran holds another service's credential and is never overwritten.
     const { token, insert } = await this.tokenInsert(name, projects, expiresAt, scopes, writes, operator, kin, {
       sql: "NOT EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND (kind != 'static' OR json_extract(COALESCE(NULLIF(config, ''), '{}'), '$.check') IS NOT NULL))",
       binds: [into.scope, into.name] });
     await this.db.batch([...this.reuse(name, kin.ended), insert, ...await this.putRows(into.scope, into.name, token, { kind: "static", ...(into.description !== undefined ? { description: into.description } : {}) }),
-      this.auditRow(who, "token-create", null, created), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name])])
+      this.auditRow(who, "token-create", null, created, via), this.auditRow(who, "put", into.scope === GLOBAL ? null : into.scope, [into.name], via)])
       .catch((e: Error) => {
         const refused = insertRefusal(e, name, kin, into);
         if (refused) throw refused;
@@ -313,20 +361,50 @@ export class Catalog {
 
   // A live token's pin, ceiling, writes and/or operator flag in one write, all checked first, so a
   // refused part never lands the others. Returns the fields as stored.
-  async updateToken(name: string, edit: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean }) {
+  async updateToken(name: string, edit: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; oidc?: { issuer: string; subject: string } | null }) {
     // `hash`: the token edited, for a cleanup that must touch only its grants.
-    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; hash?: string } = {}, sets: string[] = [], binds: (string | number | null)[] = [];
+    const done: { projects?: string[] | null; scopes?: string[] | null; writes?: string[] | null; operator?: boolean; delegate?: boolean; oidc?: { issuer: string; subject: string } | null; hash?: string } = {}, sets: string[] = [], binds: (string | number | null)[] = [];
     if ("projects" in edit) { checkPin(done.projects = edit.projects ?? null); sets.push("projects = ?"); binds.push(asJson(done.projects)); }
     if ("scopes" in edit) { done.scopes = checkCeiling(edit.scopes ?? null); sets.push("scopes = ?"); binds.push(asJson(done.scopes)); }
     if ("writes" in edit) { done.writes = checkWrites(edit.writes ?? null); sets.push("writes = ?"); binds.push(asJson(done.writes)); }
     if ("operator" in edit) { done.operator = edit.operator === true; sets.push("operator = ?"); binds.push(done.operator ? 1 : 0); }
     if ("delegate" in edit) { done.delegate = edit.delegate === true; sets.push("delegate = ?"); binds.push(done.delegate ? 1 : 0); }
+    if ("oidc" in edit) {
+      if (edit.oidc) {
+        let issuer: string;
+        try { issuer = checkIssuer(String(edit.oidc.issuer ?? "")); } catch (e) { throw new Refused(400, (e as Error).message); }
+        const subject = String(edit.oidc.subject ?? "");
+        checkSubject(subject);
+        done.oidc = { issuer, subject };
+      } else done.oidc = null;
+      sets.push("oidc_issuer = ?", "oidc_subject = ?"); binds.push(done.oidc?.issuer ?? null, done.oidc?.subject ?? null);
+    }
     if (!sets.length) return done;
     // A token a delegate made is never itself a delegate or an operator: delegation stays one level
     // deep, so its parent's revoke and bounds (checked one level up) always reach it.
     const raise = done.delegate === true || done.operator === true ? 1 : 0;
-    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL AND (? = 0 OR parent IS NULL) RETURNING hash`).bind(...binds, name, raise).first<{ hash: string }>();
+    // Why in the UPDATE itself: two live rows on one issuer and subject would leave which one a token
+    // gets to row order, and a separate lookup lets two concurrent binds both pass. One statement is
+    // one write, so the second bind finds the first. An ended row's binding never blocks a new one.
+    const twin = done.oidc ? `AND NOT EXISTS (SELECT 1 FROM tokens o WHERE o.oidc_issuer = ? AND o.oidc_subject = ? AND o.name != tokens.name AND o.revoked_at IS NULL AND (o.expires_at IS NULL OR o.expires_at > ?))` : "";
+    const twinBinds = done.oidc ? [done.oidc.issuer, done.oidc.subject, this.clock().toISOString()] : [];
+    // A binding, once set, never changes or comes off: dropping a row's subject would hand that
+    // subject's next JWT to a broader prefix row, the fallback federated() refuses for a revoked row.
+    // A new binding is a new token, and the revoked one stays to deny its subject. Same binding again: no change.
+    const fixed = "oidc" in edit ? (done.oidc ? "AND (oidc_issuer IS NULL OR (oidc_issuer = ? AND oidc_subject = ?))" : "AND oidc_issuer IS NULL") : "";
+    const fixedBinds = done.oidc ? [done.oidc.issuer, done.oidc.subject] : [];
+    const r = await this.db.prepare(`UPDATE tokens SET ${sets.join(", ")} WHERE name = ? AND revoked_at IS NULL AND (? = 0 OR parent IS NULL) ${fixed} ${twin} RETURNING hash`).bind(...binds, name, raise, ...fixedBinds, ...twinBinds).first<{ hash: string }>();
     if (!r) {
+      if ("oidc" in edit) {
+        const b = await this.db.prepare("SELECT oidc_issuer, oidc_subject FROM tokens WHERE name = ? AND revoked_at IS NULL AND oidc_issuer IS NOT NULL").bind(name).first<{ oidc_issuer: string; oidc_subject: string }>();
+        if (b && (b.oidc_issuer !== done.oidc?.issuer || b.oidc_subject !== done.oidc?.subject))
+          throw new Refused(409, `token ${name} is bound to ${b.oidc_issuer} ${b.oidc_subject}, and a binding never changes; revoke ${name} (it keeps denying that subject) and create another token`);
+      }
+      if (done.oidc) {
+        const o = await this.db.prepare("SELECT name FROM tokens WHERE oidc_issuer = ? AND oidc_subject = ? AND name != ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)")
+          .bind(done.oidc.issuer, done.oidc.subject, name, this.clock().toISOString()).first<{ name: string }>();
+        if (o) throw new Refused(409, `token ${o.name} is already bound to ${done.oidc.issuer} ${done.oidc.subject}`);
+      }
       const t = await this.db.prepare("SELECT parent FROM tokens WHERE name = ? AND revoked_at IS NULL").bind(name).first<{ parent: string | null }>();
       if (t?.parent) throw new Refused(409, `token ${name} was made by ${t.parent}, so it can't be a delegate or an operator; create it as an admin token instead`);
       throw new Refused(404, `no live token ${name}`);
@@ -380,7 +458,7 @@ export class Catalog {
   // tokens() with each row's hash, for a cleanup that must touch only the token it read (never one
   // that took the name since). The hash never leaves the worker.
   async tokenGens(parent?: string): Promise<(TokenRow & { hash: string })[]> {
-    const { results } = await this.db.prepare(`SELECT name, hash, projects, scopes, writes, operator, delegate, parent, created_at, revoked_at, expires_at FROM tokens${parent === undefined ? "" : " WHERE parent = ?"} ORDER BY name`)
+    const { results } = await this.db.prepare(`SELECT name, hash, projects, scopes, writes, operator, delegate, parent, created_at, revoked_at, expires_at, oidc_issuer, oidc_subject FROM tokens${parent === undefined ? "" : " WHERE parent = ?"} ORDER BY name`)
       .bind(...(parent === undefined ? [] : [parent])).all<any>();
     const parse = (v: string | null) => v === null ? null : JSON.parse(v);
     return results.map((r) => ({ ...r, projects: parse(r.projects), scopes: parse(r.scopes), writes: parse(r.writes), operator: !!r.operator, delegate: !!r.delegate }));
@@ -601,7 +679,7 @@ export class Catalog {
     }
     const missing = names.filter((n) => !(n in out));
     if (missing.length) throw new Refused(404, `unknown keys: ${missing.join(", ")}`);
-    await this.audit(caller.name, "read", project, Object.keys(out).sort());
+    await this.auditBy(caller, "read", project, Object.keys(out).sort());
     await this.trackReach(caller, project, [...win.values()].map((r) => `${r.scope}/${r.name}`));
     return out;
   }
@@ -636,7 +714,7 @@ export class Catalog {
   }
 
   async recentAudit(limit = 100) {
-    const { results } = await this.db.prepare("SELECT at, actor, action, project, names FROM audit ORDER BY id DESC LIMIT ?").bind(limit).all();
-    return results;
+    const { results } = await this.db.prepare("SELECT at, actor, action, project, names, via FROM audit ORDER BY id DESC LIMIT ?").bind(limit).all<Record<string, unknown>>();
+    return results.map(({ via, ...r }) => via == null ? r : { ...r, via }); // `via` only on a federated caller's rows
   }
 }

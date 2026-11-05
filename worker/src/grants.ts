@@ -168,8 +168,8 @@ export class Grants {
     if (g.requested) g = await this.apply(g, { type: "lapse", who: "system" }, { gen: caller.hash }) ?? g;
     const want = union(g.scopes.filter((s) => allowedBy(caller.scopes ?? null, s)), scopes);
     if (!g.requested && want.length === g.scopes.length && want.every((s) => g!.scopes.includes(s))) return g;
-    const done = await this.mintFor(g, row, want, "policy", caller.scopes ?? null, caller.hash);
-    await this.catalog.audit(caller.name, "grant-step-up", project, [`${row.name}:${want.join("+")}`]);
+    const done = await this.mintFor(g, row, want, "policy", caller.scopes ?? null, caller.hash, caller.subject);
+    await this.catalog.auditBy(caller, "grant-step-up", project, [`${row.name}:${want.join("+")}`]);
     return done;
   }
 
@@ -349,18 +349,18 @@ export class Grants {
       await this.apply(g, { type: "abandon", who: "system" });
       throw err;
     }
-    await this.catalog.audit(caller.name, "grant-mint", project, [`${row.name}:${scopes.join("+")}`]);
+    await this.catalog.auditBy(caller, "grant-mint", project, [`${row.name}:${scopes.join("+")}`]);
     return (await this.get(id))!;
   }
 
-  async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string, ceiling: string[] | null, hash?: string): Promise<GrantRow> {
+  async mintFor(g: GrantRow, row: KeyRow, scopes: string[], who: string, ceiling: string[] | null, hash?: string, via?: string): Promise<GrantRow> {
     const old = g.child_id;
     // Read before store() overwrites it: a provider may revoke the old child only with the child itself.
     const was = old ? await this.child(g).catch(() => undefined) : undefined;
     const minted = await this.mint(row, g, scopes);
     await this.store(g, row, minted, scopes, who, ceiling, hash);
     if (old) await this.revokeChild(row, old, g.expires_at, was === undefined ? undefined : { grant: g.id, value: was });
-    await this.catalog.audit(g.caller, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`]);
+    await this.catalog.audit(g.caller, "grant-mint", g.project, [`${row.name}:${scopes.join("+")}`], via);
     return (await this.get(g.id))!;
   }
 

@@ -70,7 +70,8 @@
 //                                    so once on stderr (TUMBLER_UPDATE_CHECK=off quiets it)
 //
 // Config (environment): TUMBLER_URL (or `tumbler url`), TUMBLER_TOKEN (optional: leave unset when the
-// environment's network secret adds the Authorization header), TUMBLER_TTL seconds (default 300,
+// environment's network secret adds the Authorization header; TUMBLER_TOKEN_FILE reads it from a file a
+// platform mounts and rotates, such as an OIDC token), TUMBLER_TTL seconds (default 300,
 // 0 disables the cache; an env with a minted key is cached at most 5 minutes), TUMBLER_PROJECT (default project), TUMBLER_WATCH seconds between --watch
 // polls (default 30), TUMBLER_DIAGNOSE=off to skip the failure report. A `.tumbler` file in the working
 // directory or any parent lists the key names a project wants, one per line, plus an optional
@@ -105,7 +106,9 @@ const die = (msg, code = 1) => { process.stderr.write(`tumbler: ${msg}\n`); proc
 // not by default, and the agent proxy is what attaches the network secret.
 // A bare host (TUMBLER_URL=tumbler.example.com) means https: plain http would miss the proxy's auth header.
 const withScheme = u => u && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u) ? "https://" + u : u;
-const callerCfg = () => ({ url: withScheme(process.env.TUMBLER_URL), token: process.env.TUMBLER_TOKEN || "" });
+// TUMBLER_TOKEN_FILE: a token a platform mounts and rotates (an OIDC token, read again on every call).
+const tokenFile = () => { const f = process.env.TUMBLER_TOKEN_FILE; if (!f) return ""; try { return readFileSync(f, "utf8").trim(); } catch { die(`TUMBLER_TOKEN_FILE ${f} can't be read`); } };
+const callerCfg = () => ({ url: withScheme(process.env.TUMBLER_URL), token: process.env.TUMBLER_TOKEN || tokenFile() || "" });
 
 function brokerGet(path, cfg = callerCfg()) { return brokerCall("GET", path, null, cfg); }
 
@@ -204,8 +207,11 @@ function daemon() {
         // Why: the caller's TTL, not the one the helper started with, so lowering it takes effect. An
         // env with a minted child also carries the broker's max_age, so it never outlives the child.
         if (hit && !req.fresh && Date.now() - hit.at < Math.min(req.ttl, hit.maxAge)) return reply({ env: hit.env, cli: hit.cli });
+        // Why `asked`, taken before the request: max_age counts from when the broker answered, so
+        // counting from receipt would stretch it by the transit time, past an OIDC token's expiry.
+        const asked = Date.now();
         const { env, max_age } = await brokerGet(path, { url: req.url, token: req.token });
-        cache.set(slot, { at: Date.now(), env, cli: lastServed, maxAge: max_age === undefined ? Infinity : Number(max_age) * 1000 });
+        cache.set(slot, { at: asked, env, cli: lastServed, maxAge: max_age === undefined ? Infinity : Number(max_age) * 1000 });
         reply({ env, cli: lastServed });
       } catch (e) { reply({ error: e.message }); }
     });
@@ -827,12 +833,15 @@ const ADMIN_USAGE = `usage: tumbler admin <command>
   login                                   sign in through Cloudflare Access (cloudflared)
   keys | tokens | grants | audit [--json] list them (names and metadata, never values)
   token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off] [--delegate on|off]
-      [--expires-hours N] [--store KEY --scope S [-d description]]
+      [--expires-hours N] [--store KEY --scope S [-d description]] [--oidc ISSUER --subject SUB]
                                           prints the new token once, on stdout; with --store it goes
                                           straight into static key KEY in S instead and is never
-                                          shown (a failed store revokes it, so nothing is orphaned)
+                                          shown (a failed store revokes it, so nothing is orphaned);
+                                          with --oidc no secret exists: tokens ISSUER signs for SUB
+                                          (exact, or prefix*) act as it
   token edit NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--operator on|off] [--delegate on|off]
-                                          (an empty list clears it)
+      [--oidc ISSUER --subject SUB]
+                                          (an empty list clears it; binding --oidc ends its secret, and a binding never changes: revoke and create another)
                                           --operator on: the token may change minted keys' groups
                                           with tumbler scope (never tokens, parents or token groups)
                                           --delegate on: the token may create tokens no wider than
@@ -913,8 +922,10 @@ async function admin(args) {
     }
     case "token": {
       const [verb, ...more] = rest;
-      const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--operator": "value", "--delegate": "value", "--expires-hours": "value", "--store": "value", "--scope": "value", "-d": "value", "--description": "value" });
+      const f = adminFlags(more, { "--pin": "value", "--scopes": "value", "--writes": "value", "--operator": "value", "--delegate": "value", "--expires-hours": "value", "--store": "value", "--scope": "value", "-d": "value", "--description": "value", "--oidc": "value", "--subject": "value" });
       const [name] = f._;
+      if ((f["--subject"] !== undefined) !== (f["--oidc"] !== undefined)) die("--oidc ISSUER and --subject SUB go together", 2);
+      const oidc = f["--oidc"] === undefined ? {} : { oidc: { issuer: f["--oidc"], subject: f["--subject"] } };
       if (!name || f._.length > 1) die(ADMIN_USAGE, 2);
       if (f["--operator"] !== undefined && !["on", "off"].includes(f["--operator"])) die("--operator takes on or off", 2);
       if (f["--delegate"] !== undefined && !["on", "off"].includes(f["--delegate"])) die("--delegate takes on or off", 2);
@@ -927,7 +938,8 @@ async function admin(args) {
         if ((f["--store"] === undefined) !== (f["--scope"] === undefined) || (desc !== undefined && f["--store"] === undefined)) die("--store KEY and --scope S go together (and -d only with them)", 2);
         const store = f["--store"] === undefined ? {} : { store: { scope: f["--scope"], name: f["--store"], ...(desc !== undefined ? { description: desc } : {}) } };
         const r = await adminCall("POST", "tokens", { name, projects: names(f["--pin"] ?? ""), scopes: names(f["--scopes"] ?? ""), writes: names(f["--writes"] ?? ""), ...operator,
-          expires_at: hours === null ? null : new Date(Date.now() + hours * 3600_000).toISOString(), ...store });
+          expires_at: hours === null ? null : new Date(Date.now() + hours * 3600_000).toISOString(), ...store, ...oidc });
+        if (r.oidc) return say(`created token ${name}; tokens ${r.oidc.issuer} signs for ${r.oidc.subject} act as it (it has no secret of its own)`);
         if (r.stored) {
           try { await ask({ op: "reload" }); } catch {}
           return say(`created token ${name} and stored it as ${r.stored.name} in ${r.stored.scope}; it was never shown`);
@@ -938,8 +950,8 @@ async function admin(args) {
       if (verb === "edit") {
         const edit = {};
         for (const [flag, field] of [["--pin", "projects"], ["--scopes", "scopes"], ["--writes", "writes"]]) if (f[flag] !== undefined) edit[field] = names(f[flag]);
-        Object.assign(edit, operator);
-        if (!Object.keys(edit).length) die("name what to change: --pin, --scopes, --writes, --operator or --delegate", 2);
+        Object.assign(edit, operator, oidc);
+        if (!Object.keys(edit).length) die("name what to change: --pin, --scopes, --writes, --operator, --delegate or --oidc", 2);
         const r = await adminCall("PATCH", `tokens/${encodeURIComponent(name)}`, edit);
         return say(`updated token ${name}${r.ended ? `; ended ${r.ended.join(", ")}, which it made and no longer covers` : ""}`);
       }

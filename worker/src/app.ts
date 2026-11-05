@@ -70,7 +70,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
     const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
     const picks = await autoKeys(s1 ?? null, cleanSignals(body.signals), keys);
-    await catalog.audit(caller.name, "auto", project, picks.map((p) => p.name));
+    await catalog.auditBy(caller, "auto", project, picks.map((p) => p.name));
     return json({ project, keys: picks });
   }
   // Ask for more scopes on the minted keys in a set: {"keys": [...], "scopes": ["workers:write"]}.
@@ -111,7 +111,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       // A minted key is checked through its parent, not the child the caller holds; say so.
       checks[name] = found.row.kind === "static" || outcome.status === "none" ? outcome : { ...outcome, of: "parent" };
     }
-    await catalog.audit(caller.name, "check", project, names);
+    await catalog.auditBy(caller, "check", project, names);
     return json({ project, checks });
   }
   // Save a static key: PUT /v1/keys/NAME {"scope", "value", "description"?}, what `tumbler put` sends.
@@ -137,7 +137,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     const now = await catalog.caller(token!);
     if (!now || !writeReaches(now.writes, scope)) return json({ error: `this token may no longer write ${scope}; nothing was saved` }, 403);
     await catalog.put(scope, name, value, { kind: "static", config: cfg, checked: check.status === "ok", ...(typeof b.description === "string" ? { description: b.description } : {}) });
-    await catalog.audit(caller.name, "put", scope === GLOBAL ? null : scope, [name]);
+    await catalog.auditBy(caller, "put", scope === GLOBAL ? null : scope, [name]);
     return json({ scope, name, action: prev ? "rotated" : "created", checked: check.status === "ok" });
   }
   // Delete a static key: DELETE /v1/keys/NAME?scope=..., what `tumbler rm` sends. Within the token's writes.
@@ -150,7 +150,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     // Why: deleting a parent ends every child it minted; that stays an admin's call.
     if (prev.kind !== "static") return json({ error: `${scope}/${name} is a ${prev.kind} key; delete it in /admin` }, 409);
     if (!await catalog.removeStatic(scope, name)) return json({ error: `${scope}/${name} changed while it was being deleted; nothing was deleted` }, 409);
-    await catalog.audit(caller.name, "delete", scope === GLOBAL ? null : scope, [name]);
+    await catalog.auditBy(caller, "delete", scope === GLOBAL ? null : scope, [name]);
     return json({ scope, name, action: "deleted" });
   }
   // A minted key's scopes, and an operator's changes to them: what `tumbler scope` sends. Only for an
@@ -182,7 +182,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       if (!await catalog.setConfig(row.scope, row.name, row.rev, cfg)) return json({ error: `${row.name} changed meanwhile; nothing was saved, run again` }, 409);
       // Its children carry the old groups: end them, so the next run mints with the new ones.
       await grants.closeStale(row.scope, row.name);
-      await catalog.audit(caller.name, "mint-scope", row.scope === GLOBAL ? null : row.scope, [row.name, scope, ...added.map((g) => `+${g}`), ...remove.map((g) => `-${g}`)]);
+      await catalog.auditBy(caller, "mint-scope", row.scope === GLOBAL ? null : row.scope, [row.name, scope, ...added.map((g) => `+${g}`), ...remove.map((g) => `-${g}`)]);
     }
     const base = (cfg.scopes ?? {}) as Record<string, unknown[]>, extra = cfg.extra ?? {};
     return json({ scope: row.scope, name: row.name, kind: row.kind, defaults: cfg.defaults === true,
@@ -200,13 +200,13 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       if (!done) return json({ error: `${caller.name} made no token ${name}; only an admin revokes others` }, 404);
       const { fresh, hash } = done;
       await grants?.closeCaller(name, caller.name, hash); // only the token revoked, never one that took the name
-      if (fresh) await catalog.audit(caller.name, "token-revoke", null, [name]);
+      if (fresh) await catalog.auditBy(caller, "token-revoke", null, [name]);
       return json({ ok: true });
     }
     return json({ error: "method not allowed" }, 405);
   }
   if (request.method !== "GET") return json({ error: "method not allowed" }, 405);
-  if (url.pathname === "/v1/whoami") return json({ name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, writes: caller.writes ?? null, operator: caller.operator ?? false, delegate: caller.delegate ?? false, parent: caller.parent ?? null, expires_at: caller.expires_at ?? null });
+  if (url.pathname === "/v1/whoami") return json({ ...(caller.subject ? { oidc_subject: caller.subject } : {}), name: caller.name, projects: caller.projects, scopes: caller.scopes ?? null, writes: caller.writes ?? null, operator: caller.operator ?? false, delegate: caller.delegate ?? false, parent: caller.parent ?? null, expires_at: caller.expires_at ?? null });
   // Names only: listing must not mint a child for every minted key.
   if (url.pathname === "/v1/keys") {
     const { project, keys } = await catalog.visible(caller, url.searchParams.get("project"));
@@ -224,7 +224,10 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     // Values go out only if the credential that asked still works now: a revoke (or its name reused
     // by a new token, whose grants share the name) while this ran wins over the request.
     if ((await catalog.caller(token!))?.hash !== caller.hash) return json({ error: "unauthorized" }, 401);
-    return json(minted ? { env, max_age: MINTED_MAX_AGE_S } : { env });
+    // max_age bounds the CLI's cache: a minted child's margin, and an OIDC caller's JWT expiry, so a
+    // cached env never outlives the credential that read it.
+    const ages = [...(minted ? [MINTED_MAX_AGE_S] : []), ...(caller.until !== undefined ? [Math.max(0, Math.floor(caller.until - catalog.clock().getTime() / 1000))] : [])];
+    return json(ages.length ? { env, max_age: Math.min(...ages) } : { env });
   }
   return json({ error: "not found" }, 404);
 }
@@ -271,9 +274,9 @@ async function delegateCreate(catalog: Catalog, grants: Grants | undefined, call
   }
   const created = [name, `parent:${caller.name}`], kin = { parent: caller };
   const token = into ? null : await catalog.createToken(name, child.projects, expires, child.scopes, child.writes, false, kin);
-  if (into) await catalog.createTokenInto(caller.name, into, created, name, child.projects, expires, child.scopes, child.writes, false, kin);
+  if (into) await catalog.createTokenInto(caller.name, into, created, name, child.projects, expires, child.scopes, child.writes, false, kin, caller.subject);
   if (into) return { name, expires_at: expires, stored: into }; // never shown: it went straight into the key
-  await catalog.audit(caller.name, "token-create", null, created);
+  await catalog.auditBy(caller, "token-create", null, created);
   return { name, expires_at: expires, token }; // shown once
 }
 
@@ -435,6 +438,19 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       const into = storeTarget(b.store);
       const args = [name, projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true] as const;
       const kin = { delegate: b.delegate === true, ended }, created = [name, ...(kin.delegate ? ["delegate"] : [])];
+      // A token bound to an OIDC issuer is made and bound in one request, and its own secret is never
+      // shown: once bound, only the issuer's tokens act as it (catalog.ts caller()).
+      const oidc = b.oidc && typeof b.oidc === "object" ? { issuer: String((b.oidc as any).issuer ?? ""), subject: String((b.oidc as any).subject ?? "") } : null;
+      if (oidc && into) return json({ error: "a token bound to an OIDC issuer has no secret to store; leave out store" }, 400);
+      if (oidc) {
+        await catalog.createToken(...args, kin);
+        let bound: { issuer: string; subject: string };
+        try { bound = (await catalog.updateToken(name, { oidc })).oidc!; }
+        catch (e) { await catalog.revokeTokenGen(name); throw e; } // never leave a usable secret nobody bound
+        await catalog.audit(who, "token-create", null, created);
+        await catalog.audit(who, "token-oidc", null, [name, bound.issuer, bound.subject]);
+        return json({ name: b.name, oidc: bound });
+      }
       if (into) {
         await checkStoreTarget(catalog, into);
         await catalog.createTokenInto(who, into, created, ...args, kin);
@@ -448,9 +464,9 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     // write; any of them.
     if (m === "PATCH" && parts.length === 2) {
       const b = await body();
-      const pin = "projects" in b || !("scopes" in b || "writes" in b || "operator" in b || "delegate" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
+      const pin = "projects" in b || !("scopes" in b || "writes" in b || "operator" in b || "delegate" in b || "oidc" in b), projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map((p: unknown) => String(p).trim()).filter(Boolean) : null;
       // One checked write for both, so a bad pin never lands a wider ceiling (or the reverse).
-      const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...("operator" in b ? { operator: b.operator === true } : {}), ...("delegate" in b ? { delegate: b.delegate === true } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
+      const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...("operator" in b ? { operator: b.operator === true } : {}), ...("delegate" in b ? { delegate: b.delegate === true } : {}), ...("oidc" in b ? { oidc: b.oidc && typeof b.oidc === "object" ? { issuer: String((b.oidc as any).issuer ?? ""), subject: String((b.oidc as any).subject ?? "") } : null } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
       // Both cleanups run before either audit; a cleanup cut short is finished by the sweep.
       // Only the edited token's grants (its hash), never those of a token that took the name meanwhile.
       if ("projects" in done) await grants?.closeOutsidePin(parts[1], done.projects!, who, done.hash);
@@ -460,6 +476,7 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       if ("writes" in done) await catalog.audit(who, "token-writes", null, [parts[1], ...(done.writes ?? ["writes-nothing"])]);
       if ("operator" in done) await catalog.audit(who, "token-operator", null, [parts[1], done.operator ? "on" : "off"]);
       if ("delegate" in done) await catalog.audit(who, "token-delegate", null, [parts[1], done.delegate ? "on" : "off"]);
+      if ("oidc" in done) await catalog.audit(who, "token-oidc", null, done.oidc ? [parts[1], done.oidc.issuer, done.oidc.subject] : [parts[1], "off"]);
       // A narrower delegate: the tokens it made that no longer fit inside it end now.
       const ended = "projects" in done || "scopes" in done || "writes" in done ? await endChildren(catalog, grants, parts[1], who) : [];
       return json({ ok: true, ...(ended.length ? { ended } : {}) });

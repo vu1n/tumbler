@@ -32,3 +32,9 @@
 - `cli/tumbler` is bundled into the Worker as text (wrangler `rules`) and served at `/cli`; it must
   stay a single dependency-free file.
 - Run `cd worker && npm test && npm run typecheck` before committing.
+- Audit what a request's caller did with `catalog.auditBy(caller, ...)`, never `audit(caller.name, ...)`:
+  it carries the OIDC subject the caller proved, so no path drops it. `audit()` is for admins and the system.
+- An OIDC caller (oidc.ts) proves who, never what: it acts as the token row bound to its issuer and
+  subject, with that row's pin, scopes and writes. Only an issuer a live row names is ever fetched
+  from, and a bound row's own secret never works. Never accept a bare `*` subject or a JWT without
+  the configured audience.
