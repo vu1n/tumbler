@@ -6,7 +6,6 @@ import { masterKey } from "./crypto.ts";
 import { s1Client } from "./auto.ts";
 import { cloudflare } from "./cloudflare.ts";
 import { github } from "./github.ts";
-import { keycard } from "./keycard.ts";
 import { Grants } from "./grants.ts";
 // Bundled as text by the "rules" entry in wrangler.jsonc.
 import CLI from "../../cli/tumbler";
@@ -32,7 +31,7 @@ async function loadKey(env: Env) {
   return key.key;
 }
 
-const providers = { cloudflare: cloudflare(), github: github(), keycard: keycard() };
+const providers = { cloudflare: cloudflare(), github: github() };
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
