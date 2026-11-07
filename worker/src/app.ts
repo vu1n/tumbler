@@ -122,7 +122,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     // Loose: JSON can spell one byte of value in up to six (\u0000); the exact limit is on the value below.
     if (Number(request.headers.get("content-length") ?? 0) > MAX_VALUE * 6 + 4096) return json({ error: "value too large" }, 413);
     const b = await request.json().catch(() => ({})) as Record<string, unknown>;
-    const scope = writeScope(catalog, caller, b.scope ? String(b.scope) : null);
+    const scope = writeScope(catalog, caller, b.scope ? String(b.scope) : null, "put", name);
     const value = typeof b.value === "string" ? b.value : "";
     if (!value) return json({ error: "empty value" }, 400);
     if (new TextEncoder().encode(value).length > MAX_VALUE) return json({ error: `a value is at most ${MAX_VALUE} bytes` }, 413);
@@ -144,7 +144,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
   if (url.pathname.startsWith("/v1/keys/") && request.method === "DELETE") {
     const name = decodeURIComponent(url.pathname.slice("/v1/keys/".length));
     checkName(name);
-    const scope = writeScope(catalog, caller, url.searchParams.get("scope"));
+    const scope = writeScope(catalog, caller, url.searchParams.get("scope"), "rm", name);
     const prev = await catalog.keyRow(scope, name);
     if (!prev) return json({ error: `no key ${scope}/${name}` }, 404);
     // Why: deleting a parent ends every child it minted; that stays an admin's call.
@@ -296,13 +296,17 @@ async function endChildren(catalog: Catalog, grants: Grants | undefined, parent:
 }
 
 // The scope a caller token writes: the one it names, else the one it reads by default (never global by
-// accident), refused unless the token's writes reach it.
-function writeScope(catalog: Catalog, caller: Caller, requested: string | null) {
+// accident), refused unless the token's writes reach it. The refusal names the exact admin commands
+// for both fixes (this one key, or widen the token), so nobody has to find the field in /admin.
+function writeScope(catalog: Catalog, caller: Caller, requested: string | null, verb: "put" | "rm", key: string) {
   const scope = requested ?? (caller.projects ? catalog.scopeFor(caller, null) : null);
   if (!scope) throw new Refused(400, "name a scope to write: global, a project or project/env");
   checkScope(scope);
   if (!writeReaches(caller.writes, scope)) {
-    throw new Refused(403, `this token may not write ${scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}; an admin adds it under the token's writes in /admin`);
+    // `token edit --writes` replaces the list, so the command carries the token's current writes too.
+    const widened = [...(caller.writes ?? []), scope].join(",");
+    throw new Refused(403, `token ${caller.name} may not write ${scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}. `
+      + `As the admin, ${verb} just this key with \`tumbler admin ${verb} ${key} --scope ${scope}\`, or let the token write there with \`tumbler admin token edit ${caller.name} --writes ${widened}\``);
   }
   return scope;
 }
