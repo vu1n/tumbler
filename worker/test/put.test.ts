@@ -49,7 +49,13 @@ test("a token saves a static key within its writes, and nothing comes back but n
 test("a token writes nothing outside its writes, and a reader writes nothing at all", async () => {
   const { catalog, tokens, put } = await setup();
   for (const scope of ["huddles", "huddles/prod", "global"]) assert.equal((await put("X", tokens.dev, { scope, value: "v" })).status, 403, scope);
-  assert.match((await (await put("X", tokens.reader, { scope: "huddles", value: "v" })).json()).error, /writes nothing/);
+  const refused = (await (await put("X", tokens.reader, { scope: "huddles", value: "v" })).json()).error;
+  assert.match(refused, /writes nothing/);
+  // The refusal is the fix: the admin commands for this one key, or to widen the token.
+  assert.match(refused, /`tumbler admin put X --scope huddles`/);
+  assert.match(refused, /`tumbler admin token edit reader --writes huddles`/);
+  // `token edit --writes` replaces the list, so the suggested one keeps what the token already writes.
+  assert.match((await (await put("X", tokens.dev, { scope: "huddles/prod", value: "v" })).json()).error, /--writes huddles\/dev,huddles\/prod`/);
   assert.equal((await put("X", tokens.laptop, { scope: "huddles/prod", value: "v" })).status, 403);
   assert.equal((await catalog.list()).length, 0);
 });
