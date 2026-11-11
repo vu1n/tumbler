@@ -39,10 +39,10 @@ Move it into your password manager, then delete the file. Losing it loses every 
 function releaseTag() {
   const git = (...a) => execFileSync("git", a, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   let tag = "", dirty = "";
-  try { tag = git("tag", "--points-at", "HEAD", "--list", "v*").split("\n")[0]; dirty = git("status", "--porcelain", "--untracked-files=no"); }
+  try { tag = git("tag", "--points-at", "HEAD", "--list", "v*").split("\n")[0]; dirty = git("status", "--porcelain"); }
   catch { fail("deploy needs a git checkout of a v* tag (git failed here)"); }
   if (!tag) fail("HEAD is not a v* release tag: tag the release (git tag vX.Y.Z && git push origin vX.Y.Z), check it out, then deploy");
-  if (dirty) fail(`the checkout of ${tag} has uncommitted changes; deploy a clean ${tag}`);
+  if (dirty) fail(`the checkout of ${tag} has uncommitted or untracked files (wrangler would deploy or migrate them too); deploy a clean ${tag}`);
   console.log(`deploying ${tag}`);
 }
 
