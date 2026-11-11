@@ -23,7 +23,8 @@ cd worker && npm install
 # 1. Set up and deploy, from your own machine. The first run creates the master key in the
 #    account's Secrets Store and saves a backup to ~/tumbler-master-key.txt: move that into your
 #    password manager and delete the file. It also creates the D1 database and applies migrations.
-#    Run the same command again for every later deploy. From an agent session, run it on a
+#    Run the same command again for every later deploy, from a clean checkout of a v* tag (it
+#    refuses anything else, so what's live is a release). From an agent session, run it on a
 #    workers:write child: tumbler run --scope workers:write -- npm run deploy
 npm run deploy
 # 2. Protect /admin with Cloudflare Access (Zero Trust > Access > Applications > Self-hosted,

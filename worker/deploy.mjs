@@ -6,12 +6,15 @@
 //   - The D1 database is created and linked by the first deploy (wrangler's automatic provisioning).
 // Migrations run before the deploy, so new code never meets an old schema; on the very first
 // deploy the database doesn't exist yet, so they run right after it instead.
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { fail, hasMasterKey, PLACEHOLDER, secretName, source, storeId, wrangler } from "./account.mjs";
 
 const CONFIG = "wrangler.deploy.jsonc", args = process.argv.slice(2), dryRun = args.includes("--dry-run");
+// A deploy ships a release: HEAD must be a v* tag with nothing uncommitted, so what runs is what was reviewed.
+if (!dryRun) releaseTag();
 if (!source.includes(PLACEHOLDER)) fail(`wrangler.jsonc has no ${PLACEHOLDER} to fill in`);
 const id = storeId();
 if (!dryRun && !hasMasterKey(id)) createMasterKey(id);
@@ -31,6 +34,16 @@ function createMasterKey(store) {
   if (!hasMasterKey(store)) fail(`${secretName} didn't appear in store ${store}; the backup in ${backup} is unused`);
   console.log(`\nCreated ${secretName} in store ${store}. A copy is in ${backup} (readable only by you).
 Move it into your password manager, then delete the file. Losing it loses every value tumbler stores.\n`);
+}
+
+function releaseTag() {
+  const git = (...a) => execFileSync("git", a, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  let tag = "", dirty = "";
+  try { tag = git("tag", "--points-at", "HEAD", "--list", "v*").split("\n")[0]; dirty = git("status", "--porcelain"); }
+  catch { fail("deploy needs a git checkout of a v* tag (git failed here)"); }
+  if (!tag) fail("HEAD is not a v* release tag: tag the release (git tag vX.Y.Z && git push origin vX.Y.Z), check it out, then deploy");
+  if (dirty) fail(`the checkout of ${tag} has uncommitted or untracked files (wrangler would deploy or migrate them too); deploy a clean ${tag}`);
+  console.log(`deploying ${tag}`);
 }
 
 writeFileSync(CONFIG, source.replace(PLACEHOLDER, JSON.stringify(id)));
