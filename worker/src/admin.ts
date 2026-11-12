@@ -15,7 +15,8 @@ html{accent-color:var(--accent);caret-color:var(--accent);scrollbar-color:var(--
 ::selection{background:color-mix(in srgb,var(--accent) 28%,transparent)}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}
 main{max-width:1120px;margin:0 auto;padding:16px 16px 96px}
-h1{font-size:20px;margin:8px 0 4px}h2{font-size:16px;margin:40px 0 4px}h2,details.act{scroll-margin-top:64px}
+section{padding-top:4px}
+h1{font-size:20px;margin:8px 0 4px}h2{font-size:16px;margin:24px 0 4px}h2,details.act{scroll-margin-top:64px}
 p{max-width:60ch;margin:4px 0 12px;text-wrap:pretty}
 a{color:var(--accent);text-underline-offset:3px}
 code,.mono{font-family:ui-monospace,monospace}code{font-size:13px}
@@ -24,6 +25,7 @@ code,.mono{font-family:ui-monospace,monospace}code{font-size:13px}
 nav{display:flex;flex-wrap:wrap;gap:4px 20px;margin:12px 0 0;padding:8px 0;border-block:1px solid var(--line);position:sticky;top:0;z-index:2;background:var(--bg)}
 .go{display:flex;flex-wrap:wrap;gap:4px 20px;margin-left:auto}
 nav a{text-decoration:none}nav a:hover{text-decoration:underline}nav span{color:var(--muted)}
+nav a[aria-current=page]{color:var(--fg);font-weight:600;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:6px}
 table{width:100%;border-collapse:collapse}
 td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:500}
@@ -48,7 +50,7 @@ textarea{font:12px/1.4 ui-monospace,monospace;min-height:96px;max-height:60vh;re
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 input:focus-visible,select:focus-visible,textarea:focus-visible{outline-offset:0;border-color:var(--accent)}
 details.act{border-top:1px solid var(--line)}details.act:last-of-type{border-bottom:1px solid var(--line)}
-details.act+details.act{margin-top:-1px}.acts-group>details.act:first-child{border-top:0}#s-keys+.acts-group>details.act:first-child{border-top:1px solid var(--line)}
+details.act+details.act{margin-top:-1px}.acts-group>details.act:first-child{border-top:0}
 .find{display:flex;flex-wrap:wrap;align-items:end;gap:8px 12px;margin:20px 0 4px}.find .f{flex:1 1 240px;max-width:360px}
 tr.grp td{padding:16px 0 4px}tr.grp button{border:0;padding:4px 8px;font-weight:600}tr.grp button::before{content:'\\25B8\\00A0'}tr.grp button[aria-expanded=true]::before{content:'\\25BE\\00A0'}
 tr.grp button:disabled{opacity:1;cursor:default;color:var(--fg);background:none}tr.grp button:disabled::before{content:none}tr.grp .muted,tr.grp .warn{margin-left:4px}
@@ -97,9 +99,9 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 </style></head><body><main>
 <h1>Tumbler</h1>
 <p class="muted">One store for env vars and keys. Values are never shown after they're saved. A key with a check is tested before a new value is saved; if the test fails, nothing is saved. Sessions work through the CLI (<code>tumbler run</code>, <code>tumbler put</code>); this page is for reviewing what's stored and for what only you may do.</p>
-<nav aria-label="Sections"><a href="#s-keys">Keys <span id="nKeys">…</span></a><a href="#s-grants">Grants <span id="nGrants">…</span></a><a href="#s-tokens">Tokens <span id="nTokens">…</span></a><a href="#s-audit">Audit</a><span class="go"><a href="#addKey" id="goKey">Add a key</a><a href="#createBox" id="goToken">Create a token</a></span></nav>
+<nav aria-label="Sections"><a href="#keys" data-tab="keys">Keys <span id="nKeys">…</span></a><a href="#grants" data-tab="grants">Grants <span id="nGrants">…</span></a><a href="#tokens" data-tab="tokens">Tokens <span id="nTokens">…</span></a><a href="#audit" data-tab="audit">Audit</a><span class="go"><a href="#addKey" id="goKey">Add a key</a><a href="#createBox" id="goToken">Create a token</a></span></nav>
 
-<section aria-labelledby="s-keys"><h2 id="s-keys">Keys</h2>
+<section aria-labelledby="s-keys" data-tab="keys"><h2 class="sr" id="s-keys">Keys</h2>
 <div class="acts-group">
 <details class="act" id="addKey"><summary>Add a key or replace a value</summary>
 <form id="putKey" method="post" class="fields">
@@ -133,13 +135,13 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 <div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Kind</th><th>Check</th><th>Description</th><th>Rotated</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="keys"><tr class="empty loading"><td colspan="7">Loading keys…</td></tr></tbody></table></div>
 </section>
 
-<section aria-labelledby="s-grants"><h2 id="s-grants">Grants</h2>
+<section aria-labelledby="s-grants" data-tab="grants"><h2 class="sr" id="s-grants">Grants</h2>
 <p class="muted">Short-lived children of minted keys. Each is minted at once within its token's scopes; nothing waits for you here.</p>
 <p id="grantsNote" class="notice" hidden></p>
 <div class="wrap"><table class="rec"><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="grants"><tr class="empty loading"><td colspan="7">Loading grants…</td></tr></tbody></table></div>
 </section>
 
-<section aria-labelledby="s-tokens"><h2 id="s-tokens">Tokens</h2>
+<section aria-labelledby="s-tokens" data-tab="tokens"><h2 class="sr" id="s-tokens">Tokens</h2>
 <div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Reads</th><th>May mint</th><th>May write</th><th>Operator</th><th>Created</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="tokens"><tr class="empty loading"><td colspan="8">Loading tokens…</td></tr></tbody></table></div>
 <div class="acts-group">
 <details class="act" id="createBox"><summary>Create a token</summary>
@@ -159,7 +161,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 <div id="once" tabindex="-1" hidden></div>
 </div></section>
 
-<section aria-labelledby="s-audit"><h2 id="s-audit">Audit</h2>
+<section aria-labelledby="s-audit" data-tab="audit"><h2 class="sr" id="s-audit">Audit</h2>
 <div class="wrap"><table class="log"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Project</th><th>Names</th></tr></thead><tbody id="audit"><tr class="empty loading"><td colspan="5">Loading the audit…</td></tr></tbody></table></div>
 </section>
 </main>
@@ -320,7 +322,7 @@ async function load(mine) {
   const live = g.grants.filter(x => x.state === 'active' || x.state === 'pending');
   $('nGrants').textContent = g.failed ? '' : live.length + ' active';
   const note2 = $('grantsNote');
-  note2.textContent = g.failed ? 'Could not load grants (' + g.failed + '). Keys, tokens and audit below are current.'
+  note2.textContent = g.failed ? 'Could not load grants (' + g.failed + '). Keys, tokens and audit are current.'
     : g.revoke_pending ? g.revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
   note2.hidden = !note2.textContent;
   fill('grants', g.grants.map(x => { const on = x.state === 'active' || x.state === 'pending';
@@ -439,8 +441,17 @@ $('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = 
     () => (KEYS.some(x => x.scope === from) ? 'Keys are still in ' + from : 'Its keys are in ' + to) + '; move it again to finish the move'));
     say('Moved ' + r.moved.length + ' key(s) from ' + from + ' to ' + to + '; repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); f.reset(); openScopes?.add(to); await refresh(); }, 'Moving…'); };
 
-// The nav's shortcuts open a form wherever the page is scrolled; Add a key ends a Set value in progress.
-const goTo = (box, field) => e => { e.preventDefault(); box.open = true; box.scrollIntoView({ block: 'start' }); field.focus({ preventScroll: true }); };
+// One section shows at a time, named by the URL's hash (#keys, #grants, #tokens, #audit), so a link or Back reopens it.
+const TABS = ['keys', 'grants', 'tokens', 'audit'];
+const tabOf = () => { const h = location.hash.slice(1).replace(/^s-/, ''); return TABS.includes(h) ? h : 'keys'; };
+const show = tab => { for (const sec of document.querySelectorAll('section[data-tab]')) sec.hidden = sec.dataset.tab !== tab;
+  for (const a of document.querySelectorAll('nav a[data-tab]')) if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); };
+for (const a of document.querySelectorAll('nav a[data-tab]')) a.onclick = e => { e.preventDefault();
+  if (tabOf() !== a.dataset.tab) history.pushState(null, '', '#' + a.dataset.tab); show(a.dataset.tab); scrollTo(0, 0); };
+addEventListener('popstate', () => show(tabOf()));
+// The nav's shortcuts open a form from any tab; Add a key ends a Set value in progress.
+const goTo = (box, field) => e => { e.preventDefault(); const tab = box.closest('section').dataset.tab;
+  if (tabOf() !== tab) history.pushState(null, '', '#' + tab); show(tab); box.open = true; box.scrollIntoView({ block: 'start' }); field.focus({ preventScroll: true }); };
 $('goKey').onclick = e => { if (F(putKey, 'name').readOnly) resetKey(); goTo(addKey, F(putKey, 'name'))(e); };
 
 // --- grants and tokens ---
@@ -546,5 +557,5 @@ addEventListener('input', e => { if (e.target.matches('textarea')) fit(e.target)
 addEventListener('toggle', e => { if (e.target.open) e.target.querySelectorAll('textarea').forEach(fit); }, true);
 
 $('goToken').onclick = goTo($('createBox'), F(newToken, 'name'));
-syncKind(); presses(); refresh();
+show(tabOf()); scrollTo(0, 0); syncKind(); presses(); refresh();
 </script></body></html>`;

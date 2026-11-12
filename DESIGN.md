@@ -93,9 +93,10 @@ rarely and deliberately, so it earns trust through plainness and precision rathe
 Every name and date is legible at a glance; the only color that asks for attention is amber, and
 amber means something needs you soon.
 
-Density is a feature here. One page holds keys, grants, tokens and the audit trail, so the owner can
-answer "what can reach what" without navigating. The ledger leads; the person-only actions sit one
-disclosure away under the table they change. The page uses the platform's own sans and monospace,
+Density is a feature here, one ledger at a time: keys, grants, tokens and the audit trail are tabs of
+one page, and the nav carries every tab's live count, so the owner sees what needs them without
+opening each. The ledger leads; the person-only actions sit one disclosure away beside the table
+they change. The page uses the platform's own sans and monospace,
 which the CSP requires (no external resources can load) and which an Operate page permits.
 
 **Key Characteristics:**
@@ -169,10 +170,12 @@ times are tabular. On a phone, a name longer than the line breaks rather than pu
 
 ## Layout
 
-A single centered column (max 1120px, 16px padding) of sections in a fixed order, Keys, Grants,
-Tokens, Audit, with a section nav under the title that carries the live counts. The nav sticks to the
-top of the screen and ends, right-aligned, with "Add a key" and "Create a token", which open that form
-and focus its first field from anywhere on the page. Keys leads with its actions, a stack of named
+A single centered column (max 1120px, 16px padding) holding one section at a time, Keys, Grants,
+Tokens or Audit, picked by a tab nav under the title that carries the live counts. The open tab is
+ink, bold and underlined (it is not a control while open); the URL hash names it (#keys, #grants,
+#tokens, #audit), so a link or Back reopens it, and Keys is the default. Each section's heading is
+for screen readers only; the tab names it. The nav sticks to the top of the screen and ends, right-aligned, with "Add a key" and "Create a token", which open that form
+and focus its first field from any tab. Keys leads with its actions, a stack of named
 disclosures ("Add a key or replace a value", "Import a .env", "Move a scope") separated by hairlines,
 then "Find a key" (matches name, scope, kind, check and description), then the table. Keys group
 under one header row per scope (global first, then A to Z) that names the scope, its count and how
