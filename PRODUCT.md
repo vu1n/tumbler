@@ -30,7 +30,7 @@ become the place work routinely happens.
   images or scripts can load.
 - The page is a single template literal in `worker/src/admin.ts`, with its script inline. Its forms
   are `method="post"` so a value never lands in a URL if the script fails.
-- Sections: Keys (with the save form, `.env` import and scope move), Grants, Tokens (with the
+- Tabs: Keys (with the save form, `.env` import and scope move), Grants, Tokens (with the
   create form), Audit.
 
 ## Capabilities and Constraints

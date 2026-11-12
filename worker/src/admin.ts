@@ -15,14 +15,17 @@ html{accent-color:var(--accent);caret-color:var(--accent);scrollbar-color:var(--
 ::selection{background:color-mix(in srgb,var(--accent) 28%,transparent)}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,sans-serif}
 main{max-width:1120px;margin:0 auto;padding:16px 16px 96px}
-h1{font-size:20px;margin:8px 0 4px}h2{font-size:16px;margin:40px 0 4px;scroll-margin-top:16px}
+section{padding-top:4px}
+h1{font-size:20px;margin:8px 0 4px}h2{font-size:16px;margin:24px 0 4px}h2,details.act{scroll-margin-top:64px}
 p{max-width:60ch;margin:4px 0 12px;text-wrap:pretty}
 a{color:var(--accent);text-underline-offset:3px}
 code,.mono{font-family:ui-monospace,monospace}code{font-size:13px}
 .muted{color:var(--muted)}.warn{color:var(--warn)}.danger{color:var(--danger)}.nw{white-space:nowrap;font-variant-numeric:tabular-nums}.nb{white-space:nowrap}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
-nav{display:flex;flex-wrap:wrap;gap:4px 20px;margin:12px 0 0;padding:8px 0;border-block:1px solid var(--line)}
+nav{display:flex;flex-wrap:wrap;gap:4px 20px;margin:12px 0 0;padding:8px 0;border-block:1px solid var(--line);position:sticky;top:0;z-index:2;background:var(--bg)}
+.go{display:flex;flex-wrap:wrap;gap:4px 20px;margin-left:auto}
 nav a{text-decoration:none}nav a:hover{text-decoration:underline}nav span{color:var(--muted)}
+nav a[aria-current=page]{color:var(--fg);font-weight:600;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:6px}
 table{width:100%;border-collapse:collapse}
 td,th{text-align:left;padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
 th{color:var(--muted);font-weight:500}
@@ -48,6 +51,10 @@ textarea{font:12px/1.4 ui-monospace,monospace;min-height:96px;max-height:60vh;re
 input:focus-visible,select:focus-visible,textarea:focus-visible{outline-offset:0;border-color:var(--accent)}
 details.act{border-top:1px solid var(--line)}details.act:last-of-type{border-bottom:1px solid var(--line)}
 details.act+details.act{margin-top:-1px}.acts-group>details.act:first-child{border-top:0}
+.find{display:flex;flex-wrap:wrap;align-items:end;gap:8px 12px;margin:20px 0 4px}.find .f{flex:1 1 240px;max-width:360px}
+tr.grp td{padding:16px 0 4px}tr.grp button{border:0;padding:4px 8px;font-weight:600}tr.grp button::before{content:'\\25B8\\00A0'}tr.grp button[aria-expanded=true]::before{content:'\\25BE\\00A0'}
+tr.grp button:disabled{opacity:1;cursor:default;color:var(--fg);background:none}tr.grp button:disabled::before{content:none}tr.grp .muted,tr.grp .warn{margin-left:4px}
+tr.more td{padding:4px 0 8px}
 summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}summary::marker{color:var(--accent)}
 .fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin:4px 0 16px;align-items:start}
 .f{display:flex;flex-direction:column;gap:4px}.f>label{font-weight:500}.full{grid-column:1/-1}
@@ -63,7 +70,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 #once p{margin:0 0 8px}#once textarea{font-size:13px;min-height:0;max-height:none;resize:none;overflow:hidden;word-break:break-all;field-sizing:content;margin-bottom:8px}
 #status{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);width:min(600px,calc(100% - 32px));display:flex;gap:12px;align-items:center;justify-content:space-between;padding:8px 8px 8px 12px;background:var(--bg);border:1px solid var(--edge);border-radius:6px;outline:8px solid var(--bg)}
 #status.error{border-color:var(--danger);color:var(--danger)}#statusText{text-wrap:pretty}
-@media (pointer:coarse){button,summary,input:not([type=checkbox]),select{min-height:44px}nav a{min-height:44px;display:inline-flex;align-items:center;gap:4px}.chips button{min-height:40px}
+@media (pointer:coarse){h2,details.act{scroll-margin-top:84px}button,summary,input:not([type=checkbox]),select{min-height:44px}nav a{min-height:44px;display:inline-flex;align-items:center;gap:4px}.chips button{min-height:40px}
   input[type=checkbox]{width:20px;height:20px}.check label{min-height:44px;display:flex;align-items:center}}
 @media (min-width:720px){.w2{grid-column:span 2}}
 @media (min-width:641px){th,table.rec tr:not(.editor,.empty) td:first-child,td.when{white-space:nowrap}
@@ -74,6 +81,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   table.rec td{display:block;padding:0;border:0;overflow-wrap:break-word}table.rec .at{white-space:normal}
   .nb{display:inline-block;max-width:100%;white-space:normal}
   table.rec td::before{content:attr(data-label);display:block;color:var(--muted);font-size:12px}
+  table.rec tr:is(.grp,.more){display:block;padding:0}table.rec tr.grp{padding-top:8px}table.rec tr:is(.grp,.more) td::before{content:none}
   table.rec td:first-child,table.rec td.name,table.rec td.acts,table.rec td.ended,table.rec tr.empty td,table.rec tr.editor td{grid-column:1/-1}
   table.rec tr:not(.empty,.editor) td:first-child{font-weight:600}table.rec td:first-child::before,table.rec td.acts::before,table.rec td.ended::before,table.rec tr.empty td::before,table.rec tr.editor td::before{content:none}table.rec tr.editor td{padding-inline:4px}
   table.rec td:empty{display:none}
@@ -91,10 +99,9 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 </style></head><body><main>
 <h1>Tumbler</h1>
 <p class="muted">One store for env vars and keys. Values are never shown after they're saved. A key with a check is tested before a new value is saved; if the test fails, nothing is saved. Sessions work through the CLI (<code>tumbler run</code>, <code>tumbler put</code>); this page is for reviewing what's stored and for what only you may do.</p>
-<nav aria-label="Sections"><a href="#s-keys">Keys <span id="nKeys">…</span></a><a href="#s-grants">Grants <span id="nGrants">…</span></a><a href="#s-tokens">Tokens <span id="nTokens">…</span></a><a href="#s-audit">Audit</a></nav>
+<nav aria-label="Sections"><a href="#keys" data-tab="keys">Keys <span id="nKeys">…</span></a><a href="#grants" data-tab="grants">Grants <span id="nGrants">…</span></a><a href="#tokens" data-tab="tokens">Tokens <span id="nTokens">…</span></a><a href="#audit" data-tab="audit">Audit</a><span class="go"><a href="#addKey" id="goKey">Add a key</a><a href="#createBox" id="goToken">Create a token</a></span></nav>
 
-<section aria-labelledby="s-keys"><h2 id="s-keys">Keys</h2>
-<div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Scope</th><th>Kind</th><th>Check</th><th>Description</th><th>Rotated</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="keys"><tr class="empty loading"><td colspan="8">Loading keys…</td></tr></tbody></table></div>
+<section aria-labelledby="s-keys" data-tab="keys"><h2 class="sr" id="s-keys">Keys</h2>
 <div class="acts-group">
 <details class="act" id="addKey"><summary>Add a key or replace a value</summary>
 <form id="putKey" method="post" class="fields">
@@ -123,15 +130,18 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
   <div class="f"><label for="mTo">To</label><input id="mTo" name="to" placeholder="huddles/dev" required autocomplete="off" spellcheck="false"></div>
   <div class="bar"><button class="primary">Move</button></div>
 </form></details>
-</div></section>
+</div>
+<div class="find"><div class="f"><label for="kFind">Find a key</label><input id="kFind" type="search" autocomplete="off" spellcheck="false" placeholder="name, scope, kind or what it's for" aria-controls="keys"></div><button type="button" class="quiet" id="kFold" hidden>Expand all</button><span id="kShown" class="muted" aria-live="polite"></span></div>
+<div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Kind</th><th>Check</th><th>Description</th><th>Rotated</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="keys"><tr class="empty loading"><td colspan="7">Loading keys…</td></tr></tbody></table></div>
+</section>
 
-<section aria-labelledby="s-grants"><h2 id="s-grants">Grants</h2>
+<section aria-labelledby="s-grants" data-tab="grants"><h2 class="sr" id="s-grants">Grants</h2>
 <p class="muted">Short-lived children of minted keys. Each is minted at once within its token's scopes; nothing waits for you here.</p>
 <p id="grantsNote" class="notice" hidden></p>
 <div class="wrap"><table class="rec"><thead><tr><th>Key</th><th>Caller</th><th>Project</th><th>State</th><th>Scopes</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="grants"><tr class="empty loading"><td colspan="7">Loading grants…</td></tr></tbody></table></div>
 </section>
 
-<section aria-labelledby="s-tokens"><h2 id="s-tokens">Tokens</h2>
+<section aria-labelledby="s-tokens" data-tab="tokens"><h2 class="sr" id="s-tokens">Tokens</h2>
 <div class="wrap"><table class="rec"><thead><tr><th>Name</th><th>Reads</th><th>May mint</th><th>May write</th><th>Operator</th><th>Created</th><th>Expires</th><th><span class="sr">Actions</span></th></tr></thead><tbody id="tokens"><tr class="empty loading"><td colspan="8">Loading tokens…</td></tr></tbody></table></div>
 <div class="acts-group">
 <details class="act" id="createBox"><summary>Create a token</summary>
@@ -151,7 +161,7 @@ summary{cursor:pointer;color:var(--accent);padding:10px 4px;width:fit-content}su
 <div id="once" tabindex="-1" hidden></div>
 </div></section>
 
-<section aria-labelledby="s-audit"><h2 id="s-audit">Audit</h2>
+<section aria-labelledby="s-audit" data-tab="audit"><h2 class="sr" id="s-audit">Audit</h2>
 <div class="wrap"><table class="log"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Project</th><th>Names</th></tr></thead><tbody id="audit"><tr class="empty loading"><td colspan="5">Loading the audit…</td></tr></tbody></table></div>
 </section>
 </main>
@@ -258,6 +268,28 @@ const checkText = k => { const { c, error } = cfgOf(k); if (error) return 'confi
   if (!c.check) return 'none';
   return (typeof c.check === 'string' ? c.check : 'custom') + (k.checked ? ', passed' : ', saved unchecked'); };
 let KEYS = [], TOKENS = [], GRANTS = [];
+// The key groups as drawn, which scopes are open (kept across reloads), and the row that says nothing matched.
+let GROUPS = [], openScopes = null, noMatch = null; const seenScopes = new Set();
+// Finding shows every match, open group or not; an empty find shows the open groups.
+const showKeys = () => { const q = $('kFind').value.trim().toLowerCase(); let shown = 0;
+  for (const g of GROUPS) { let hit = 0;
+    for (const r of g.rows) { const m = !q || r.dataset.find.includes(q); if (m) hit++; r.hidden = !m || !q && !openScopes.has(g.scope); }
+    const n = g.rows.length; g.head.hidden = !hit; g.btn.disabled = !!q; g.btn.setAttribute('aria-expanded', String(!!q || openScopes.has(g.scope)));
+    g.count.textContent = q ? hit + ' of ' + n : n + (n === 1 ? ' key' : ' keys'); shown += hit; }
+  if (noMatch) { noMatch.hidden = !q || shown > 0; noMatch.firstChild.textContent = 'No key matches \u201c' + q + '\u201d.'; }
+  const all = GROUPS.every(g => openScopes.has(g.scope));
+  $('kFold').textContent = all ? 'Collapse all' : 'Expand all'; $('kFold').hidden = !!q || GROUPS.length < 2;
+  $('kShown').textContent = q ? shown + ' of ' + KEYS.length + ' keys' : ''; };
+$('kFind').oninput = showKeys;
+$('kFold').onclick = () => { const all = GROUPS.every(g => openScopes.has(g.scope)); for (const g of GROUPS) if (all) openScopes.delete(g.scope); else openScopes.add(g.scope); showKeys(); };
+// Ended rows, and the audit past its newest 20, fold under one row so the page stays short; a fold stays as set across reloads.
+const unfolded = new Set();
+const fold = (id, hide, label) => { if (!hide.length) return; const body = $(id), c = td(''), b = document.createElement('button'), tr = row([c], 'more');
+  c.colSpan = body.closest('table').querySelectorAll('thead th').length;
+  // Folding a row closes its open editor too, so no form is left without its row.
+  const set = open => { for (const r of hide) { r.hidden = !open; if (!open && r.nextElementSibling?.classList.contains('editor')) r.nextElementSibling.remove(); } b.setAttribute('aria-expanded', String(open)); b.textContent = (open ? 'Hide ' : 'Show ') + label; };
+  b.type = 'button'; b.className = 'quiet'; b.onclick = () => { const open = !unfolded.has(id); if (open) unfolded.add(id); else unfolded.delete(id); set(open); };
+  set(unfolded.has(id)); c.append(b); body.append(tr); };
 
 async function load(mine) {
   const [{ keys }, { tokens }, { audit }, g] = await Promise.all([api('keys'), api('tokens'), api('audit'), api('grants').catch(err => ({ grants: [], failed: err.message }))]);
@@ -265,22 +297,39 @@ async function load(mine) {
   KEYS = keys; TOKENS = tokens; GRANTS = g.failed ? null : g.grants; note();
   const due = keys.filter(k => daysLeft(k) <= 7).length;
   $('nKeys').replaceChildren(String(keys.length), ...(due ? [', ', Object.assign(document.createElement('span'), { className: 'warn', textContent: due + ' need you' })] : []));
-  fill('keys', keys.map(k => { const what = k.scope + '/' + k.name, check = checkText(k);
-    const left = daysLeft(k), exp = !k.expires_at ? when('no date', '', 'muted') : left < 0 ? when('expired ' + day(k.expires_at), '', 'warn') : when(day(k.expires_at), left <= 7 ? inDays(left) : '', left <= 7 ? 'warn' : '');
-    return row([td(k.name), td(k.scope), td(k.kind), td(check, check === 'none' ? 'muted' : ''), td(k.description || 'none', 'muted'), when(day(k.rotated_at)), exp,
-      acts(button('Set value', () => rotate(k), 'quiet', 'Set a new value for ' + what), button('Delete', () => deleteKey(k), 'del', 'Delete ' + what, 'Deleting…'))]); }),
-    ['No keys yet. Add one below, paste a .env, or run ', code('tumbler put NAME'), ' from a session.']);
+  // Keys draw in one group per scope, global first; a group opens or closes under its header.
+  const scopes = [...new Set(keys.map(k => k.scope))].sort((a, b) => (a !== 'global') - (b !== 'global') || a.localeCompare(b));
+  const dueIn = s => keys.filter(k => k.scope === s && daysLeft(k) <= 7).length;
+  // A long list starts closed but for the scopes that need you; a scope that appears later starts open.
+  if (!openScopes) openScopes = new Set(keys.length > 15 ? scopes.filter(dueIn) : scopes);
+  else for (const s of scopes) if (!seenScopes.has(s)) openScopes.add(s);
+  for (const s of scopes) seenScopes.add(s);
+  GROUPS = scopes.map(s => { const c = td(''), head = row([c], 'grp'), btn = document.createElement('button'), count = document.createElement('span'), due = dueIn(s);
+    c.colSpan = 7; btn.type = 'button'; btn.className = 'quiet'; btn.textContent = s; count.className = 'muted';
+    btn.onclick = () => { if (openScopes.has(s)) openScopes.delete(s); else openScopes.add(s); showKeys(); };
+    c.append(btn, count, ...(due ? [Object.assign(document.createElement('span'), { className: 'warn', textContent: due + ' need' + (due === 1 ? 's' : '') + ' you' })] : []));
+    const rows = keys.filter(k => k.scope === s).map(k => { const what = k.scope + '/' + k.name, check = checkText(k);
+      const left = daysLeft(k), exp = !k.expires_at ? when('no date', '', 'muted') : left < 0 ? when('expired ' + day(k.expires_at), '', 'warn') : when(day(k.expires_at), left <= 7 ? inDays(left) : '', left <= 7 ? 'warn' : '');
+      const tr = row([td(k.name), td(k.kind), td(check, check === 'none' ? 'muted' : ''), td(k.description || 'none', 'muted'), when(day(k.rotated_at)), exp,
+        acts(button('Set value', () => rotate(k), 'quiet', 'Set a new value for ' + what), button('Delete', () => deleteKey(k), 'del', 'Delete ' + what, 'Deleting…'))]);
+      tr.dataset.find = [k.name, k.scope, k.kind, check, k.description ?? ''].join(' ').toLowerCase(); return tr; });
+    return { scope: s, head, btn, count, rows }; });
+  noMatch = row([Object.assign(td(''), { colSpan: 7 })], 'empty');
+  fill('keys', keys.length ? [...GROUPS.flatMap(g => [g.head, ...g.rows]), noMatch] : [],
+    ['No keys yet. Add one above, paste a .env, or run ', code('tumbler put NAME'), ' from a session.']);
+  showKeys();
 
   const live = g.grants.filter(x => x.state === 'active' || x.state === 'pending');
   $('nGrants').textContent = g.failed ? '' : live.length + ' active';
   const note2 = $('grantsNote');
-  note2.textContent = g.failed ? 'Could not load grants (' + g.failed + '). Keys, tokens and audit below are current.'
+  note2.textContent = g.failed ? 'Could not load grants (' + g.failed + '). Keys, tokens and audit are current.'
     : g.revoke_pending ? g.revoke_pending + ' revoked token(s) could not be deleted at the provider yet; retrying every five minutes until they expire.' : '';
   note2.hidden = !note2.textContent;
   fill('grants', g.grants.map(x => { const on = x.state === 'active' || x.state === 'pending';
     return row([td(x.name), named(x.caller), named(x.project ?? 'global'), td(x.state), td(x.scopes.join(', ')), when(stamp(x.expires_at)),
       on ? acts(button('Revoke', () => revokeGrant(x), 'del', 'Revoke ' + x.name + ' for ' + x.caller, 'Revoking…')) : td('')], on ? '' : 'off'); }),
     g.failed ? 'Grants could not be loaded.' : 'No grants. One appears when a token reads a minted key, and ends on its own when it expires.');
+  const endedGrants = [...$('grants').querySelectorAll('tr.off')]; fold('grants', endedGrants, endedGrants.length + ' ended grant' + (endedGrants.length === 1 ? '' : 's'));
 
   $('nTokens').textContent = tokens.filter(t => !t.revoked_at && !past(t.expires_at)).length + ' live';
   fill('tokens', tokens.map(t => { const gone = !!t.revoked_at, done = gone || past(t.expires_at);
@@ -290,8 +339,10 @@ async function load(mine) {
     tr.append(gone ? ended : acts(button('Edit', () => editToken(t, tr), 'quiet', 'Edit ' + t.name), button('Revoke', () => revokeToken(t), 'del', 'Revoke token ' + t.name, 'Revoking…')));
     return tr; }),
     'No tokens yet. Create one below, then add it as a network secret on the environment that should read keys.');
+  const endedTokens = [...$('tokens').querySelectorAll('tr.off')]; fold('tokens', endedTokens, endedTokens.length + ' revoked or expired token' + (endedTokens.length === 1 ? '' : 's'));
 
   fill('audit', audit.map(a => row([when(stamp(a.at)), named(a.actor), named(a.action), a.project ? named(a.project) : td(''), names(String(a.names ?? '').split(',').join(', '))])), 'Nothing has happened yet.');
+  const older = [...$('audit').children].slice(20); fold('audit', older, older.length + ' older entr' + (older.length === 1 ? 'y' : 'ies'));
 }
 
 // --- keys ---
@@ -351,7 +402,7 @@ putKey.onsubmit = e => { e.preventDefault();
     if (!err.canSkip) { if (err.message.startsWith(name + ':')) throw err; fail('Could not save ' + what, now)(err); }
     if (!confirm(err.message + '\\n\\nSave it unchecked anyway? Commands running with --watch will not get it pushed.')) { say(existed ? 'Nothing was saved; ' + what + ' keeps its old value.' : 'Nothing was saved; ' + what + ' was not created.'); return; }
     await put(true).catch(fail('Could not save ' + what, now)); }
-  resetKey(); addKey.open = false; addKey.querySelector('summary').focus();
+  resetKey(); addKey.open = false; addKey.querySelector('summary').focus(); openScopes?.add(scope);
   say((existed ? 'Saved a new value for ' : 'Created ') + what + '.'); await refresh(); }, check ? 'Checking with ' + check + '…' : 'Saving…'); };
 async function deleteKey(k) { const what = k.scope + '/' + k.name;
   if (!confirm(k.kind === 'static'
@@ -380,7 +431,7 @@ F(importEnv, 'text').oninput = F(importEnv, 'scope').oninput = () => importPlan.
 importEnv.onsubmit = e => { e.preventDefault(); const sent = { scope: F(importEnv, 'scope').value, text: F(importEnv, 'text').value };
   busy(importEnv.querySelector('button'), async () => { const plan = await importCall(sent, false);
   showPlan(plan, async () => {
-    const r = await importCall(sent, true); showPlan(r);
+    const r = await importCall(sent, true); showPlan(r); openScopes?.add(r.scope);
     if (r.saved.length === r.keys.filter(k => k.action !== 'skip').length && F(importEnv, 'text').value === sent.text) { F(importEnv, 'text').value = ''; fit(F(importEnv, 'text')); }
     const failed = r.keys.filter(k => k.action === 'failed').length;
     say('Saved ' + r.saved.length + ' key(s) to ' + r.scope + (failed ? '; ' + failed + ' failed their check and were not saved (marked failed above).' : '.'), failed > 0); await refresh(); }); }, 'Previewing…'); };
@@ -388,7 +439,20 @@ $('moveScope').onsubmit = e => { e.preventDefault(); const f = e.target, from = 
   if (!confirm('Move every key in ' + from + ' to ' + to + '?\\n\\nMinted children on the moved keys stop working now, and tokens pinned to ' + from + ' are repinned to ' + to + '. A repo whose .tumbler names ' + from + ' needs its project line changed.')) return;
   busy(f.querySelector('button'), async () => { const r = await api('scopes/move', { method: 'POST', body: JSON.stringify({ from, to }) }).catch(fail('Could not move ' + from,
     () => (KEYS.some(x => x.scope === from) ? 'Keys are still in ' + from : 'Its keys are in ' + to) + '; move it again to finish the move'));
-    say('Moved ' + r.moved.length + ' key(s) from ' + from + ' to ' + to + '; repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); f.reset(); await refresh(); }, 'Moving…'); };
+    say('Moved ' + r.moved.length + ' key(s) from ' + from + ' to ' + to + '; repinned ' + (r.repinned.join(', ') || 'no tokens') + '.'); f.reset(); openScopes?.add(to); await refresh(); }, 'Moving…'); };
+
+// One section shows at a time, named by the URL's hash (#keys, #grants, #tokens, #audit), so a link or Back reopens it.
+const TABS = ['keys', 'grants', 'tokens', 'audit'];
+const tabOf = () => { const h = location.hash.slice(1).replace(/^s-/, ''); return TABS.includes(h) ? h : 'keys'; };
+const show = tab => { for (const sec of document.querySelectorAll('section[data-tab]')) sec.hidden = sec.dataset.tab !== tab;
+  for (const a of document.querySelectorAll('nav a[data-tab]')) if (a.dataset.tab === tab) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); };
+for (const a of document.querySelectorAll('nav a[data-tab]')) a.onclick = e => { e.preventDefault();
+  if (tabOf() !== a.dataset.tab) history.pushState(null, '', '#' + a.dataset.tab); show(a.dataset.tab); scrollTo(0, 0); };
+addEventListener('popstate', () => show(tabOf()));
+// The nav's shortcuts open a form from any tab; Add a key ends a Set value in progress.
+const goTo = (box, field) => e => { e.preventDefault(); const tab = box.closest('section').dataset.tab;
+  if (tabOf() !== tab) history.pushState(null, '', '#' + tab); show(tab); box.open = true; box.scrollIntoView({ block: 'start' }); field.focus({ preventScroll: true }); };
+$('goKey').onclick = e => { if (F(putKey, 'name').readOnly) resetKey(); goTo(addKey, F(putKey, 'name'))(e); };
 
 // --- grants and tokens ---
 async function revokeGrant(g) {
@@ -492,5 +556,6 @@ addEventListener('resize', () => document.querySelectorAll('textarea').forEach(f
 addEventListener('input', e => { if (e.target.matches('textarea')) fit(e.target); });
 addEventListener('toggle', e => { if (e.target.open) e.target.querySelectorAll('textarea').forEach(fit); }, true);
 
-syncKind(); presses(); refresh();
+$('goToken').onclick = goTo($('createBox'), F(newToken, 'name'));
+show(tabOf()); scrollTo(0, 0); syncKind(); presses(); refresh();
 </script></body></html>`;
