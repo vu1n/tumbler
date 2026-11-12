@@ -284,7 +284,8 @@ $('kFold').onclick = () => { const all = GROUPS.every(g => openScopes.has(g.scop
 const unfolded = new Set();
 const fold = (id, hide, label) => { if (!hide.length) return; const body = $(id), c = td(''), b = document.createElement('button'), tr = row([c], 'more');
   c.colSpan = body.closest('table').querySelectorAll('thead th').length;
-  const set = open => { for (const r of hide) r.hidden = !open; b.setAttribute('aria-expanded', String(open)); b.textContent = (open ? 'Hide ' : 'Show ') + label; };
+  // Folding a row closes its open editor too, so no form is left without its row.
+  const set = open => { for (const r of hide) { r.hidden = !open; if (!open && r.nextElementSibling?.classList.contains('editor')) r.nextElementSibling.remove(); } b.setAttribute('aria-expanded', String(open)); b.textContent = (open ? 'Hide ' : 'Show ') + label; };
   b.type = 'button'; b.className = 'quiet'; b.onclick = () => { const open = !unfolded.has(id); if (open) unfolded.add(id); else unfolded.delete(id); set(open); };
   set(unfolded.has(id)); c.append(b); body.append(tr); };
 
