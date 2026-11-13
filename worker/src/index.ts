@@ -12,7 +12,6 @@ import { webhookAlerts } from "./alerts.ts";
 // Bundled as text by the "rules" entry in wrangler.jsonc.
 import CLI from "../../cli/tumbler";
 import SETUP from "../../scripts/setup.sh";
-import SESSION_LOG_SYNC from "../../scripts/session_log_sync.py";
 
 export interface Env {
   DB: D1Database;
@@ -54,7 +53,6 @@ export default {
       grants,
       cli: CLI,
       setup: SETUP,
-      sessionLogSync: SESSION_LOG_SYNC,
       s1: s1Client(env.AI, env.TUMBLER_AUTO_MODEL || "clef"),
       admin: (r) => accessAdmin(r, { teamDomain: env.ACCESS_TEAM_DOMAIN, aud: env.ACCESS_AUD, admins }),
     });

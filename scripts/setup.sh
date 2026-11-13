@@ -35,22 +35,34 @@ grep -q tumbler "$HOME/.bashrc" 2>/dev/null || echo '. /etc/profile.d/tumbler.sh
 
 mkdir -p "$HOME/.claude"
 
-# After every turn, copy the session's transcript, redacted, to R2 (bucket claude-session-logs). The
-# hook refreshes its copy from the broker before each run: the environment keeps this setup's result
-# across sessions, so a copy made only here would freeze at that version.
-HOOK="$HOME/.claude/hooks/session_log_sync.py"
-mkdir -p "$(dirname "$HOOK")"
-curl -fsSL "$TUMBLER_URL/session-log-sync.py" -o "$HOOK" || echo "tumbler: could not download the session log hook" >&2
-TUMBLER_URL="$TUMBLER_URL" HOOK="$HOOK" python3 - <<'PY' || echo "tumbler: session log hook not wired into settings.json" >&2
-import json, os, pathlib
-p = pathlib.Path.home() / ".claude" / "settings.json"
+# Opt-in Stop hook: with SESSION_LOG_HOOK=owner/repo/path/to/script.py, run that script after every
+# turn as `python3 script.py hook`. The script stays wherever it lives (a private repo is fine): the hook
+# fetches it through `tumbler run` with SESSION_LOG_HOOK_KEY (default GH_TOKEN) before each run, since
+# this setup reads no secrets and the environment keeps its result across sessions. Unset, nothing here
+# touches settings.json.
+if [ -n "${SESSION_LOG_HOOK:-}" ]; then
+  SESSION_LOG_HOOK="$SESSION_LOG_HOOK" SESSION_LOG_HOOK_KEY="${SESSION_LOG_HOOK_KEY:-GH_TOKEN}" python3 - <<'PY' \
+    || echo "tumbler: session log hook not wired into settings.json" >&2
+import json, os, pathlib, re, shlex
+src, key = os.environ["SESSION_LOG_HOOK"], os.environ["SESSION_LOG_HOOK_KEY"]
+m = re.fullmatch(r"([\w.-]+)/([\w.-]+)/([\w./-]+\.py)", src)
+if not m or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key):
+    raise SystemExit(f"tumbler: SESSION_LOG_HOOK must be owner/repo/path.py and SESSION_LOG_HOOK_KEY a key name; got {src!r}, {key!r}")
+api = f"https://api.github.com/repos/{m[1]}/{m[2]}/contents/{m[3]}"
+home = pathlib.Path.home()
+hook = home / ".claude" / "hooks" / "session_log_sync.py"
+hook.parent.mkdir(parents=True, exist_ok=True)
+# The token reaches curl through its stdin config, never argv.
+fetch = (f'printf \'header = "authorization: Bearer %s"\\n\' "${key}" | curl -fsS --max-time 10 -K - '
+         f'-H "accept: application/vnd.github.raw" {shlex.quote(api)}')
+# Quoted, so a home with a space stays one word. tumbler reads /dev/null, leaving the hook's JSON on stdin
+# for the script; an empty or failed fetch keeps the copy from the last turn.
+cmd = (f'h={shlex.quote(str(hook))}; t=$(mktemp "$h.XXXXXX") && tumbler run -k {key} -- sh -c {shlex.quote(fetch)} '
+       f'</dev/null >"$t" 2>/dev/null && [ -s "$t" ] && mv "$t" "$h"; rm -f "$t"; [ -f "$h" ] && python3 "$h" hook')
+p = home / ".claude" / "settings.json"
 s = json.loads(p.read_text()) if p.exists() else {}
-h, url = os.environ["HOOK"], os.environ["TUMBLER_URL"]
-cmd = (f'h={h}; t=$(mktemp "$h.XXXXXX") && curl -fsS --max-time 10 {url}/session-log-sync.py -o "$t" '
-       f'&& mv "$t" "$h"; rm -f "$t"; python3 "$h" hook')
 stop = s.setdefault("hooks", {}).setdefault("Stop", [])
-# Once only: a setup that runs again replaces its own entry, never adds a second.
-# Only our own command goes; other commands in the same entry stay, and an entry left empty is dropped.
+# Once only: a rerun replaces its own command. Other commands in the same entry stay; an entry left empty goes.
 for e in stop:
     if isinstance(e.get("hooks"), list):
         e["hooks"] = [c for c in e["hooks"] if "session_log_sync.py" not in str(c.get("command", ""))]
@@ -58,6 +70,7 @@ stop[:] = [e for e in stop if e.get("hooks") != []]
 stop.append({"hooks": [{"type": "command", "command": cmd}]})
 p.write_text(json.dumps(s, indent=2) + "\n")
 PY
+fi
 
 grep -q "(tumbler)" "$HOME/.claude/CLAUDE.md" 2>/dev/null || cat >> "$HOME/.claude/CLAUDE.md" <<'MD'
 

@@ -24,6 +24,6 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
-      - name: session log hook tests
+      - name: setup.sh hook tests
         working-directory: .
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
