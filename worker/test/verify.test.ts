@@ -274,6 +274,41 @@ test("cloudflare: an operator can't add token, member or billing groups, nor wri
   assert.deepEqual(posted[0].policies[0].permission_groups, [{ id: READ }, { id: id("Containers Write") }]);
 });
 
+test("cloudflare: an R2 bucket group is added as GROUP@BUCKET and mints a policy on that one bucket", async () => {
+  const BUCKET_GROUPS = [{ id: "b".repeat(32), name: "Workers R2 Storage Bucket Item Write", scopes: ["com.cloudflare.edge.r2.bucket"] },
+    { id: "c".repeat(32), name: "Workers R2 Storage Bucket Item Read", scopes: ["com.cloudflare.edge.r2.bucket"] }];
+  const posted: any[] = [];
+  const fetcher = (async (url: string, init: RequestInit = {}) => {
+    if (url.endsWith("/tokens/permission_groups")) return new Response(JSON.stringify({ success: true, result: [...GROUPS, ...BUCKET_GROUPS] }));
+    posted.push(JSON.parse(String(init.body)));
+    return new Response(JSON.stringify({ success: true, result: { id: "c1", value: "child" } }));
+  }) as unknown as typeof fetch;
+  const cf = cloudflare(fetcher), cfg = { account_id: ACCT, scopes: { "workers:read": [READ] } };
+  assert.deepEqual(await cf.groups!("good-parent", cfg, ["workers r2 storage bucket item write@claude-session-logs"]),
+    ["Workers R2 Storage Bucket Item Write@claude-session-logs"]);
+  await assert.rejects(cf.groups!("good-parent", cfg, ["Workers R2 Storage Bucket Item Write"]), /reaches one R2 bucket at a time; add it as "GROUP@BUCKET"/);
+  await assert.rejects(cf.groups!("good-parent", cfg, ["Nope Write@claude-session-logs"]), /no R2 bucket permission named "Nope Write"/);
+  await assert.rejects(cf.groups!("good-parent", cfg, ["Account API Tokens Write@b1x"]), (e: any) => e.status === 403);
+  assert.throws(() => cf.validate({ ...cfg, extra: { "workers:read": ["Workers R2 Storage Bucket Item Write@logs"] } }), /isn't a read/);
+  cf.validate({ ...cfg, extra: { "workers:read": ["Workers R2 Storage Bucket Item Read@logs"] } });
+  // Only the group part is judged against the undelegable groups, never the bucket's name.
+  assert.deepEqual(await cf.groups!("good-parent", cfg, ["Workers R2 Storage Bucket Item Read@billing-memberships"]),
+    ["Workers R2 Storage Bucket Item Read@billing-memberships"]);
+  cf.validate({ ...cfg, extra: { "r2:b": ["Workers R2 Storage Bucket Item Write@billing-logs"] } });
+  const extra = { "r2:logs": ["Workers R2 Storage Bucket Item Write@logs", "Workers R2 Storage Bucket Item Read@logs", "Workers R2 Storage Bucket Item Write@other"] };
+  await cf.mint("good-parent", { ...cfg, extra }, ["workers:read", "r2:logs"], new Date("2026-10-23T12:00:00Z"), "t");
+  assert.deepEqual(posted[0].policies, [
+    { effect: "allow", resources: { [`com.cloudflare.api.account.${ACCT}`]: "*" }, permission_groups: [{ id: READ }] },
+    { effect: "allow", resources: { [`com.cloudflare.edge.r2.bucket.${ACCT}_default_logs`]: "*" }, permission_groups: [{ id: "b".repeat(32) }, { id: "c".repeat(32) }] },
+    { effect: "allow", resources: { [`com.cloudflare.edge.r2.bucket.${ACCT}_default_other`]: "*" }, permission_groups: [{ id: "b".repeat(32) }] },
+  ]);
+  // A scope holding only bucket groups mints no account policy at all.
+  await cf.mint("good-parent", { ...cfg, extra }, ["r2:logs"], new Date("2026-10-23T12:00:00Z"), "t");
+  assert.deepEqual(posted[1].policies.map((p: any) => Object.keys(p.resources)[0]), [`com.cloudflare.edge.r2.bucket.${ACCT}_default_logs`, `com.cloudflare.edge.r2.bucket.${ACCT}_default_other`]);
+  const listedGroups = await cf.listGroups!("good-parent", cfg);
+  assert.equal(listedGroups.find((g) => g.name === "Workers R2 Storage Bucket Item Write")!.delegable, true);
+});
+
 test("cloudflare: an unknown permission name is refused with the listed names it is near, and every group can be listed", async () => {
   const fetcher = (async () => new Response(JSON.stringify({ success: true, result: GROUPS }))) as unknown as typeof fetch;
   const cf = cloudflare(fetcher), cfg = { account_id: ACCT, scopes: { "workers:read": [READ] } };

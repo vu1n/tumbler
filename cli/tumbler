@@ -811,7 +811,7 @@ async function scope(args) {
     const hits = r.groups.filter((g) => words.every((w) => g.name.toLowerCase().includes(w)));
     if (json) return void process.stdout.write(JSON.stringify({ ...r, groups: hits }) + "\n");
     const short = (s) => s.replace(/^com\.cloudflare\.(api\.)?/, "");
-    process.stdout.write(hits.map((g) => `${g.name}\t${g.scopes.map(short).join(", ")}${g.delegable ? "" : "\t(not addable with scope add)"}`).join("\n") + (hits.length ? "\n" : ""));
+    process.stdout.write(hits.map((g) => `${g.name}\t${g.scopes.map(short).join(", ")}${!g.delegable ? "\t(not addable with scope add)" : g.scopes.includes("com.cloudflare.edge.r2.bucket") ? "\t(add as GROUP@BUCKET)" : ""}`).join("\n") + (hits.length ? "\n" : ""));
     if (!hits.length) say(`no group${words.length ? ` with ${words.join(" ")}` : ""} on ${r.name} (${r.scope})`);
     return;
   }

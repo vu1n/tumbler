@@ -4,6 +4,8 @@
 //   { "account_id": "…", "ttl_minutes": 30, "start": ["workers:read"],
 //     "scopes": { "workers:read": ["<permission group id>"], "workers:write": ["<id>", "<id>"] },
 //     "ip": ["203.0.113.0/24"] }   // optional: children only work from these CIDRs
+// An operator's addition named "GROUP@BUCKET" (an R2 bucket-scoped group) mints as its own policy on
+// that one bucket.
 // Permission group ids come from GET /accounts/{id}/tokens/permission_groups; names are cosmetic.
 // Pasting only the parent is enough: prepare() takes account_id from the CLOUDFLARE_ACCOUNT_ID key,
 // marks the key `"defaults": true`, and turns any group named by name into its id using the parent.
@@ -52,7 +54,10 @@ const LEGACY_DEFAULTS: Record<string, string[]> = {
 // Groups an operator may never add (`tumbler scope add`): a child holding one could make tokens,
 // members or billing changes, which would let an agent widen its own reach past this broker.
 const UNDELEGABLE = /api tokens|memberships?|account settings|billing/i;
-const ACCOUNT_SCOPE = "com.cloudflare.api.account";
+const ACCOUNT_SCOPE = "com.cloudflare.api.account", BUCKET_SCOPE = "com.cloudflare.edge.r2.bucket";
+// A bucket-scoped group is named "GROUP@BUCKET" and reaches that one R2 bucket, never the account's others.
+const AT_BUCKET = /^(.+)@([a-z0-9][a-z0-9-]{1,61}[a-z0-9])$/;
+const atBucket = (g: string) => { const m = AT_BUCKET.exec(g); return m ? { name: m[1], bucket: m[2] } : null; };
 
 // Up to three listed names that share a product word with `name`, so a refusal names the real group.
 // Why: Cloudflare's docs list names an account may not (#36 took "Containers Read" from them).
@@ -88,10 +93,22 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
     }) as { id: string; name: string; scopes?: string[] }[];
     return (Array.isArray(list) ? list : []).map((g) => ({ id: String(g.id), name: String(g.name), scopes: Array.isArray(g.scopes) ? g.scopes.map(String) : undefined }));
   };
-  // The account-scoped groups' ids by lowercase name, and their names as Cloudflare spells them.
+  // The account-scoped groups' ids by lowercase name, and their names as Cloudflare spells them;
+  // `bucket` holds the R2 bucket-scoped groups the same way.
   const groupIds = async (parent: string, account: unknown) => {
-    const groups = (await listed(parent, account)).filter((g) => !g.scopes || g.scopes.includes(ACCOUNT_SCOPE));
-    return Object.assign(new Map(groups.map((g) => [g.name.toLowerCase(), g.id])), { spelled: groups.map((g) => g.name) });
+    const all = await listed(parent, account);
+    const index = (groups: typeof all) => Object.assign(new Map(groups.map((g) => [g.name.toLowerCase(), g.id])), { spelled: groups.map((g) => g.name) });
+    return Object.assign(index(all.filter((g) => !g.scopes || g.scopes.includes(ACCOUNT_SCOPE))),
+      { bucket: index(all.filter((g) => g.scopes?.includes(BUCKET_SCOPE))) });
+  };
+  // Bucket groups named without a bucket, or account groups named with one, are refused with the right spelling.
+  const checkNames = (byName: Awaited<ReturnType<typeof groupIds>>, names: string[]) => {
+    const plain = names.filter((n) => !atBucket(n)), scoped = names.map(atBucket).filter((b) => b !== null);
+    const bare = plain.filter((n) => byName.bucket.has(n.toLowerCase()) && !byName.has(n.toLowerCase()));
+    if (bare.length) throw new Refused(400, `${bare.map((n) => JSON.stringify(n)).join(", ")} reaches one R2 bucket at a time; add it as "GROUP@BUCKET"`);
+    unknownNames(byName, plain);
+    const unknown = scoped.filter((b) => !byName.bucket.has(b.name.toLowerCase())).map((b) => JSON.stringify(b.name));
+    if (unknown.length) throw new Refused(400, `Cloudflare has no R2 bucket permission named ${unknown.join(", ")}; \`tumbler scope groups KEY bucket\` lists them`);
   };
   const unknownNames = (byName: Map<string, string> & { spelled: string[] }, names: string[]) => {
     const unknown = names.filter((n) => !byName.has(n.toLowerCase()));
@@ -137,10 +154,10 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
         }
       }
       for (const [s, names] of Object.entries((config.extra ?? {}) as Record<string, string[]>)) {
-        const bad = names.filter((n) => UNDELEGABLE.test(n) || GROUP.test(n));
+        const bad = names.filter((n) => UNDELEGABLE.test(atBucket(n)?.name ?? n) || GROUP.test(atBucket(n)?.name ?? n));
         if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (use permission names; token, member, account settings and billing groups stay with /admin)`);
         // Why: a `:read` scope is granted to every token on request (machine.ts autoApproved), so it carries reads only.
-        const writes = s.endsWith(":read") ? names.filter((n) => !/ read$/i.test(n)) : [];
+        const writes = s.endsWith(":read") ? names.filter((n) => !/ read$/i.test(atBucket(n)?.name ?? n)) : [];
         if (writes.length) throw new Refused(400, `config.extra.${s}: ${writes.join(", ")} isn't a read, and every token gets ${s}; add it to a write scope instead`);
       }
       if (config.ip !== undefined && !(Array.isArray(config.ip) && config.ip.every((c) => typeof c === "string"))) {
@@ -174,19 +191,22 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       }
       // Names (the defaults, an operator's additions) are looked up now; ids are used as stored.
       const names = groups.filter((g) => !GROUP.test(g));
+      const buckets = new Map<string, string[]>();
       if (names.length) {
         const m = await lookup();
-        unknownNames(m, names);
-        groups = [...new Set(groups.map((g) => GROUP.test(g) ? g : m.get(g.toLowerCase())!))];
+        checkNames(m, names);
+        for (const b of names.map(atBucket)) if (b) buckets.set(b.bucket, [...new Set([...(buckets.get(b.bucket) ?? []), m.bucket.get(b.name.toLowerCase())!])]);
+        groups = [...new Set(groups.filter((g) => !atBucket(g)).map((g) => GROUP.test(g) ? g : m.get(g.toLowerCase())!))];
       }
-      if (!groups.length) throw new Refused(400, "no permission groups for these scopes");
+      if (!groups.length && !buckets.size) throw new Refused(400, "no permission groups for these scopes");
+      // One policy for the account's groups, and one per bucket that reaches only that bucket.
+      const policies = [
+        ...(groups.length ? [{ effect: "allow", resources: { [`${ACCOUNT_SCOPE}.${config.account_id}`]: "*" }, permission_groups: groups.map((id) => ({ id })) }] : []),
+        ...[...buckets].map(([bucket, ids]) => ({ effect: "allow", resources: { [`${BUCKET_SCOPE}.${config.account_id}_default_${bucket}`]: "*" }, permission_groups: ids.map((id) => ({ id })) })),
+      ];
       const result = await call("POST", `/accounts/${config.account_id}/tokens`, parent, {
         name: label.slice(0, 120),
-        policies: [{
-          effect: "allow",
-          resources: { [`com.cloudflare.api.account.${config.account_id}`]: "*" },
-          permission_groups: groups.map((id) => ({ id })),
-        }],
+        policies,
         expires_on: expiresAt.toISOString().replace(/\.\d{3}Z$/, "Z"),
         ...(Array.isArray(config.ip) && config.ip.length ? { condition: { "request.ip": { in: config.ip } } } : {}),
       });
@@ -194,17 +214,19 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       return { id: String(result.id), value: String(result.value) };
     },
     async groups(parent, config, names) {
-      const bad = names.filter((n) => UNDELEGABLE.test(n));
+      // Only the group part is judged: a bucket may be named "billing-logs".
+      const bad = names.filter((n) => UNDELEGABLE.test(atBucket(n)?.name ?? n));
       if (bad.length) throw new Refused(403, `${bad.join(", ")} can't be added from the CLI: a child with it could make tokens, members or billing changes. An admin adds it to the key's config in /admin`);
-      const m = await groupIds(parent, config.account_id), spelled = new Map(m.spelled.map((n) => [n.toLowerCase(), n]));
-      unknownNames(m, names);
-      return names.map((n) => spelled.get(n.toLowerCase())!);
+      const m = await groupIds(parent, config.account_id);
+      const spelled = new Map(m.spelled.map((n) => [n.toLowerCase(), n])), bucket = new Map(m.bucket.spelled.map((n) => [n.toLowerCase(), n]));
+      checkNames(m, names);
+      return names.map((n) => { const b = atBucket(n); return b ? `${bucket.get(b.name.toLowerCase())}@${b.bucket}` : spelled.get(n.toLowerCase())!; });
     },
     // All of them, zone and other scopes included: a group the mint can't use still explains a
     // name that "doesn't exist" (it may be listed under another scope).
     async listGroups(parent, config): Promise<GroupInfo[]> {
       return (await listed(parent, config.account_id)).map((g) => ({ name: g.name, scopes: g.scopes ?? [],
-        delegable: !UNDELEGABLE.test(g.name) && (!g.scopes || g.scopes.includes(ACCOUNT_SCOPE)) }))
+        delegable: !UNDELEGABLE.test(g.name) && (!g.scopes || g.scopes.includes(ACCOUNT_SCOPE) || g.scopes.includes(BUCKET_SCOPE)) }))
         .sort((a, b) => a.name.localeCompare(b.name));
     },
     // Before a parent is saved: Cloudflare must accept it as an active token on this account.
