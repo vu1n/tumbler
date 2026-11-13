@@ -79,18 +79,28 @@ def remember(secrets):
     """Adds secrets to SEEN and returns everything it holds, longest first. Each upload redacts the whole
     transcript again, so a key that has since rotated (a re-minted child token, a replaced static key)
     must stay redacted after it leaves the env."""
-    try:
-        seen = {tuple(p) for p in json.loads(SEEN.read_text())}
-    except FileNotFoundError:
-        seen = set()
-    merged = seen | set(secrets)
-    if merged != seen:
-        SEEN.parent.mkdir(parents=True, exist_ok=True)
-        tmp = SEEN.with_suffix(".tmp")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(sorted(merged), f)
-        os.replace(tmp, SEEN)
+    SEEN.parent.mkdir(parents=True, exist_ok=True)
+    with SEEN.with_suffix(".lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)  # read, merge and replace as one step, or a concurrent writer's secret is lost
+        try:
+            stored = json.loads(SEEN.read_text())
+        except FileNotFoundError:
+            stored = []
+        # Fails closed: a history that isn't a list of [name, value] strings stops the upload, never resets coverage.
+        if not (isinstance(stored, list) and all(isinstance(e, list) and len(e) == 2 and all(isinstance(x, str) for x in e)
+                                                 for e in stored)):
+            raise ValueError(f"{SEEN} is not a list of [name, value] pairs; fix or remove it by hand")
+        seen = {tuple(e) for e in stored}
+        merged = seen | set(secrets)
+        if merged != seen:
+            fd, tmp = tempfile.mkstemp(dir=SEEN.parent, prefix=SEEN.name + ".")  # unique and 0600
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(sorted(merged), f)
+                os.replace(tmp, SEEN)
+            except BaseException:
+                os.unlink(tmp)
+                raise
     return sorted(merged, key=lambda p: (-len(p[1]), p))
 
 

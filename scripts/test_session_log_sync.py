@@ -169,12 +169,25 @@ class RotationTest(unittest.TestCase):
             self.assertEqual(bodies[-2].count("[REDACTED:CLOUDFLARE_API_TOKEN]"), 2)  # the second transcript
             self.assertEqual((home / "seen.json").stat().st_mode & 0o777, 0o600)
 
-    def test_a_corrupt_seen_file_stops_the_upload(self):
+    def test_a_corrupt_seen_file_stops_the_upload_and_is_left_alone(self):
+        for bad in ["{half", "{}", "null", '[["A_TOKEN"]]', '[["A_TOKEN", 5]]', '["x"]']:
+            with tempfile.TemporaryDirectory() as d:
+                seen = Path(d) / "seen.json"
+                seen.write_text(bad)
+                with mock.patch.object(sls, "SEEN", seen), self.assertRaises(ValueError, msg=bad):
+                    sls.remember([("A_TOKEN", FAKE)])
+                self.assertEqual(seen.read_text(), bad)
+
+    def test_concurrent_writers_lose_nothing(self):
         with tempfile.TemporaryDirectory() as d:
             seen = Path(d) / "seen.json"
-            seen.write_text("{half")
-            with mock.patch.object(sls, "SEEN", seen), self.assertRaises(ValueError):
-                sls.remember([("A_TOKEN", FAKE)])
+            code = ("import sys, pathlib; sys.path.insert(0, sys.argv[1]); import session_log_sync as s; "
+                    "s.SEEN = pathlib.Path(sys.argv[2]); [s.remember([(f'T{sys.argv[3]}_{i}', 'v' * 20 + sys.argv[3] + str(i))]) for i in range(20)]")
+            procs = [subprocess.Popen([sys.executable, "-c", code, str(Path(sls.__file__).parent), str(seen), str(n)])
+                     for n in range(6)]
+            self.assertEqual([p.wait() for p in procs], [0] * 6)
+            self.assertEqual(len(json.loads(seen.read_text())), 120)
+            self.assertEqual([f.name for f in Path(d).iterdir() if f.name != "seen.lock"], ["seen.json"])
 
 
 class SetupMergeTest(unittest.TestCase):
