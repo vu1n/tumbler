@@ -58,6 +58,10 @@ The admin API checks the Access JWT itself, so a gap in the Access policy (or a 
    The broker serves [scripts/setup.sh](scripts/setup.sh) with its own URL filled in. It installs the
    CLI, installs `wrangler` if it's missing, shims `wrangler` (and `aws` and `tailscale` when installed), sets `TUMBLER_URL` for sessions, and tells agents
    to use `tumbler run`. If anything fails, it skips and the session still starts.
+   To run a script of your own after every turn, pass `SESSION_LOG_HOOK=owner/repo/path/to/script.py`
+   (`curl -fsSL …/setup | SESSION_LOG_HOOK=… bash`). Setup wires a Stop hook in `~/.claude/settings.json`
+   that refetches the script through `tumbler run -k GH_TOKEN` (or `SESSION_LOG_HOOK_KEY`) before
+   each run, so it can live in a private repo, then runs `python3 script.py hook`.
 4. Remove the old secrets from the environment's variables.
 
 A different project gets its own environment with its own pinned token.

@@ -3,3 +3,4 @@ node_modules/
 .dev.vars
 wrangler.deploy.jsonc
 .impeccable/critique/
+__pycache__/
