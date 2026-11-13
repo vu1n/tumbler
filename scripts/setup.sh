@@ -34,6 +34,27 @@ SH
 grep -q tumbler "$HOME/.bashrc" 2>/dev/null || echo '. /etc/profile.d/tumbler.sh' >> "$HOME/.bashrc"
 
 mkdir -p "$HOME/.claude"
+
+# After every turn, copy the session's transcript, redacted, to R2 (bucket claude-session-logs). The
+# hook refreshes its copy from the broker before each run: the environment keeps this setup's result
+# across sessions, so a copy made only here would freeze at that version.
+HOOK="$HOME/.claude/hooks/session_log_sync.py"
+mkdir -p "$(dirname "$HOOK")"
+curl -fsSL "$TUMBLER_URL/session-log-sync.py" -o "$HOOK" || echo "tumbler: could not download the session log hook" >&2
+TUMBLER_URL="$TUMBLER_URL" HOOK="$HOOK" python3 - <<'PY' || echo "tumbler: session log hook not wired into settings.json" >&2
+import json, os, pathlib
+p = pathlib.Path.home() / ".claude" / "settings.json"
+s = json.loads(p.read_text()) if p.exists() else {}
+h, url = os.environ["HOOK"], os.environ["TUMBLER_URL"]
+cmd = (f'h={h}; t=$(mktemp "$h.XXXXXX") && curl -fsS --max-time 10 {url}/session-log-sync.py -o "$t" '
+       f'&& mv "$t" "$h"; rm -f "$t"; python3 "$h" hook')
+stop = s.setdefault("hooks", {}).setdefault("Stop", [])
+# Once only: a setup that runs again replaces its own entry, never adds a second.
+stop[:] = [e for e in stop if "session_log_sync.py" not in json.dumps(e)]
+stop.append({"hooks": [{"type": "command", "command": cmd}]})
+p.write_text(json.dumps(s, indent=2) + "\n")
+PY
+
 grep -q "(tumbler)" "$HOME/.claude/CLAUDE.md" 2>/dev/null || cat >> "$HOME/.claude/CLAUDE.md" <<'MD'
 
 ## Keys and env vars (tumbler)

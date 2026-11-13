@@ -128,6 +128,14 @@ test("the setup script is served with this broker's URL as its default", async (
   assert.equal(lines[1], 'TUMBLER_URL="${TUMBLER_URL:-https://t.example}"');
 });
 
+test("the session log hook is served without a token", async () => {
+  const { catalog } = await setup();
+  const hook = readFileSync(new URL("../../scripts/session_log_sync.py", import.meta.url), "utf8");
+  const r = await handle(new Request("https://t.example/session-log-sync.py"), { catalog, admin: async () => null, sessionLogSync: hook });
+  assert.equal(r.status, 200);
+  assert.equal(await r.text(), hook);
+});
+
 test("the CLI is served without a token, and nothing else is", async () => {
   const { catalog } = await setup();
   const deps = { catalog, admin: async () => null, cli: "#!/usr/bin/env node\n" };

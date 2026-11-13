@@ -8,7 +8,7 @@ import { sha256hex } from "./crypto.ts";
 import { checkKey, type Verifiers } from "./verify.ts";
 
 export interface Deps {
-  catalog: Catalog; admin: (request: Request) => Promise<string | null>; cli?: string; setup?: string; s1?: S1Client | null; grants?: Grants;
+  catalog: Catalog; admin: (request: Request) => Promise<string | null>; cli?: string; setup?: string; sessionLogSync?: string; s1?: S1Client | null; grants?: Grants;
   fetcher?: typeof fetch; // what static key checks call; global fetch unless a test swaps it
 }
 
@@ -44,6 +44,9 @@ async function route(request: Request, deps: Deps): Promise<Response> {
     // The CLI itself is public (it holds no secrets), so a setup script can fetch it before the
     // agent proxy is up: curl -fsSL "$TUMBLER_URL/cli" -o /usr/local/bin/tumbler
     if (path === "/cli" && deps.cli) return new Response(deps.cli, { headers: { "content-type": "text/plain; charset=utf-8" } });
+    // The session-log Stop hook (scripts/session_log_sync.py), public like the CLI: the hook fetches
+    // it before each run, so every environment runs the deployed, reviewed copy.
+    if (path === "/session-log-sync.py" && deps.sessionLogSync) return new Response(deps.sessionLogSync, { headers: { "content-type": "text/plain; charset=utf-8" } });
     // The setup script, with this broker's own URL as the default, so an environment's whole setup
     // script is one line: curl -fsSL https://<broker>/setup | bash
     if (path === "/setup" && deps.setup) return new Response(deps.setup.replace(/^#!\/bin\/bash\n/, `#!/bin/bash\nTUMBLER_URL="\${TUMBLER_URL:-${url.origin}}"\n`),
