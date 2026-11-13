@@ -291,6 +291,10 @@ test("cloudflare: an R2 bucket group is added as GROUP@BUCKET and mints a policy
   await assert.rejects(cf.groups!("good-parent", cfg, ["Account API Tokens Write@b1x"]), (e: any) => e.status === 403);
   assert.throws(() => cf.validate({ ...cfg, extra: { "workers:read": ["Workers R2 Storage Bucket Item Write@logs"] } }), /isn't a read/);
   cf.validate({ ...cfg, extra: { "workers:read": ["Workers R2 Storage Bucket Item Read@logs"] } });
+  // Only the group part is judged against the undelegable groups, never the bucket's name.
+  assert.deepEqual(await cf.groups!("good-parent", cfg, ["Workers R2 Storage Bucket Item Read@billing-memberships"]),
+    ["Workers R2 Storage Bucket Item Read@billing-memberships"]);
+  cf.validate({ ...cfg, extra: { "r2:b": ["Workers R2 Storage Bucket Item Write@billing-logs"] } });
   const extra = { "r2:logs": ["Workers R2 Storage Bucket Item Write@logs", "Workers R2 Storage Bucket Item Read@logs", "Workers R2 Storage Bucket Item Write@other"] };
   await cf.mint("good-parent", { ...cfg, extra }, ["workers:read", "r2:logs"], new Date("2026-10-23T12:00:00Z"), "t");
   assert.deepEqual(posted[0].policies, [

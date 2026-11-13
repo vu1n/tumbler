@@ -154,7 +154,7 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
         }
       }
       for (const [s, names] of Object.entries((config.extra ?? {}) as Record<string, string[]>)) {
-        const bad = names.filter((n) => UNDELEGABLE.test(n) || GROUP.test(n) || GROUP.test(atBucket(n)?.name ?? ""));
+        const bad = names.filter((n) => UNDELEGABLE.test(atBucket(n)?.name ?? n) || GROUP.test(atBucket(n)?.name ?? n));
         if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (use permission names; token, member, account settings and billing groups stay with /admin)`);
         // Why: a `:read` scope is granted to every token on request (machine.ts autoApproved), so it carries reads only.
         const writes = s.endsWith(":read") ? names.filter((n) => !/ read$/i.test(atBucket(n)?.name ?? n)) : [];
@@ -214,7 +214,8 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       return { id: String(result.id), value: String(result.value) };
     },
     async groups(parent, config, names) {
-      const bad = names.filter((n) => UNDELEGABLE.test(n));
+      // Only the group part is judged: a bucket may be named "billing-logs".
+      const bad = names.filter((n) => UNDELEGABLE.test(atBucket(n)?.name ?? n));
       if (bad.length) throw new Refused(403, `${bad.join(", ")} can't be added from the CLI: a child with it could make tokens, members or billing changes. An admin adds it to the key's config in /admin`);
       const m = await groupIds(parent, config.account_id);
       const spelled = new Map(m.spelled.map((n) => [n.toLowerCase(), n])), bucket = new Map(m.bucket.spelled.map((n) => [n.toLowerCase(), n]));
