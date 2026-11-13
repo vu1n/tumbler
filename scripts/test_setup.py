@@ -47,16 +47,18 @@ class SetupHookTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
             (home / ".claude").mkdir()
-            other = {"type": "command", "command": "echo other"}
-            (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"Stop": [
-                {"matcher": "x", "hooks": [other, {"type": "command", "command": "python3 old/session_log_sync.py hook"}]},
-                {"hooks": [{"type": "command", "command": "python3 session_log_sync.py hook"}]}]}}))
-            for _ in range(2):
-                self.assertEqual(self.merge(home, SESSION_LOG_HOOK=SOURCE).returncode, 0)
+            # Commands that merely mention the file are someone else's and stay.
+            others = [{"type": "command", "command": "echo other"},
+                      {"type": "command", "command": "python3 ~/.claude/hooks/session_log_sync.py hook"}]
+            (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"Stop": [{"matcher": "x", "hooks": others}]}}))
+            self.assertEqual(self.merge(home, SESSION_LOG_HOOK=SOURCE).returncode, 0)
+            ours = self.command(home)
             stop = self.settings(home)["hooks"]["Stop"]
-            self.assertEqual(stop[0], {"matcher": "x", "hooks": [other]})
-            self.assertEqual(len(stop), 2)
-            self.assertIn("session_log_sync.py", stop[1]["hooks"][0]["command"])
+            stop[0]["hooks"].append({"type": "command", "command": ours})  # ours, sharing an entry
+            (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"Stop": stop}}))
+            self.assertEqual(self.merge(home, SESSION_LOG_HOOK=SOURCE).returncode, 0)
+            stop = self.settings(home)["hooks"]["Stop"]
+            self.assertEqual(stop, [{"matcher": "x", "hooks": others}, {"hooks": [{"type": "command", "command": ours}]}])
 
     def test_a_bad_source_or_key_is_refused(self):
         for env in [{"SESSION_LOG_HOOK": "owner/repo"}, {"SESSION_LOG_HOOK": "o/r/x.py; rm -rf ~"},

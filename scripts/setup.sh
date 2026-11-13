@@ -62,10 +62,12 @@ cmd = (f'h={shlex.quote(str(hook))}; t=$(mktemp "$h.XXXXXX") && tumbler run -k {
 p = home / ".claude" / "settings.json"
 s = json.loads(p.read_text()) if p.exists() else {}
 stop = s.setdefault("hooks", {}).setdefault("Stop", [])
-# Once only: a rerun replaces its own command. Other commands in the same entry stay; an entry left empty goes.
+# Once only: a rerun replaces its own command, known by its exact opening; every other command stays,
+# and an entry left empty goes.
+ours = cmd[:cmd.index("; ") + 2]
 for e in stop:
     if isinstance(e.get("hooks"), list):
-        e["hooks"] = [c for c in e["hooks"] if "session_log_sync.py" not in str(c.get("command", ""))]
+        e["hooks"] = [c for c in e["hooks"] if not str(c.get("command", "")).startswith(ours)]
 stop[:] = [e for e in stop if e.get("hooks") != []]
 stop.append({"hooks": [{"type": "command", "command": cmd}]})
 p.write_text(json.dumps(s, indent=2) + "\n")
