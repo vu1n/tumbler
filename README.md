@@ -382,6 +382,15 @@ Take group names from `tumbler scope groups`, which asks Cloudflare with the key
 Cloudflare's docs: the docs have listed names (`Containers Read`) that an account doesn't. A name
 Cloudflare doesn't list is refused with the listed names nearest to it.
 
+An R2 bucket-scoped group (`Workers R2 Storage Bucket Item Read` or `Write`) is added as
+`GROUP@BUCKET` and mints as a policy on that one bucket, so a scope can reach a single bucket
+without account-wide R2 access:
+
+```sh
+tumbler scope add CLOUDFLARE_API_TOKEN r2:claude-session-logs \
+  "Workers R2 Storage Bucket Item Read@claude-session-logs" "Workers R2 Storage Bucket Item Write@claude-session-logs"
+```
+
 That needs an **operator** token, which you turn on once per token (`/admin`, or
 `tumbler admin token edit NAME --operator on`). An operator only adds or removes permission groups
 on the minted keys its token reads. Additions sit on top of the key's config, so your config stays
