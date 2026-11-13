@@ -36,6 +36,7 @@ TUMBLER_NAMES = "SESSION_LOG_SYNC_KEYS"  # env var listing the tumbler key names
 HOME = Path.home()
 LOG = HOME / ".claude" / "session-log-sync.log"
 STATE = HOME / ".claude" / "session-log-sync.state.json"
+SEEN = HOME / ".claude" / "session-log-sync.secrets.json"  # 0600, never uploaded: every secret value this container has had
 REPOS = Path(os.environ.get("REPOS_ROOT", "/home/user"))
 
 # Token shapes redacted wherever they appear, on top of every secret-looking env value.
@@ -72,6 +73,25 @@ def secret_values(env):
     pairs = {(k, v) for k, v in env.items()
              if k != TUMBLER_NAMES and v.strip().lower() not in NOT_SECRET and (k in tumbler or SECRET_NAME.search(k))}
     return sorted(pairs, key=lambda p: -len(p[1]))
+
+
+def remember(secrets):
+    """Adds secrets to SEEN and returns everything it holds, longest first. Each upload redacts the whole
+    transcript again, so a key that has since rotated (a re-minted child token, a replaced static key)
+    must stay redacted after it leaves the env."""
+    try:
+        seen = {tuple(p) for p in json.loads(SEEN.read_text())}
+    except FileNotFoundError:
+        seen = set()
+    merged = seen | set(secrets)
+    if merged != seen:
+        SEEN.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SEEN.with_suffix(".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(sorted(merged), f)
+        os.replace(tmp, SEEN)
+    return sorted(merged, key=lambda p: (-len(p[1]), p))
 
 
 def redact(text, secrets):
@@ -243,7 +263,7 @@ def upload(transcript):
         state = read_state()
         if state.get(session_id) == stamp:
             return
-        secrets = secret_values(os.environ)
+        secrets = remember(secret_values(os.environ))
         account, key_id, secret = s3_credentials(os.environ)
         text, redactions = redact_jsonl(transcript.read_text(errors="replace"), secrets)
         y, m, d = first_date(text)
@@ -284,9 +304,16 @@ def bg(transcript):
     # Its own cwd, so tumbler's first-run .tumbler lands here and never in a repo.
     cwd = HOME / ".claude" / "session-log-sync"
     cwd.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, TUMBLER_NAMES: ",".join(names)}
+    # The upload runs with the bucket scope, which swaps in a different CLOUDFLARE_API_TOKEN: record the
+    # session's own default values first, so the token the session itself used is redacted too.
+    r = subprocess.run(["tumbler", "run", "-k", ",".join(names), "--", sys.executable, os.path.abspath(__file__), "remember"],
+                       cwd=cwd, stdin=subprocess.DEVNULL, env=env)
+    if r.returncode:
+        raise RuntimeError(f"tumbler run (remember) exited {r.returncode}")
     r = subprocess.run(["tumbler", "run", "-k", ",".join(names), "--scope", SCOPE, "--",
                         sys.executable, os.path.abspath(__file__), "upload", transcript],
-                       cwd=cwd, stdin=subprocess.DEVNULL, env={**os.environ, TUMBLER_NAMES: ",".join(names)})
+                       cwd=cwd, stdin=subprocess.DEVNULL, env=env)
     if r.returncode:
         raise RuntimeError(f"tumbler run exited {r.returncode} (scope {SCOPE})")
 
@@ -303,6 +330,12 @@ def main():
             bg(sys.argv[2])
         except Exception as e:
             log(f"bg {sys.argv[2]}: {type(e).__name__}: {e}")
+            sys.exit(1)
+    elif sys.argv[1:] == ["remember"]:
+        try:
+            remember(secret_values(os.environ))
+        except Exception as e:
+            log(f"remember: {type(e).__name__}: {e}")
             sys.exit(1)
     elif sys.argv[1:] == ["hook"]:
         try:

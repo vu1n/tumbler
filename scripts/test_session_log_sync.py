@@ -1,7 +1,11 @@
 """Tests for the transcript redaction the session log sync hook applies before upload."""
 
+import gzip
 import io
 import json
+import os
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -130,6 +134,73 @@ class HookTest(unittest.TestCase):
         args, kwargs = popen.call_args
         self.assertEqual(args[0][-2:], ["bg", "/t/s.jsonl"])
         self.assertTrue(kwargs["start_new_session"])
+
+
+class RotationTest(unittest.TestCase):
+    """Every upload redacts the whole transcript again, so a rotated key must stay redacted."""
+
+    def test_a_key_that_left_the_env_is_still_redacted_on_the_next_upload(self):
+        old, new = FAKE + "-old-child", FAKE + "-new-child"
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            transcript = home / "s.jsonl"
+            transcript.write_text(json.dumps({"timestamp": "2026-11-13T00:00:00Z", "out": f"token {old}"}) + "\n")
+            bodies = []
+
+            def fake_put(account, key_id, secret, key, body, content_type):
+                bodies.append(gzip.decompress(body).decode() if key.endswith(".gz") else body.decode())
+
+            def upload_with(token):
+                env = {"CLOUDFLARE_API_TOKEN": token, "CLOUDFLARE_ACCOUNT_ID": "acct", sls.TUMBLER_NAMES: "CLOUDFLARE_API_TOKEN"}
+                with mock.patch.dict(os.environ, env, clear=True), \
+                        mock.patch.object(sls, "s3_credentials", return_value=("acct", "id", "s")), \
+                        mock.patch.object(sls, "put", fake_put):
+                    sls.upload(transcript)
+
+            with mock.patch.object(sls, "STATE", home / "state.json"), mock.patch.object(sls, "SEEN", home / "seen.json"), \
+                    mock.patch.object(sls, "REPOS", home):
+                upload_with(old)
+                with transcript.open("a") as f:
+                    f.write(json.dumps({"out": f"rotated to {new}"}) + "\n")
+                upload_with(new)
+            for body in bodies:
+                self.assertNotIn(old, body)
+                self.assertNotIn(new, body)
+            self.assertEqual(bodies[-2].count("[REDACTED:CLOUDFLARE_API_TOKEN]"), 2)  # the second transcript
+            self.assertEqual((home / "seen.json").stat().st_mode & 0o777, 0o600)
+
+    def test_a_corrupt_seen_file_stops_the_upload(self):
+        with tempfile.TemporaryDirectory() as d:
+            seen = Path(d) / "seen.json"
+            seen.write_text("{half")
+            with mock.patch.object(sls, "SEEN", seen), self.assertRaises(ValueError):
+                sls.remember([("A_TOKEN", FAKE)])
+
+
+class SetupMergeTest(unittest.TestCase):
+    """The settings.json merge in setup.sh, run against a settings file that already has hooks."""
+
+    def run_merge(self, home):
+        script = (Path(__file__).parent / "setup.sh").read_text()
+        code = re.search(r"python3 - <<'PY'.*?\n(.*?)\nPY\n", script, re.S).group(1)
+        env = {**os.environ, "HOME": str(home), "HOOK": f"{home}/.claude/hooks/session_log_sync.py",
+               "TUMBLER_URL": "https://broker.invalid"}
+        subprocess.run([sys.executable, "-I", "-c", code], env=env, check=True)
+        return json.loads((home / ".claude" / "settings.json").read_text())
+
+    def test_rerun_keeps_other_hooks_and_adds_ours_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d)
+            (home / ".claude").mkdir()
+            other = {"type": "command", "command": "echo other"}
+            (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": {"Stop": [
+                {"matcher": "x", "hooks": [other, {"type": "command", "command": "python3 old/session_log_sync.py hook"}]},
+                {"hooks": [{"type": "command", "command": "python3 session_log_sync.py hook"}]}]}}))
+            self.run_merge(home)
+            stop = self.run_merge(home)["hooks"]["Stop"]
+            self.assertEqual(stop[0], {"matcher": "x", "hooks": [other]})
+            self.assertEqual(len(stop), 2)
+            self.assertIn("session_log_sync.py", stop[1]["hooks"][0]["command"])
 
 
 if __name__ == "__main__":

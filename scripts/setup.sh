@@ -50,7 +50,11 @@ cmd = (f'h={h}; t=$(mktemp "$h.XXXXXX") && curl -fsS --max-time 10 {url}/session
        f'&& mv "$t" "$h"; rm -f "$t"; python3 "$h" hook')
 stop = s.setdefault("hooks", {}).setdefault("Stop", [])
 # Once only: a setup that runs again replaces its own entry, never adds a second.
-stop[:] = [e for e in stop if "session_log_sync.py" not in json.dumps(e)]
+# Only our own command goes; other commands in the same entry stay, and an entry left empty is dropped.
+for e in stop:
+    if isinstance(e.get("hooks"), list):
+        e["hooks"] = [c for c in e["hooks"] if "session_log_sync.py" not in str(c.get("command", ""))]
+stop[:] = [e for e in stop if e.get("hooks") != []]
 stop.append({"hooks": [{"type": "command", "command": cmd}]})
 p.write_text(json.dumps(s, indent=2) + "\n")
 PY
