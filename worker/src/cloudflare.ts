@@ -51,9 +51,19 @@ const LEGACY_DEFAULTS: Record<string, string[]> = {
   "workers:write": ["Workers Scripts Write", "D1 Write", "Workers KV Storage Write", "Workers R2 Storage Write"],
 };
 
-// Groups an operator may never add (`tumbler scope add`): a child holding one could make tokens,
-// members or billing changes, which would let an agent widen its own reach past this broker.
+// The only groups an operator may add (`tumbler scope add`): the developer platform's own products,
+// at a plain level (read, write, edit, run). Every other one stays with an admin. An allowlist, as in
+// github.ts, because a denylist misses the ones that widen reach past this broker under other names:
+// Access apps, policies, identity providers and service tokens (the gate in front of /admin), Zero
+// Trust, SSO and SCIM, OAuth clients, the "Admin" role groups, Logs Write (ships logs elsewhere).
+// Workers CI and Observability are read-only here: their writes set what a build runs and where
+// telemetry goes. Workers Scripts, D1 and Secrets Store writes stay addable though a child holding
+// one can replace this broker on its own account, as workers:write already can (see above).
+const DELEGABLE = /^((workers (scripts|kv storage|r2 storage|r2 data catalog|r2 sql|routes|tail|containers|ai)|d1|queues|pages|cloudflare pages|hyperdrive|vectorize|cloudchamber|containers|secrets store|ai gateway|ai search|auto rag|browser run|images|stream|pipelines|artifacts|account analytics)( [a-z0-9 -]+)? (read|write|edit|run)|workers (ci|observability) read)$/i;
+// Never, whatever the allowlist grows to hold: a child with one could make tokens, members or billing changes.
 const UNDELEGABLE = /api tokens|memberships?|account settings|billing/i;
+const delegable = (name: string) => DELEGABLE.test(name) && !UNDELEGABLE.test(name);
+const HELD = "only Workers, D1, KV, R2, Queues, Pages, Hyperdrive, Vectorize, Containers, Secrets Store, AI Gateway, AI Search, Workers AI, Browser Run, Images, Stream, Pipelines, Artifacts and Account Analytics groups can be added from the CLI, and only at read, write, edit or run";
 const ACCOUNT_SCOPE = "com.cloudflare.api.account", BUCKET_SCOPE = "com.cloudflare.edge.r2.bucket";
 // A bucket-scoped group is named "GROUP@BUCKET" and reaches that one R2 bucket, never the account's others.
 const AT_BUCKET = /^(.+)@([a-z0-9][a-z0-9-]{1,61}[a-z0-9])$/;
@@ -154,8 +164,8 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
         }
       }
       for (const [s, names] of Object.entries((config.extra ?? {}) as Record<string, string[]>)) {
-        const bad = names.filter((n) => UNDELEGABLE.test(atBucket(n)?.name ?? n) || GROUP.test(atBucket(n)?.name ?? n));
-        if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (use permission names; token, member, account settings and billing groups stay with /admin)`);
+        const bad = names.filter((n) => !delegable(atBucket(n)?.name ?? n));
+        if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (use permission names; ${HELD}; the rest stay with /admin)`);
         // Why: a `:read` scope is granted to every token on request (machine.ts autoApproved), so it carries reads only.
         const writes = s.endsWith(":read") ? names.filter((n) => !/ read$/i.test(atBucket(n)?.name ?? n)) : [];
         if (writes.length) throw new Refused(400, `config.extra.${s}: ${writes.join(", ")} isn't a read, and every token gets ${s}; add it to a write scope instead`);
@@ -163,6 +173,17 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       if (config.ip !== undefined && !(Array.isArray(config.ip) && config.ip.every((c) => typeof c === "string"))) {
         throw new Refused(400, "config.ip must be a list of CIDRs");
       }
+    },
+    // An addition saved while it was still allowed (before DELEGABLE was an allowlist) is dropped.
+    prune(config) {
+      const extra = (config.extra ?? {}) as Record<string, string[]>;
+      // An entry that isn't a list never passed validate(); it is left for validate() to refuse.
+      const lists = Object.entries(extra).filter(([, names]) => Array.isArray(names));
+      const kept = lists.map(([s, names]) => [s, names.filter((n) => delegable(atBucket(String(n))?.name ?? String(n)))] as const);
+      if (kept.every(([s, names]) => names.length === extra[s].length)) return config;
+      const { extra: _, ...rest } = config;
+      const left = [...kept.filter(([, names]) => names.length), ...Object.entries(extra).filter(([, names]) => !Array.isArray(names))];
+      return left.length ? { ...rest, extra: Object.fromEntries(left) } : rest;
     },
     async mint(parent, config, scopes, expiresAt, label) {
       const stored = (config.scopes ?? {}) as Record<string, string[]>;
@@ -215,18 +236,23 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
     },
     async groups(parent, config, names) {
       // Only the group part is judged: a bucket may be named "billing-logs".
-      const bad = names.filter((n) => UNDELEGABLE.test(atBucket(n)?.name ?? n));
-      if (bad.length) throw new Refused(403, `${bad.join(", ")} can't be added from the CLI: a child with it could make tokens, members or billing changes. An admin adds it to the key's config in /admin`);
+      const part = (n: string) => atBucket(n)?.name ?? n;
+      const refuse = (bad: string[]) => { if (bad.length) throw new Refused(403, `${bad.join(", ")} can't be added from the CLI: ${HELD}. An admin adds any other to the key's config in /admin`); };
+      // Before the parent is used at all, then the allowlist on Cloudflare's own spelling of each name
+      // (after a name Cloudflare doesn't list has been answered with the nearest ones it does).
+      refuse(names.filter((n) => UNDELEGABLE.test(part(n))));
       const m = await groupIds(parent, config.account_id);
       const spelled = new Map(m.spelled.map((n) => [n.toLowerCase(), n])), bucket = new Map(m.bucket.spelled.map((n) => [n.toLowerCase(), n]));
       checkNames(m, names);
-      return names.map((n) => { const b = atBucket(n); return b ? `${bucket.get(b.name.toLowerCase())}@${b.bucket}` : spelled.get(n.toLowerCase())!; });
+      const out = names.map((n) => { const b = atBucket(n); return b ? `${bucket.get(b.name.toLowerCase())}@${b.bucket}` : spelled.get(n.toLowerCase())!; });
+      refuse(out.filter((n) => !delegable(part(n))));
+      return out;
     },
     // All of them, zone and other scopes included: a group the mint can't use still explains a
     // name that "doesn't exist" (it may be listed under another scope).
     async listGroups(parent, config): Promise<GroupInfo[]> {
       return (await listed(parent, config.account_id)).map((g) => ({ name: g.name, scopes: g.scopes ?? [],
-        delegable: !UNDELEGABLE.test(g.name) && (!g.scopes || g.scopes.includes(ACCOUNT_SCOPE) || g.scopes.includes(BUCKET_SCOPE)) }))
+        delegable: delegable(g.name) && (!g.scopes || g.scopes.includes(ACCOUNT_SCOPE) || g.scopes.includes(BUCKET_SCOPE)) }))
         .sort((a, b) => a.name.localeCompare(b.name));
     },
     // Before a parent is saved: Cloudflare must accept it as an active token on this account.

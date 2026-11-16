@@ -52,8 +52,10 @@ api = f"https://api.github.com/repos/{m[1]}/{m[2]}/contents/{m[3]}"
 home = pathlib.Path.home()
 hook = home / ".claude" / "hooks" / "session_log_sync.py"
 hook.parent.mkdir(parents=True, exist_ok=True)
-# The token reaches curl through its stdin config, never argv.
-fetch = (f'printf \'header = "authorization: Bearer %s"\\n\' "${key}" | curl -fsS --max-time 10 -K - '
+# The token reaches curl through its stdin config, never argv. Only a token's own characters go in:
+# a quote or newline in the value would end the header line and add curl options of its own (another
+# URL, a proxy), and what curl prints is run as the hook.
+fetch = (f'case "${key}" in ""|*[!A-Za-z0-9._~+/=-]*) exit 1;; esac; printf \'header = "authorization: Bearer %s"\\n\' "${key}" | curl -fsS --max-time 10 -K - '
          f'-H "accept: application/vnd.github.raw" {shlex.quote(api)}')
 # Quoted, so a home with a space stays one word. tumbler reads /dev/null, leaving the hook's JSON on stdin
 # for the script; an empty or failed fetch keeps the copy from the last turn.

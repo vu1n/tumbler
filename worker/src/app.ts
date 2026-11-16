@@ -1,5 +1,5 @@
 // app.ts — routes, apart from index.ts so tests can drive them without Worker bindings.
-import { beyond, type Caller, Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused, tokenShape, writeReaches } from "./catalog.ts";
+import { beyond, type Caller, Catalog, checkName, checkScope, checkWritableName, GLOBAL, isKeyName, Refused, tokenShape, writeReaches } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
@@ -118,7 +118,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
   // Only within the token's writes. A key with a check keeps it, and a value that fails it saves nothing.
   if (url.pathname.startsWith("/v1/keys/") && request.method === "PUT") {
     const name = decodeURIComponent(url.pathname.slice("/v1/keys/".length));
-    checkName(name);
+    checkWritableName(name);
     // Loose: JSON can spell one byte of value in up to six (\u0000); the exact limit is on the value below.
     if (Number(request.headers.get("content-length") ?? 0) > MAX_VALUE * 6 + 4096) return json({ error: "value too large" }, 413);
     const b = await request.json().catch(() => ({})) as Record<string, unknown>;
@@ -161,7 +161,8 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     // GET /v1/mint/NAME/groups: every group the key's parent lists, names only, for `tumbler scope groups`.
     const [keyName, sub] = url.pathname.slice("/v1/mint/".length).split("/");
     if (sub !== undefined && (sub !== "groups" || request.method !== "GET")) return json({ error: "not found" }, 404);
-    const { row } = await catalog.rowFor(caller, url.searchParams.get("project"), decodeURIComponent(keyName));
+    const requested = url.searchParams.get("project") || null; // "" is none, as scopeFor() reads it; setConfig's guard must agree
+    const { project, row } = await catalog.rowFor(caller, requested, decodeURIComponent(keyName));
     if (row.kind === "static") return json({ error: `${row.scope}/${row.name} is a static key; it has no scopes` }, 400);
     let cfg = grants.config(row);
     if (sub === "groups") return json({ scope: row.scope, name: row.name, groups: await grants.listGroups(row.kind, await catalog.value(row), cfg) });
@@ -179,7 +180,18 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       cfg = { ...cfg, extra };
       if (!Object.keys(extra).length) delete cfg.extra;
       grants.validate(row.kind, cfg);
-      if (!await catalog.setConfig(row.scope, row.name, row.rev, cfg)) return json({ error: `${row.name} changed meanwhile; nothing was saved, run again` }, 409);
+      if (!await catalog.setConfig(row.scope, row.name, row.rev, cfg, caller, project, requested)) {
+        const live = await catalog.caller(token!);
+        const lost = () => json({ error: `token ${caller.name} may no longer change mint scopes; nothing was saved` }, 403);
+        if (!live || live.hash !== caller.hash || !live.operator) return lost();
+        try {
+          const current = await catalog.rowFor(live, requested, row.name);
+          if (current.row.scope !== row.scope) return lost();
+        } catch { return lost(); }
+        return json({ error: `${row.name} changed meanwhile; nothing was saved, run again` }, 409);
+      }
+      const pruned = grants.prunedNames(row.kind, row.config);
+      if (pruned.length) await grants.auditPruned(row.scope, row.name, pruned);
       // Its children carry the old groups: end them, so the next run mints with the new ones.
       await grants.closeStale(row.scope, row.name);
       await catalog.auditBy(caller, "mint-scope", row.scope === GLOBAL ? null : row.scope, [row.name, scope, ...added.map((g) => `+${g}`), ...remove.map((g) => `-${g}`)]);
@@ -270,6 +282,7 @@ async function delegateCreate(catalog: Catalog, grants: Grants | undefined, call
   const into = storeTarget(b.store);
   if (into) {
     if (!writeReaches(caller.writes, into.scope)) throw new Refused(403, `${caller.name} may not write ${into.scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}; store the token where it writes, or leave out store to have it shown once`);
+    checkWritableName(into.name);
     await checkStoreTarget(catalog, into);
   }
   const created = [name, `parent:${caller.name}`], kin = { parent: caller };
@@ -378,10 +391,13 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         const b = await body();
         const kind = b.kind ? String(b.kind) : undefined, config = b.config && typeof b.config === "object" ? b.config : undefined;
         const prev = await catalog.keyRow(scope, name), effective = kind ?? prev?.kind ?? "static";
-        let cfg = config ?? JSON.parse(prev?.config || "{}");
+        let cfg = config ?? JSON.parse(prev?.config || "{}"), pruned: string[] = [];
         let value = String(b.value ?? "");
         if (effective !== "static") {
           if (!grants) return json({ error: "minting is off" }, 501);
+          // A rotation keeps the stored config: without additions the allowlist has since dropped,
+          // which validate() below would refuse.
+          if (!config && prev) { pruned = grants.prunedNames(effective, prev.config); cfg = grants.pruned(effective, cfg); }
           if (value) value = grants.canonical(effective, value);
           // A static key the admin saved, read here and never returned: the nearest of the scope's chain.
           const setting = async (n: string) => {
@@ -408,6 +424,7 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         // with the retired revision. "system": a rotation must not block the next grant like a revoke.
         if (prev && prev.kind !== "static" && grants) await grants.closeStale(scope, name);
         await catalog.audit(who, "put", scope === GLOBAL ? null : scope, [name]);
+        if (pruned.length) await grants!.auditPruned(scope, name, pruned);
         return json({ ok: true });
       }
       if (m === "DELETE") {

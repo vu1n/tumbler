@@ -105,6 +105,24 @@ test("oidc: a JWT from an issuer no row trusts costs no fetch, and unknown kids 
   assert.equal(iss.fetched.length, once);
 });
 
+test("oidc: an issuer may serve its keys from another https origin, but never from a URL with credentials in it", async () => {
+  const jwks = { keys: [{ ...rsa.publicKey.export({ format: "jwk" }), kid: "rsa1", alg: "RS256", use: "sig" }] };
+  const served = (jwksUri: string) => {
+    const fetched: string[] = [];
+    const fetcher = (async (url: string) => {
+      fetched.push(url);
+      if (url === `${ISS}/.well-known/openid-configuration`) return Response.json({ issuer: ISS, jwks_uri: jwksUri });
+      return Response.json(jwks);
+    }) as unknown as typeof fetch;
+    return { fetched, verifier: oidcVerifier(AUD, fetcher) };
+  };
+  const elsewhere = served("https://keys.example.com/jwks");
+  assert.ok(await elsewhere.verifier.verify(jwt({}), async () => true));
+  const withCreds = served("https://user:pass@keys.example.com/jwks");
+  assert.equal(await withCreds.verifier.verify(jwt({}), async () => true), null);
+  assert.deepEqual(withCreds.fetched, [`${ISS}/.well-known/openid-configuration`]);
+});
+
 test("oidc: once bound, the row's own secret stops working; unbinding brings back nothing a JWT had", async () => {
   const { catalog, call } = await setup();
   const secret = await catalog.createToken("ci", ["kypp"]);

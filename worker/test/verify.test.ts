@@ -257,8 +257,12 @@ test("when a check can't run, the admin may save unchecked; a rejected value nev
 
 test("cloudflare: an operator can't add token, member or billing groups, nor writes to a read scope; added names resolve at mint", async () => {
   const posted: any[] = [];
+  const HELD = ["Access: Apps and Policies Write", "Access: Service Tokens Write", "Access: Identity Providers Write", "Zero Trust Write",
+    "SSO Connector Write", "SCIM Provisioning", "OAuth Client Write", "Workers Admin", "Logs Write", "Brand New Product Write",
+    "Pipelines Send", "Workers Scripts Admin", "Stream API Tokens Write", "Turnstile Sites Write", "Workers CI Write", "Workers Observability Write"]; // a level or family off the list
   const fetcher = (async (url: string, init: RequestInit = {}) => {
-    if (url.endsWith("/tokens/permission_groups")) return new Response(JSON.stringify({ success: true, result: [...GROUPS, { id: "e".repeat(32), name: "Account API Tokens Write", scopes: ["com.cloudflare.api.account"] }] }));
+    if (url.endsWith("/tokens/permission_groups")) return new Response(JSON.stringify({ success: true, result: [...GROUPS, { id: "e".repeat(32), name: "Account API Tokens Write", scopes: ["com.cloudflare.api.account"] },
+      ...HELD.map((name, i) => ({ id: `d${i}`.padEnd(32, "0"), name, scopes: ["com.cloudflare.api.account"] }))] }));
     posted.push(JSON.parse(String(init.body)));
     return new Response(JSON.stringify({ success: true, result: { id: "c1", value: "child" } }));
   }) as unknown as typeof fetch;
@@ -269,6 +273,27 @@ test("cloudflare: an operator can't add token, member or billing groups, nor wri
   assert.throws(() => cf.validate({ ...cfg, extra: { "workers:read": ["Containers Write"] } }), /isn't a read/);
   assert.throws(() => cf.validate({ ...cfg, extra: { "x:write": ["Billing Write"] } }), /can't be added from the CLI/);
   cf.validate({ ...cfg, extra: { "workers:read": ["Containers Read"], "pages:write": ["Containers Write"] } });
+  // An allowlist: the groups that reach past the broker under other names (the gate in front of /admin,
+  // identities, role groups) are refused too, both when asked for and when a config is saved.
+  for (const g of HELD) {
+    await assert.rejects(cf.groups!("good-parent", cfg, [g]), (e: any) => e.status === 403, g);
+    assert.throws(() => cf.validate({ ...cfg, extra: { "x:write": [g] } }), /can't be added from the CLI/, g);
+  }
+  cf.validate({ ...cfg, extra: { "x:write": ["Workers Scripts Write", "D1 Write", "Queues Edit", "Workers Tail Read", "Secrets Store Write", "AI Gateway Run", "Workers Observability Read", "Workers CI Read",
+    "Workers R2 Storage Bucket Item Write@some-bucket"] } });
+  // `tumbler scope groups` marks the same ones.
+  const listed = Object.fromEntries((await cf.listGroups!("good-parent", cfg)).map((g) => [g.name, g.delegable]));
+  for (const g of HELD) assert.equal(listed[g], false, g);
+  assert.equal(listed["Containers Write"], true);
+  // An addition saved before its group left the list is dropped from the config, in every scope at once.
+  const old = { ...cfg, extra: { "workers:write": ["Containers Write", "Zero Trust Write"], "x:write": ["Access: Service Tokens Write"], "r2:b": ["Workers R2 Storage Bucket Item Write@some-bucket"] } };
+  assert.deepEqual(cf.prune!(old).extra, { "workers:write": ["Containers Write"], "r2:b": ["Workers R2 Storage Bucket Item Write@some-bucket"] });
+  assert.equal(cf.prune!({ ...cfg, extra: { "x:write": ["Logs Write"] } }).extra, undefined);
+  const fine = { ...cfg, extra: { "workers:write": ["Containers Write"] } };
+  assert.equal(cf.prune!(fine), fine);
+  assert.equal(cf.prune!(cfg), cfg);
+  const odd = { ...cfg, extra: { "x:write": null, "y:write": ["Logs Write"] } } as any; // never passed validate(): left for it to refuse
+  assert.deepEqual(cf.prune!(odd).extra, { "x:write": null });
   const id = (name: string) => GROUPS.find((g) => g.name === name)!.id;
   await cf.mint("good-parent", { ...cfg, extra: { "workers:write": ["Containers Write"] } }, ["workers:write"], new Date("2026-10-23T12:00:00Z"), "t");
   assert.deepEqual(posted[0].policies[0].permission_groups, [{ id: READ }, { id: id("Containers Write") }]);

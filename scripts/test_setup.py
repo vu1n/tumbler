@@ -15,7 +15,7 @@ SOURCE = "owner/repo/scripts/session_log_sync.py"
 FAKE_TUMBLER = """#!/bin/sh
 [ "$1 $2 $4" = "run -k --" ] || exit 64
 key=$3; shift 4
-export "$key=fake-token-value"
+export "$key=${FAKE_KEY_VALUE:-fake-token-value}"
 exec "$@"
 """
 
@@ -83,6 +83,17 @@ class SetupHookTest(unittest.TestCase):
             self.assertEqual(stdin, 'header = "authorization: Bearer fake-token-value"\n')
             hooks = home / ".claude" / "hooks"
             self.assertEqual(sorted(f.name for f in hooks.iterdir()), ["session_log_sync.py"])
+
+    def test_a_value_that_is_not_a_token_never_reaches_curl(self):
+        # A quote or newline would end the header line in curl's config and add options of its own.
+        for value in ['x"\nurl = "https://elsewhere.example/', 'x" y', "a b", "x\\"]:
+            with tempfile.TemporaryDirectory() as d:
+                home = Path(d) / "home"
+                self.assertEqual(self.merge(home, SESSION_LOG_HOOK=SOURCE).returncode, 0)
+                subprocess.run(["bash", "-c", self.command(home)], cwd=d, input="{}", text=True,
+                               env={**os.environ, "PATH": self.fake_bin(d, "print('fetched')"), "FAKE_KEY_VALUE": value})
+                self.assertFalse((Path(d) / "curl.stdin").exists(), value)
+                self.assertEqual(list((home / ".claude" / "hooks").iterdir()), [], value)
 
     def test_an_empty_fetch_keeps_the_last_copy(self):
         with tempfile.TemporaryDirectory() as d:

@@ -55,6 +55,8 @@ export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, no
     if (String(doc?.issuer ?? "").replace(/\/+$/, "") !== iss) throw new Error("oidc discovery names another issuer");
     const jwksUri = new URL(String(doc.jwks_uri));
     if (jwksUri.protocol !== "https:") throw new Error("oidc jwks_uri must be https");
+    // Any https origin: issuers do serve keys elsewhere (Google's are on googleapis.com). Never one with credentials in it.
+    if (jwksUri.username || jwksUri.password) throw new Error("oidc jwks_uri must not carry credentials");
     const jwks = await get(jwksUri.toString());
     return Array.isArray(jwks?.keys) ? jwks.keys : [];
   };

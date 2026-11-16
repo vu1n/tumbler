@@ -24,9 +24,10 @@
   delegate take over another token's name or widen what it made.
 - The one admin power a caller token can hold is `operator` (set by an admin): `tumbler scope` adds
   or removes permission groups on the minted keys the token reads, on the person's word in chat.
-  Additions live in the key's `config.extra`, on top of the admin's config, and never include token,
-  member, account settings or billing groups, or writes on a `:read` scope (cloudflare.ts
-  UNDELEGABLE). Keep it that narrow: no token, ceiling, pin, writes or parent changes through it.
+  Additions live in the key's `config.extra`, on top of the admin's config, and come only from each
+  provider's allowlist (cloudflare.ts and github.ts DELEGABLE): never token, member, account settings,
+  billing, Access or identity groups, or writes on a `:read` scope. Keep it that narrow: no token,
+  ceiling, pin, writes or parent changes through it.
 - A fix must roll out with no manual step: a migration or code that applies itself, or at most a CLI
   command an agent runs. Never a trip to /admin or re-entering a secret.
 - `cli/tumbler` is bundled into the Worker as text (wrangler `rules`) and served at `/cli`; it must

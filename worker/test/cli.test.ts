@@ -225,6 +225,36 @@ test("a .tumbler that can't be written still runs with only the picked keys", as
   }
 });
 
+test("a .tumbler symlink is never written through, by run or by auto --force", async () => {
+  const dir = repo({ "wrangler.toml": "" }), target = join(dir, "victim");
+  symlinkSync(target, join(dir, ".tumbler"));
+  await cli(["run", "--", "true"], { TUMBLER_AUTO: "", TUMBLER_TTL: "0" }, dir);
+  assert.equal(existsSync(target), false);
+  writeFileSync(target, "keep me\n");
+  await assert.rejects(cli(["auto", "--force"], {}, dir), /not a regular file/);
+  assert.equal(readFileSync(target, "utf8"), "keep me\n");
+});
+
+test("a key named like a variable that steers programs never reaches the command", async () => {
+  await catalog.put("dev", "NODE_OPTIONS", "--title=from-a-key");
+  await catalog.put("dev", "TUMBLER_URL", "http://127.0.0.1:1");
+  await catalog.put("dev", "JDK_JAVA_OPTIONS", "-Dfrom=a-key");
+  try {
+    const probe = ["node", "-e", "process.stdout.write([/from-a-key/.test(process.env.NODE_OPTIONS ?? ''), process.env.TUMBLER_URL, process.env.JDK_JAVA_OPTIONS ?? '', !!process.env.PYTH_API_KEY].join(' '))"];
+    const { stdout, stderr } = await cli(["run", "--", ...probe], { TUMBLER_TTL: "0" });
+    assert.equal(stdout, `false ${url}  true`);
+    assert.match(stderr, /not passing JDK_JAVA_OPTIONS, NODE_OPTIONS, TUMBLER_URL/);
+  } finally {
+    for (const k of ["NODE_OPTIONS", "TUMBLER_URL", "JDK_JAVA_OPTIONS"]) await catalog.remove("dev", k);
+  }
+});
+
+test("the CLI and the broker hold the same reserved names", () => {
+  const of = (file: string) => /const RESERVED = (\/.*\/);/.exec(readFileSync(new URL(file, import.meta.url), "utf8"))?.[1];
+  assert.ok(of("../../cli/tumbler"));
+  assert.equal(of("../../cli/tumbler"), of("../src/catalog.ts"));
+});
+
 test("if auto can't pick, the command doesn't start", async () => {
   const dir = repo({ "wrangler.toml": "" }), marker = join(dir, "ran");
   await assert.rejects(cli(["run", "--", "touch", marker], { TUMBLER_AUTO: "", TUMBLER_TTL: "0", TUMBLER_TOKEN: "tmb_bad" }, dir),
@@ -489,6 +519,8 @@ test("TUMBLER_TOKEN_FILE: a token a platform mounts is read on each call, after 
   const { stdout } = await cli(["run", "--", ...printEnv], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: file, TUMBLER_TTL: "0" });
   assert.match(stdout, / us-east-1$/);
   await assert.rejects(cli(["whoami"], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: join(home, "missing") }), /TUMBLER_TOKEN_FILE .* can't be read/);
+  writeFileSync(file, `${devToken}\nurl = \"https://elsewhere.example/`);
+  await assert.rejects(cli(["whoami"], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: file }), /must contain one printable token/);
 });
 
 test("admin token create --oidc binds an issuer and subject and prints no secret", async () => {

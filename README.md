@@ -215,7 +215,11 @@ column, or `writes` on `POST`/`PATCH /admin/api/tokens`): `global`, a project, `
 environment is named, as in a pin. Writes are separate from the pin: a laptop token can write `global`
 while reading nothing beyond it.
 
-`tumbler put NAME` saves a static key within them, like `wrangler secret put`. The value comes from
+`tumbler put NAME` saves a static key within them, like `wrangler secret put`. A caller token can't
+save a name that steers programs instead of holding a secret (`PATH`, `NODE_OPTIONS`, `LD_*`,
+`JDK_JAVA_OPTIONS`, `DOTNET_STARTUP_HOOKS`, `GIT_SSH_COMMAND`, proxy and CA variables, `TUMBLER_*`; a
+list of known names, so not every one a runtime may honour), and `tumbler run` never passes a key with such
+a name to the command. The value comes from
 `--from-file`, `--clipboard` (pbpaste, wl-paste, xclip or xsel), piped stdin (`op read ... | tumbler put
 NAME`), or a hidden prompt at a terminal, where a multi-line paste such as a private key comes through
 whole. It is never an argument, and it travels to curl on stdin, so it never shows in `ps`. A
@@ -398,8 +402,13 @@ tumbler scope add CLOUDFLARE_API_TOKEN r2:claude-session-logs \
 That needs an **operator** token, which you turn on once per token (`/admin`, or
 `tumbler admin token edit NAME --operator on`). An operator only adds or removes permission groups
 on the minted keys its token reads. Additions sit on top of the key's config, so your config stays
-the base and only additions can be removed this way. It can't add API token, member, account
-settings or billing groups (a child holding one could make its own tokens), can't add a write to a
+the base and only additions can be removed this way. It adds only developer-platform groups
+(Workers, D1, KV, R2, Queues, Pages, Hyperdrive, Vectorize, Containers, Secrets Store, AI Gateway,
+AI Search, Workers AI, Browser Run, Images, Stream, Pipelines, Artifacts, Account Analytics) at
+read, write, edit or run; `tumbler scope groups` marks the rest "not addable". An addition saved
+before a group left that list stops minting at once, and the next sweep removes it and ends the
+children that hold it. API token, member, account settings, billing, Access, Zero Trust and SSO groups stay
+with `/admin`, since a child holding one could reach past the broker. It can't add a write to a
 `:read` scope (every token gets reads), and never creates tokens or changes a token's scopes, pin,
 writes or a key's parent. A change ends the children holding the old groups, so the next run mints
 with the new ones, and it's audited (`mint-scope`). A new scope name makes a new scope, which a

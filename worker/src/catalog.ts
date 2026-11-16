@@ -25,6 +25,21 @@ export class Refused extends Error {
 
 export const isKeyName = (name: string) => NAME.test(name);
 export function checkName(name: string) { if (!NAME.test(name)) throw new Refused(400, `invalid key name: ${name}`); }
+// Names that steer the process a key is injected into rather than hold a secret: the loader, an
+// interpreter's startup, git's and ssh's helpers, the proxy and CA settings, and tumbler's own. A
+// caller token never creates or sets one (app.ts; it may still delete one), since its value would run in, or reroute, the
+// commands of every other token that reads the scope; the CLI drops them too (cli/tumbler RESERVED,
+// kept the same as this by cli.test.ts). An admin may still save one, for a reader of /v1/env other
+// than `tumbler run`, which drops it whoever saved it.
+// A list of known names, so not every one that exists: a runtime with a startup variable missing here
+// still takes it (add the name to both copies). Left writable on purpose: a service's own endpoint
+// (`AWS_ENDPOINT_URL_S3`, `OPENAI_BASE_URL`, `DATABASE_HOST`), which is ordinary config a project
+// stores, though it also decides where a command sends its credential.
+export const RESERVED = /^(PATH|HOME|SHELL|IFS|ENV|BASH_ENV|ZDOTDIR|PS4|PROMPT_COMMAND|TMPDIR|XDG_.*|LD_.*|DYLD_.*|NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_REPL_EXTERNAL_MODULE|NPM_CONFIG_.*|PYTHON(PATH|HOME|STARTUP|WARNINGS|BREAKPOINT|INSPECT|USERBASE|EXECUTABLE|PYCACHEPREFIX)|PERL5(LIB|OPT|DB)|PERLLIB|RUBY(OPT|LIB)|GEM_(HOME|PATH)|BUNDLE_GEMFILE|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|JAVA_OPTS|MAVEN_OPTS|GRADLE_OPTS|DOTNET_(STARTUP_HOOKS|ADDITIONAL_DEPS|SHARED_STORE|ROOT.*)|(CORECLR|COR)_(ENABLE_PROFILING|PROFILER.*)|GOFLAGS|RUSTC|RUSTC_WRAPPER|RUSTFLAGS|GIT_(SSH|SSH_COMMAND|ASKPASS|EXEC_PATH|CONFIG.*|PROXY_COMMAND|EXTERNAL_DIFF|PAGER|EDITOR|TEMPLATE_DIR|DIR|WORK_TREE)|SSH_ASKPASS|EDITOR|VISUAL|PAGER|(HTTPS?|ALL|NO)_PROXY|SSL_CERT_(FILE|DIR)|CURL_CA_BUNDLE|CURL_HOME|REQUESTS_CA_BUNDLE|GLIBC_TUNABLES|GCONV_PATH|LESSOPEN|LESSCLOSE|BROWSER|MANPAGER|SHELLOPTS|BASHOPTS|OPENSSL_(CONF|MODULES)|SSLKEYLOGFILE|WGETRC|GIT_SEQUENCE_EDITOR|GIT_SSL_.*|NODE_TLS_REJECT_UNAUTHORIZED|PIP_(INDEX_URL|EXTRA_INDEX_URL|CONFIG_FILE|CERT|PROXY)|CLASSPATH|MAKEFLAGS|PHPRC|PHP_INI_SCAN_DIR|LUA_INIT|R_PROFILE(_USER)?|AWS_(CONFIG_FILE|SHARED_CREDENTIALS_FILE|CA_BUNDLE)|GH_(HOST|CONFIG_DIR|EDITOR|PAGER|BROWSER)|(CLOUDFLARE|CF)_API_BASE_URL|WRANGLER_.*|AWS_PAGER|GNUMAKEFLAGS|TAR_OPTIONS|FTP_PROXY|SSH_AUTH_SOCK|KUBECONFIG|DOCKER_HOST|TUMBLER_.*)$/;
+export function checkWritableName(name: string) {
+  checkName(name);
+  if (RESERVED.test(name)) throw new Refused(400, `${name} is an environment variable that steers programs, not a secret; a caller token can't save it. Pick another name`);
+}
 export function checkScope(scope: string) {
   if (scope !== GLOBAL && !PROJECT.test(scope)) throw new Refused(400, `invalid scope: ${scope}`);
 }
@@ -528,14 +543,38 @@ export class Catalog {
 
   // A mint key's new config under a new revision, only if it is still at `rev`: the old revision is
   // retired in the same batch (its parent revokes the children it minted), as a rotation does.
-  async setConfig(scope: string, name: string, rev: string, config: Record<string, unknown>): Promise<boolean> {
+  async setConfig(scope: string, name: string, rev: string, config: Record<string, unknown>, caller?: Caller,
+    project: string | null = null, requested: string | null = null): Promise<boolean> {
+    // An operator change may wait on a provider lookup. Its token must still be this generation,
+    // live, an operator and resolving this exact row when the config lands. The last part makes a
+    // pin/default change or a newly shadowing row win the race too.
+    const env = project?.split("/")[1], scopes = chain(project), more = scopes.slice(scopes.indexOf(scope) + 1);
+    let selection: string, selectionBinds: (string | null)[];
+    if (requested !== null) {
+      selection = " AND EXISTS (SELECT 1 FROM json_each(t.projects) p WHERE p.value IN (?, ?))";
+      selectionBinds = [project, env ? `*/${env}` : "*"];
+    } else if (project === null) {
+      selection = " AND (t.projects IS NULL OR json_array_length(t.projects) != 1 OR substr(json_extract(t.projects, '$[0]'), 1, 1) = '*')";
+      selectionBinds = [];
+    } else {
+      selection = " AND json_array_length(t.projects) = 1 AND json_extract(t.projects, '$[0]') = ?";
+      selectionBinds = [project];
+    }
+    const winner = more.length ? ` AND NOT EXISTS (SELECT 1 FROM keys visible WHERE visible.name = ? AND visible.scope IN (${more.map(() => "?").join(", ")}))` : "";
+    const winnerBinds = more.length ? [name, ...more] : [];
+    const auth = caller ? ` AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = ? AND t.hash = ? AND t.operator = 1
+      AND t.parent IS NULL AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
+      AND (? IS NULL OR ? > ?)${selection})${winner}` : "";
+    const until = caller?.until ?? null;
+    const authBinds = caller ? [caller.name, caller.hash ?? null, this.clock().toISOString(), until, until, this.clock().getTime() / 1000,
+      ...selectionBinds, ...winnerBinds] : [];
     // Why retire by rev: a change that lost a race must not retire the winner's revision early.
     const [, r] = await this.db.batch([this.db.prepare(
       `INSERT OR IGNORE INTO retired_keys (scope, name, rev, kind, config, iv, ciphertext, retire_until)
-       SELECT scope, name, rev, kind, config, iv, ciphertext, ? FROM keys WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'`,
-    ).bind(new Date(Date.now() + RETIRE_MS).toISOString(), scope, name, rev), this.db.prepare(
-      "UPDATE keys SET config = ?, rev = ?, rotated_at = ? WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'",
-    ).bind(JSON.stringify(config), crypto.randomUUID(), now(), scope, name, rev)]);
+       SELECT scope, name, rev, kind, config, iv, ciphertext, ? FROM keys WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'${auth}`,
+    ).bind(new Date(Date.now() + RETIRE_MS).toISOString(), scope, name, rev, ...authBinds), this.db.prepare(
+      `UPDATE keys SET config = ?, rev = ?, rotated_at = ? WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'${auth}`,
+    ).bind(JSON.stringify(config), crypto.randomUUID(), now(), scope, name, rev, ...authBinds)]);
     return !!r.meta.changes;
   }
 
