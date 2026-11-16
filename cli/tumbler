@@ -107,7 +107,16 @@ const die = (msg, code = 1) => { process.stderr.write(`tumbler: ${msg}\n`); proc
 // A bare host (TUMBLER_URL=tumbler.example.com) means https: plain http would miss the proxy's auth header.
 const withScheme = u => u && !/^[a-z][a-z0-9+.-]*:\/\//i.test(u) ? "https://" + u : u;
 // TUMBLER_TOKEN_FILE: a token a platform mounts and rotates (an OIDC token, read again on every call).
-const tokenFile = () => { const f = process.env.TUMBLER_TOKEN_FILE; if (!f) return ""; try { return readFileSync(f, "utf8").trim(); } catch { die(`TUMBLER_TOKEN_FILE ${f} can't be read`); } };
+const tokenFile = () => {
+  const f = process.env.TUMBLER_TOKEN_FILE;
+  if (!f) return "";
+  let token;
+  try { token = readFileSync(f, "utf8").trim(); } catch { die(`TUMBLER_TOKEN_FILE ${f} can't be read`); }
+  // This value becomes a quoted line in curl's stdin config. A control character could end that
+  // line and add another curl directive, so a mounted token is one printable, whitespace-free value.
+  if (!/^[\x21-\x7e]+$/.test(token)) die(`TUMBLER_TOKEN_FILE ${f} must contain one printable token`);
+  return token;
+};
 const callerCfg = () => ({ url: withScheme(process.env.TUMBLER_URL), token: process.env.TUMBLER_TOKEN || tokenFile() || "" });
 
 function brokerGet(path, cfg = callerCfg()) { return brokerCall("GET", path, null, cfg); }
@@ -541,10 +550,14 @@ const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms).unref());
 // program needs to run and reach the network. Why opt-in: by default the keys are added to the
 // environment, so a credential already exported in the shell still reaches the command.
 // Environment only: it doesn't stop the command reading a dotenv file or a credentials directory.
-let inherited = process.env;
+// The command may be untrusted repository code. It gets the selected values, never the bearer that
+// could ask the broker for a wider set or exercise this token's writes/operator/delegate powers.
+const isBrokerCredential = (name) => name === "TUMBLER_TOKEN" || name === "TUMBLER_TOKEN_FILE";
+const withoutBrokerCredential = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !isBrokerCredential(k)));
+let inherited = withoutBrokerCredential(process.env);
 const RUNTIME_VARS = /^(PATH|HOME|USER|LOGNAME|SHELL|TERM|COLORTERM|LANG|LANGUAGE|LC_[A-Z]+|TZ|TMPDIR|TEMP|TMP|PWD|XDG_[A-Z_]+|(?:HTTPS?|NO|ALL)_PROXY|(?:https?|no|all)_proxy|SSL_CERT_(?:FILE|DIR)|NODE_EXTRA_CA_CERTS|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|TUMBLER_URL|SYSTEMROOT|COMSPEC|PATHEXT)$/;
 function cleanEnv(pass) {
-  return Object.fromEntries(Object.entries(process.env).filter(([k]) => RUNTIME_VARS.test(k) || pass.includes(k)));
+  return Object.fromEntries(Object.entries(process.env).filter(([k]) => !isBrokerCredential(k) && (RUNTIME_VARS.test(k) || pass.includes(k))));
 }
 
 // Key names that steer the command instead of handing it a secret (the loader, an interpreter's

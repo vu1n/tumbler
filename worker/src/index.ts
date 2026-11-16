@@ -24,11 +24,17 @@ export interface Env {
   TUMBLER_AUTO_MODEL?: string; // "clef" (default) or "clef-flash"
   TUMBLER_ALERT_WEBHOOK?: string; // a secret: where alerts.ts POSTs (ntfy, Slack, ...); unset sends none
   TUMBLER_OIDC_AUDIENCE?: string; // the `aud` OIDC caller tokens must carry (the broker's URL); unset, no JWT is a caller
+  TUMBLER_OIDC_JWKS_ORIGINS?: string; // comma-separated extra https origins discovery may use for JWKS; same-origin needs none
 }
 
-// One verifier per audience for the isolate's life, so issuers' signing keys stay cached across requests.
-let oidc: OidcVerifier | undefined;
-const verifierFor = (audience?: string) => !audience ? undefined : oidc?.audience === audience ? oidc : (oidc = oidcVerifier(audience));
+// One verifier per config for the isolate's life, so issuers' signing keys stay cached across requests.
+let oidc: { config: string; verifier: OidcVerifier } | undefined;
+const verifierFor = (audience?: string, origins = "") => {
+  if (!audience) return undefined;
+  const allowed = origins.split(",").map((s) => s.trim()).filter(Boolean), config = JSON.stringify([audience, allowed]);
+  if (oidc?.config !== config) oidc = { config, verifier: oidcVerifier(audience, fetch, () => Date.now(), allowed) };
+  return oidc.verifier;
+};
 
 const grantsFor = (catalog: Catalog) => new Grants(catalog, providers);
 
@@ -45,7 +51,7 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const catalog = new Catalog(env.DB, await loadKey(env));
     catalog.alert = webhookAlerts(env.TUMBLER_ALERT_WEBHOOK, (p) => ctx.waitUntil(p));
-    catalog.oidc = verifierFor(env.TUMBLER_OIDC_AUDIENCE);
+    catalog.oidc = verifierFor(env.TUMBLER_OIDC_AUDIENCE, env.TUMBLER_OIDC_JWKS_ORIGINS);
     const grants = grantsFor(catalog);
     const admins = (env.TUMBLER_ADMINS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
     return handle(request, {

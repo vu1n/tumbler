@@ -65,6 +65,14 @@ test("--clean starts the command from a runtime allowlist plus its keys", async 
   await assert.rejects(cli(["run", "--pass", "KEEP_ME", "--", "true"], env), /--pass only applies with --clean/);
 });
 
+test("run never hands its broker credential to the child", async () => {
+  const file = join(home, "mounted-token");
+  writeFileSync(file, devToken + "\n");
+  const probe = ["node", "-e", "process.stdout.write([process.env.TUMBLER_TOKEN, process.env.TUMBLER_TOKEN_FILE, process.env.TUMBLER_URL].join(' '))"];
+  const { stdout } = await cli(["run", "-k", "AWS_REGION", "--", ...probe], { TUMBLER_TOKEN_FILE: file, TUMBLER_TTL: "0" });
+  assert.equal(stdout, `  ${url}`);
+});
+
 test("a helper left by another CLI version is never asked", async () => {
   // A stand-in for a pre-upgrade helper on the old socket name, serving a stale value.
   const dir = join(home, "run", "tumbler");
@@ -515,6 +523,8 @@ test("TUMBLER_TOKEN_FILE: a token a platform mounts is read on each call, after 
   const { stdout } = await cli(["run", "--", ...printEnv], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: file, TUMBLER_TTL: "0" });
   assert.match(stdout, / us-east-1$/);
   await assert.rejects(cli(["whoami"], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: join(home, "missing") }), /TUMBLER_TOKEN_FILE .* can't be read/);
+  writeFileSync(file, `${devToken}\nurl = \"https://elsewhere.example/`);
+  await assert.rejects(cli(["whoami"], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: file }), /must contain one printable token/);
 });
 
 test("admin token create --oidc binds an issuer and subject and prints no secret", async () => {

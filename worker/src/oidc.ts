@@ -41,9 +41,14 @@ export function checkIssuer(iss: string): string {
   return iss.replace(/\/+$/, "");
 }
 
-export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, now = () => Date.now()): OidcVerifier {
+export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, now = () => Date.now(), jwksOrigins: string[] = []): OidcVerifier {
   type KeyCache = { at: number; tried: number; jwks: Jwk[]; inflight?: Promise<void> };
   const keys = new Map<string, KeyCache>();
+  const extraOrigins = new Set(jwksOrigins.map((raw) => {
+    const u = new URL(raw);
+    if (u.protocol !== "https:" || u.username || u.password || u.pathname !== "/" || u.search || u.hash) throw new Error(`OIDC JWKS origin must be an https origin: ${raw}`);
+    return u.origin;
+  }));
   const get = async (url: string) => {
     const r = await fetcher(url, { redirect: "manual", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), headers: { accept: "application/json" } });
     if (!r.ok) { await r.body?.cancel().catch(() => {}); throw new Error(`oidc fetch ${r.status}`); }
@@ -55,6 +60,9 @@ export function oidcVerifier(audience: string, fetcher: typeof fetch = fetch, no
     if (String(doc?.issuer ?? "").replace(/\/+$/, "") !== iss) throw new Error("oidc discovery names another issuer");
     const jwksUri = new URL(String(doc.jwks_uri));
     if (jwksUri.protocol !== "https:") throw new Error("oidc jwks_uri must be https");
+    if (jwksUri.username || jwksUri.password || (jwksUri.origin !== new URL(iss).origin && !extraOrigins.has(jwksUri.origin))) {
+      throw new Error("oidc jwks_uri origin is not trusted");
+    }
     const jwks = await get(jwksUri.toString());
     return Array.isArray(jwks?.keys) ? jwks.keys : [];
   };

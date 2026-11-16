@@ -161,7 +161,8 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     // GET /v1/mint/NAME/groups: every group the key's parent lists, names only, for `tumbler scope groups`.
     const [keyName, sub] = url.pathname.slice("/v1/mint/".length).split("/");
     if (sub !== undefined && (sub !== "groups" || request.method !== "GET")) return json({ error: "not found" }, 404);
-    const { row } = await catalog.rowFor(caller, url.searchParams.get("project"), decodeURIComponent(keyName));
+    const requested = url.searchParams.get("project");
+    const { project, row } = await catalog.rowFor(caller, requested, decodeURIComponent(keyName));
     if (row.kind === "static") return json({ error: `${row.scope}/${row.name} is a static key; it has no scopes` }, 400);
     let cfg = grants.config(row);
     if (sub === "groups") return json({ scope: row.scope, name: row.name, groups: await grants.listGroups(row.kind, await catalog.value(row), cfg) });
@@ -179,7 +180,16 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       cfg = { ...cfg, extra };
       if (!Object.keys(extra).length) delete cfg.extra;
       grants.validate(row.kind, cfg);
-      if (!await catalog.setConfig(row.scope, row.name, row.rev, cfg)) return json({ error: `${row.name} changed meanwhile; nothing was saved, run again` }, 409);
+      if (!await catalog.setConfig(row.scope, row.name, row.rev, cfg, caller, project, requested)) {
+        const live = await catalog.caller(token!);
+        const lost = () => json({ error: `token ${caller.name} may no longer change mint scopes; nothing was saved` }, 403);
+        if (!live || live.hash !== caller.hash || !live.operator) return lost();
+        try {
+          const current = await catalog.rowFor(live, requested, row.name);
+          if (current.row.scope !== row.scope) return lost();
+        } catch { return lost(); }
+        return json({ error: `${row.name} changed meanwhile; nothing was saved, run again` }, 409);
+      }
       // Its children carry the old groups: end them, so the next run mints with the new ones.
       await grants.closeStale(row.scope, row.name);
       await catalog.auditBy(caller, "mint-scope", row.scope === GLOBAL ? null : row.scope, [row.name, scope, ...added.map((g) => `+${g}`), ...remove.map((g) => `-${g}`)]);

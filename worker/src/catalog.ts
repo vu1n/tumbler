@@ -538,14 +538,38 @@ export class Catalog {
 
   // A mint key's new config under a new revision, only if it is still at `rev`: the old revision is
   // retired in the same batch (its parent revokes the children it minted), as a rotation does.
-  async setConfig(scope: string, name: string, rev: string, config: Record<string, unknown>): Promise<boolean> {
+  async setConfig(scope: string, name: string, rev: string, config: Record<string, unknown>, caller?: Caller,
+    project: string | null = null, requested: string | null = null): Promise<boolean> {
+    // An operator change may wait on a provider lookup. Its token must still be this generation,
+    // live, an operator and resolving this exact row when the config lands. The last part makes a
+    // pin/default change or a newly shadowing row win the race too.
+    const env = project?.split("/")[1], scopes = chain(project), more = scopes.slice(scopes.indexOf(scope) + 1);
+    let selection: string, selectionBinds: (string | null)[];
+    if (requested !== null) {
+      selection = " AND EXISTS (SELECT 1 FROM json_each(t.projects) p WHERE p.value IN (?, ?))";
+      selectionBinds = [project, env ? `*/${env}` : "*"];
+    } else if (project === null) {
+      selection = " AND (t.projects IS NULL OR json_array_length(t.projects) != 1 OR substr(json_extract(t.projects, '$[0]'), 1, 1) = '*')";
+      selectionBinds = [];
+    } else {
+      selection = " AND json_array_length(t.projects) = 1 AND json_extract(t.projects, '$[0]') = ?";
+      selectionBinds = [project];
+    }
+    const winner = more.length ? ` AND NOT EXISTS (SELECT 1 FROM keys visible WHERE visible.name = ? AND visible.scope IN (${more.map(() => "?").join(", ")}))` : "";
+    const winnerBinds = more.length ? [name, ...more] : [];
+    const auth = caller ? ` AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = ? AND t.hash = ? AND t.operator = 1
+      AND t.parent IS NULL AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
+      AND (? IS NULL OR ? > ?)${selection})${winner}` : "";
+    const until = caller?.until ?? null;
+    const authBinds = caller ? [caller.name, caller.hash ?? null, this.clock().toISOString(), until, until, this.clock().getTime() / 1000,
+      ...selectionBinds, ...winnerBinds] : [];
     // Why retire by rev: a change that lost a race must not retire the winner's revision early.
     const [, r] = await this.db.batch([this.db.prepare(
       `INSERT OR IGNORE INTO retired_keys (scope, name, rev, kind, config, iv, ciphertext, retire_until)
-       SELECT scope, name, rev, kind, config, iv, ciphertext, ? FROM keys WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'`,
-    ).bind(new Date(Date.now() + RETIRE_MS).toISOString(), scope, name, rev), this.db.prepare(
-      "UPDATE keys SET config = ?, rev = ?, rotated_at = ? WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'",
-    ).bind(JSON.stringify(config), crypto.randomUUID(), now(), scope, name, rev)]);
+       SELECT scope, name, rev, kind, config, iv, ciphertext, ? FROM keys WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'${auth}`,
+    ).bind(new Date(Date.now() + RETIRE_MS).toISOString(), scope, name, rev, ...authBinds), this.db.prepare(
+      `UPDATE keys SET config = ?, rev = ?, rotated_at = ? WHERE scope = ? AND name = ? AND rev = ? AND kind != 'static'${auth}`,
+    ).bind(JSON.stringify(config), crypto.randomUUID(), now(), scope, name, rev, ...authBinds)]);
     return !!r.meta.changes;
   }
 

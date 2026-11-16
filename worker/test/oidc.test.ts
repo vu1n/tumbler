@@ -105,6 +105,20 @@ test("oidc: a JWT from an issuer no row trusts costs no fetch, and unknown kids 
   assert.equal(iss.fetched.length, once);
 });
 
+test("oidc: discovery cannot send the JWKS fetch to another origin unless an admin allows it", async () => {
+  const keys = "https://keys.example.com", fetched: string[] = [];
+  const jwks = { keys: [{ ...rsa.publicKey.export({ format: "jwk" }), kid: "rsa1", alg: "RS256", use: "sig" }] };
+  const fetcher = (async (url: string) => {
+    fetched.push(url);
+    if (url === `${ISS}/.well-known/openid-configuration`) return Response.json({ issuer: ISS, jwks_uri: `${keys}/jwks` });
+    if (url === `${keys}/jwks`) return Response.json(jwks);
+    return new Response("{}", { status: 404 });
+  }) as unknown as typeof fetch;
+  assert.equal(await oidcVerifier(AUD, fetcher).verify(jwt({}), async () => true), null);
+  assert.deepEqual(fetched, [`${ISS}/.well-known/openid-configuration`]);
+  assert.ok(await oidcVerifier(AUD, fetcher, () => Date.now(), [keys]).verify(jwt({}), async () => true));
+});
+
 test("oidc: once bound, the row's own secret stops working; unbinding brings back nothing a JWT had", async () => {
   const { catalog, call } = await setup();
   const secret = await catalog.createToken("ci", ["kypp"]);
