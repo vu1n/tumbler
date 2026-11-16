@@ -6,7 +6,7 @@
 // Only `active` ever yields a credential. Every other state, and every failure, yields none.
 // Nothing waits for a person: the caller token's scopes are its ceiling. A request inside them is
 // minted at once and audited; one outside them is refused, and widening the token is how to allow it.
-import { type Caller, type Catalog, pinReaches, Refused, scopeName } from "./catalog.ts";
+import { type Caller, type Catalog, GLOBAL, pinReaches, Refused, scopeName } from "./catalog.ts";
 import { open, seal } from "./crypto.ts";
 import { allowedBy, autoApproved, type GrantEvent, type GrantState, isLive, transition } from "./machine.ts";
 import type { Outcome } from "./verify.ts";
@@ -45,6 +45,9 @@ export interface Provider {
   // Every group the provider lists for this parent, so an agent picks real names instead of
   // guessing them from docs. Optional: without it `tumbler scope groups` is refused.
   listGroups?(parent: string, config: MintConfig): Promise<GroupInfo[]>;
+  // The config without operator additions the provider no longer lets an operator make (the same
+  // object when there are none). Optional: without it every saved addition stands.
+  prune?(config: MintConfig): MintConfig;
 }
 // `delegable`: whether an operator may add it with `tumbler scope add`.
 export interface GroupInfo { name: string; scopes: string[]; delegable: boolean }
@@ -253,11 +256,28 @@ export class Grants {
     return results.length;
   }
 
+  // Saved configs holding an operator addition its provider no longer allows: rewritten without it
+  // under a new revision, as an operator's own removal is, so closeStale() ends the children minted
+  // with it. Run by the sweep, so a narrowed allowlist reaches saved keys with no manual step.
+  async pruneSaved() {
+    const { results } = await this.db.prepare("SELECT scope, name, kind, config, rev FROM keys WHERE kind != 'static'")
+      .all<{ scope: string; name: string; kind: string; config: string; rev: string }>();
+    for (const r of results) {
+      const stored: MintConfig = JSON.parse(r.config || "{}"), next = this.pruned(r.kind, stored);
+      if (next === stored) continue;
+      if (!await this.catalog.setConfig(r.scope, r.name, r.rev, next)) continue; // changed meanwhile: the next sweep sees it
+      await this.closeStale(r.scope, r.name);
+      const gone = Object.entries(stored.extra ?? {}).flatMap(([s, names]) => names.filter((n) => !next.extra?.[s]?.includes(n)).flatMap((n) => [s, `-${n}`]));
+      await this.catalog.audit("system", "mint-scope", r.scope === GLOBAL ? null : r.scope, [r.name, ...gone]);
+    }
+  }
+
   // Expire every active grant past its child's expiry and delete the child at the provider.
   async sweep() {
     const { results } = await this.db.prepare("SELECT * FROM grants WHERE state = 'active' AND expires_at <= ?")
       .bind(this.now().toISOString()).all<any>();
     for (const r of results) await this.close(parse(r), "expired", "system");
+    await this.pruneSaved(); // additions saved before their group left the allowlist
     await this.closeStale(); // grants a missed post-rotation cleanup left behind
     await this.catalog.revokeOutgrown(); // a delegate's tokens an interrupted narrowing left wider than it
     await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
@@ -289,7 +309,14 @@ export class Grants {
 
   // --- internals ---
 
-  config(row: KeyRow): MintConfig { return JSON.parse(row.config || "{}"); }
+  // Why pruned on every read: an addition saved before its group left the provider's allowlist must
+  // not mint, show as held, or block the key's next `tumbler scope` change (validate() judges the
+  // whole config). pruneSaved() then rewrites the stored config and ends the children that hold it.
+  config(row: { kind: string; config: string }): MintConfig { return this.pruned(row.kind, JSON.parse(row.config || "{}")); }
+  pruned(kind: string, config: MintConfig): MintConfig {
+    const p = kind.startsWith("mint:") ? this.providers[kind.slice(5)] : undefined;
+    return p?.prune ? p.prune(config) : config;
+  }
   fresh(g: GrantRow) { return !!g.expires_at && Date.parse(g.expires_at) - this.now().getTime() > REUSE_MARGIN_MS; }
 
   async get(id: string) {

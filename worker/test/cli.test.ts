@@ -238,11 +238,15 @@ test("a .tumbler symlink is never written through, by run or by auto --force", a
 test("a key named like a variable that steers programs never reaches the command", async () => {
   await catalog.put("dev", "NODE_OPTIONS", "--title=from-a-key");
   await catalog.put("dev", "TUMBLER_URL", "http://127.0.0.1:1");
-  const probe = ["node", "-e", "process.stdout.write([/from-a-key/.test(process.env.NODE_OPTIONS ?? ''), process.env.TUMBLER_URL, !!process.env.PYTH_API_KEY].join(' '))"];
-  const { stdout, stderr } = await cli(["run", "--", ...probe], { TUMBLER_TTL: "0" });
-  assert.equal(stdout, `false ${url} true`);
-  assert.match(stderr, /not passing NODE_OPTIONS, TUMBLER_URL/);
-  await catalog.remove("dev", "NODE_OPTIONS"); await catalog.remove("dev", "TUMBLER_URL");
+  await catalog.put("dev", "JDK_JAVA_OPTIONS", "-Dfrom=a-key");
+  try {
+    const probe = ["node", "-e", "process.stdout.write([/from-a-key/.test(process.env.NODE_OPTIONS ?? ''), process.env.TUMBLER_URL, process.env.JDK_JAVA_OPTIONS ?? '', !!process.env.PYTH_API_KEY].join(' '))"];
+    const { stdout, stderr } = await cli(["run", "--", ...probe], { TUMBLER_TTL: "0" });
+    assert.equal(stdout, `false ${url}  true`);
+    assert.match(stderr, /not passing JDK_JAVA_OPTIONS, NODE_OPTIONS, TUMBLER_URL/);
+  } finally {
+    for (const k of ["NODE_OPTIONS", "TUMBLER_URL", "JDK_JAVA_OPTIONS"]) await catalog.remove("dev", k);
+  }
 });
 
 test("the CLI and the broker hold the same reserved names", () => {

@@ -383,6 +383,9 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         let value = String(b.value ?? "");
         if (effective !== "static") {
           if (!grants) return json({ error: "minting is off" }, 501);
+          // A rotation keeps the stored config: without additions the allowlist has since dropped,
+          // which validate() below would refuse.
+          if (!config) cfg = grants.pruned(effective, cfg);
           if (value) value = grants.canonical(effective, value);
           // A static key the admin saved, read here and never returned: the nearest of the scope's chain.
           const setting = async (n: string) => {
