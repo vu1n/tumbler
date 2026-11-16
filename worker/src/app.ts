@@ -161,7 +161,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     // GET /v1/mint/NAME/groups: every group the key's parent lists, names only, for `tumbler scope groups`.
     const [keyName, sub] = url.pathname.slice("/v1/mint/".length).split("/");
     if (sub !== undefined && (sub !== "groups" || request.method !== "GET")) return json({ error: "not found" }, 404);
-    const requested = url.searchParams.get("project");
+    const requested = url.searchParams.get("project") || null; // "" is none, as scopeFor() reads it; setConfig's guard must agree
     const { project, row } = await catalog.rowFor(caller, requested, decodeURIComponent(keyName));
     if (row.kind === "static") return json({ error: `${row.scope}/${row.name} is a static key; it has no scopes` }, 400);
     let cfg = grants.config(row);

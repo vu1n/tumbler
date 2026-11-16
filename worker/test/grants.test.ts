@@ -1036,6 +1036,24 @@ test("an OIDC operator assertion that expires during group lookup saves no confi
   assert.equal((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.config, before!.config);
 });
 
+test("the landing check never refuses a live operator, however its pin selects the key", async () => {
+  const s = await setup();
+  await s.catalog.put("global", "CF_SHARED_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  const patch = (name: string, q: string) => s.call("PATCH", `/v1/mint/${name}${q}`, s.dev, { scope: "workers:write", add: ["containers write"] });
+  const undo = (name: string, q: string) => s.call("PATCH", `/v1/mint/${name}${q}`, s.dev, { scope: "workers:write", remove: ["containers write"] });
+  const cases: [string[] | null, string, string][] = [
+    [["dev"], "CLOUDFLARE_API_TOKEN", ""], [["dev"], "CLOUDFLARE_API_TOKEN", "?project="], [["dev"], "CLOUDFLARE_API_TOKEN", "?project=dev"],
+    [["dev", "kypp"], "CLOUDFLARE_API_TOKEN", "?project=dev"], [["*"], "CLOUDFLARE_API_TOKEN", "?project=dev"],
+    [["dev", "kypp"], "CF_SHARED_TOKEN", ""], [["*"], "CF_SHARED_TOKEN", ""], [null, "CF_SHARED_TOKEN", ""], [["dev"], "CF_SHARED_TOKEN", ""], [["*"], "CF_SHARED_TOKEN", "?project=kypp"],
+  ];
+  for (const [pin, name, q] of cases) {
+    await s.catalog.updateToken("dev", { operator: true, projects: pin });
+    const label = `${JSON.stringify(pin)} ${name}${q}`;
+    assert.equal((await patch(name, q)).status, 200, label);
+    assert.equal((await undo(name, q)).status, 200, label);
+  }
+});
+
 test("additions saved before their group left the allowlist stop minting, don't block the CLI or a rotation, and the sweep removes them", async () => {
   const s = await setup();
   const seeded = { ...CONFIG, extra: { "workers:write": ["Containers Write", "Zero Trust Write", "Logs Write"], "x:write": ["Logs Write"] } };

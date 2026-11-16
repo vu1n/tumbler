@@ -122,9 +122,6 @@ the JWT only proves who is asking. Revoke the row and its JWTs stop on their nex
 
 1. Set the Worker var `TUMBLER_OIDC_AUDIENCE` to the broker's URL (`https://tumbler.example.com`).
    Unset, no JWT is ever a caller.
-   Discovery may fetch signing keys only from the issuer's own origin. If an issuer legitimately
-   serves them elsewhere, put that exact HTTPS origin in the comma-separated
-   `TUMBLER_OIDC_JWKS_ORIGINS` Worker var.
 2. `tumbler admin token create ci-kypp --pin kypp --oidc https://token.actions.githubusercontent.com --subject 'repo:vu1n/kypp:*'`
    prints no token: none exists. `token edit NAME --oidc ISSUER --subject SUB` binds an existing
    token (its own secret stops working). A binding never changes or comes off: to move it, revoke
@@ -248,12 +245,10 @@ the set: if auto can't reach the broker the command doesn't start, and if `.tumb
 fetches every key the token can read.
 
 The picked keys are added to the environment `run` was started in, so a credential already exported in
-that shell still reaches the command. The broker credential itself (`TUMBLER_TOKEN` or
-`TUMBLER_TOKEN_FILE`) never does: repository code gets the selected keys, not the bearer that could
-ask for a wider set. `--clean` starts the command from a runtime allowlist instead
+that shell still reaches the command. `--clean` starts the command from a runtime allowlist instead
 (`PATH`, `HOME`, locale, temp dirs, `XDG_*`, proxy and CA-bundle settings, `TUMBLER_URL`) plus its keys,
-and `--pass A,B` lets named variables through as well (the two broker-credential variables are never
-passable). A nested shim needs the environment's network secret. It filters the
+and `--pass A,B` lets named variables through as well. `TUMBLER_TOKEN` isn't on the list, so a shimmed
+tool inside a clean command needs the network secret or `--pass TUMBLER_TOKEN`. It filters the
 environment only: the command can still read a dotenv file or a credentials directory such as
 `~/.aws`.
 
