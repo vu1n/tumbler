@@ -366,7 +366,7 @@ function writeManifest(path, r, project) {
   // Why not a plain write: a repo can commit `.tumbler` as a symlink, and a write through one lands
   // wherever it points. Anything but a regular file is left alone; a new file replaces the name itself.
   const st = lstatSync(path, { throwIfNoEntry: false });
-  if (st && !st.isFile()) throw Object.assign(new Error(`${path} is not a regular file`), { code: "not a regular file" });
+  if (st && !st.isFile()) throw new Error("not a regular file");
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, lines.join("\n") + "\n", { flag: "wx" });
   renameSync(tmp, path);
@@ -555,8 +555,9 @@ const RESERVED = /^(PATH|HOME|SHELL|IFS|ENV|BASH_ENV|PS4|PROMPT_COMMAND|LD_.*|DY
 let warned = false;
 function withoutReserved(env) {
   const held = Object.keys(env).filter((k) => RESERVED.test(k));
-  if (held.length && !warned) { warned = true; say(`not passing ${held.join(", ")}: these names steer programs, so tumbler never sets them from a key`); }
-  return Object.fromEntries(Object.entries(env).filter(([k]) => !RESERVED.test(k)));
+  if (!held.length) return env;
+  if (!warned) { warned = true; say(`not passing ${held.join(", ")}: these names steer programs, so tumbler never sets them from a key`); }
+  return Object.fromEntries(Object.entries(env).filter(([k]) => !held.includes(k)));
 }
 
 // The command, with `done` settling once it exits: {code, sig} or {error} when it couldn't start.
