@@ -257,8 +257,9 @@ export class Grants {
   }
 
   // Saved configs holding an operator addition its provider no longer allows: rewritten without it
-  // under a new revision, as an operator's own removal is, so closeStale() ends the children minted
-  // with it. Run by the sweep, so a narrowed allowlist reaches saved keys with no manual step.
+  // under a new revision, as an operator's own removal is. Run by the sweep just before its
+  // closeStale(), which ends the children minted with it, so a narrowed allowlist reaches saved keys
+  // with no manual step.
   async pruneSaved() {
     const { results } = await this.db.prepare("SELECT scope, name, kind, config, rev FROM keys WHERE kind != 'static'")
       .all<{ scope: string; name: string; kind: string; config: string; rev: string }>();
@@ -266,7 +267,6 @@ export class Grants {
       const stored: MintConfig = JSON.parse(r.config || "{}"), next = this.pruned(r.kind, stored);
       if (next === stored) continue;
       if (!await this.catalog.setConfig(r.scope, r.name, r.rev, next)) continue; // changed meanwhile: the next sweep sees it
-      await this.closeStale(r.scope, r.name);
       const gone = Object.entries(stored.extra ?? {}).flatMap(([s, names]) => names.filter((n) => !next.extra?.[s]?.includes(n)).flatMap((n) => [s, `-${n}`]));
       await this.catalog.audit("system", "mint-scope", r.scope === GLOBAL ? null : r.scope, [r.name, ...gone]);
     }
