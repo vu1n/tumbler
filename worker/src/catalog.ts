@@ -25,6 +25,16 @@ export class Refused extends Error {
 
 export const isKeyName = (name: string) => NAME.test(name);
 export function checkName(name: string) { if (!NAME.test(name)) throw new Refused(400, `invalid key name: ${name}`); }
+// Names that steer the process a key is injected into rather than hold a secret: the loader, an
+// interpreter's startup, git's and ssh's helpers, the proxy and CA settings, and tumbler's own. A
+// caller token never creates or changes one (app.ts), since its value would run in, or reroute, the
+// commands of every other token that reads the scope; the CLI drops them too (cli/tumbler RESERVED,
+// kept the same as this by cli.test.ts). An admin's own keys are not held to it.
+export const RESERVED = /^(PATH|HOME|SHELL|IFS|ENV|BASH_ENV|PS4|PROMPT_COMMAND|LD_.*|DYLD_.*|NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|PYTHON(PATH|HOME|STARTUP)|PERL5(LIB|OPT)|RUBY(OPT|LIB)|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|GIT_(SSH|SSH_COMMAND|ASKPASS|EXEC_PATH|CONFIG.*|PROXY_COMMAND|EXTERNAL_DIFF|PAGER|EDITOR)|SSH_ASKPASS|EDITOR|VISUAL|PAGER|(HTTPS?|ALL|NO)_PROXY|SSL_CERT_(FILE|DIR)|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|TUMBLER_.*)$/;
+export function checkWritableName(name: string) {
+  checkName(name);
+  if (RESERVED.test(name)) throw new Refused(400, `${name} is an environment variable that steers programs, not a secret; a caller token can't save it. Pick another name`);
+}
 export function checkScope(scope: string) {
   if (scope !== GLOBAL && !PROJECT.test(scope)) throw new Refused(400, `invalid scope: ${scope}`);
 }

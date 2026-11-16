@@ -161,3 +161,17 @@ test("a key made minted between the check and the delete is not deleted", async 
   await catalog.put("global", "PLAIN", "v");
   assert.equal(await catalog.removeStatic("global", "PLAIN"), true);
 });
+
+test("a caller token never saves a name that steers programs; an admin still may, and the token can delete it", async () => {
+  const { catalog, tokens, put, admin, deps } = await setup();
+  for (const name of ["PATH", "NODE_OPTIONS", "LD_PRELOAD", "BASH_ENV", "GIT_SSH_COMMAND", "HTTPS_PROXY", "TUMBLER_URL", "PYTHONPATH"]) {
+    const r = await put(name, tokens.dev, { scope: "huddles/dev", value: "x" });
+    assert.equal(r.status, 400, name);
+    assert.match((await r.json() as any).error, /steers programs/);
+    assert.equal(await catalog.keyRow("huddles/dev", name), null, name);
+  }
+  assert.equal((await put("PATHFINDER_API_KEY", tokens.dev, { scope: "huddles/dev", value: "x" })).status, 200);
+  assert.equal((await admin(`keys/${encodeURIComponent("huddles/dev")}/NODE_OPTIONS`, { method: "PUT", body: JSON.stringify({ value: "x" }) })).status, 200);
+  const rm = await handle(new Request("https://t.example/v1/keys/NODE_OPTIONS?scope=huddles/dev", { method: "DELETE", headers: { authorization: `Bearer ${tokens.dev}` } }), deps);
+  assert.equal(rm.status, 200);
+});

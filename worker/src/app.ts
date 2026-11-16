@@ -1,5 +1,5 @@
 // app.ts — routes, apart from index.ts so tests can drive them without Worker bindings.
-import { beyond, type Caller, Catalog, checkName, checkScope, GLOBAL, isKeyName, Refused, tokenShape, writeReaches } from "./catalog.ts";
+import { beyond, type Caller, Catalog, checkName, checkScope, checkWritableName, GLOBAL, isKeyName, Refused, tokenShape, writeReaches } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
@@ -118,7 +118,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
   // Only within the token's writes. A key with a check keeps it, and a value that fails it saves nothing.
   if (url.pathname.startsWith("/v1/keys/") && request.method === "PUT") {
     const name = decodeURIComponent(url.pathname.slice("/v1/keys/".length));
-    checkName(name);
+    checkWritableName(name);
     // Loose: JSON can spell one byte of value in up to six (\u0000); the exact limit is on the value below.
     if (Number(request.headers.get("content-length") ?? 0) > MAX_VALUE * 6 + 4096) return json({ error: "value too large" }, 413);
     const b = await request.json().catch(() => ({})) as Record<string, unknown>;
@@ -270,6 +270,7 @@ async function delegateCreate(catalog: Catalog, grants: Grants | undefined, call
   const into = storeTarget(b.store);
   if (into) {
     if (!writeReaches(caller.writes, into.scope)) throw new Refused(403, `${caller.name} may not write ${into.scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}; store the token where it writes, or leave out store to have it shown once`);
+    checkWritableName(into.name);
     await checkStoreTarget(catalog, into);
   }
   const created = [name, `parent:${caller.name}`], kin = { parent: caller };
