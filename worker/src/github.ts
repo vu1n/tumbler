@@ -168,6 +168,15 @@ export function github(fetcher: typeof fetch = fetch): Provider {
         if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (only actions, checks, contents, deployments, discussions, issues, metadata, packages, pages, pull_requests, repository_projects and statuses can)`);
       }
     },
+    // An addition off the allowlist (saved by hand, or before a permission left the list) is dropped.
+    prune(config) {
+      const extra = (config.extra ?? {}) as Record<string, string[]>;
+      // An entry that isn't a list never passed validate(); it is left for validate() to refuse.
+      const kept = Object.entries(extra).map(([s, names]) => [s, Array.isArray(names) ? names.filter((n) => DELEGABLE.test(String(n))) : names] as const);
+      if (kept.every(([s, names]) => !Array.isArray(names) || names.length === extra[s].length)) return config;
+      const { extra: _, ...rest } = config, left = kept.filter(([, names]) => !Array.isArray(names) || names.length);
+      return left.length ? { ...rest, extra: Object.fromEntries(left) } : rest;
+    },
     async mint(parent, config, scopes, _expiresAt, _label) {
       const stored = (config.scopes ?? {}) as Record<string, string[]>, extra = config.extra ?? {};
       const onDefaults = config.defaults === true;

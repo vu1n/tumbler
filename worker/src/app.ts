@@ -190,6 +190,8 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
         } catch { return lost(); }
         return json({ error: `${row.name} changed meanwhile; nothing was saved, run again` }, 409);
       }
+      const pruned = grants.prunedNames(row.kind, row.config);
+      if (pruned.length) await grants.auditPruned(row.scope, row.name, pruned);
       // Its children carry the old groups: end them, so the next run mints with the new ones.
       await grants.closeStale(row.scope, row.name);
       await catalog.auditBy(caller, "mint-scope", row.scope === GLOBAL ? null : row.scope, [row.name, scope, ...added.map((g) => `+${g}`), ...remove.map((g) => `-${g}`)]);
@@ -389,10 +391,13 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         const b = await body();
         const kind = b.kind ? String(b.kind) : undefined, config = b.config && typeof b.config === "object" ? b.config : undefined;
         const prev = await catalog.keyRow(scope, name), effective = kind ?? prev?.kind ?? "static";
-        let cfg = config ?? JSON.parse(prev?.config || "{}");
+        let cfg = config ?? JSON.parse(prev?.config || "{}"), pruned: string[] = [];
         let value = String(b.value ?? "");
         if (effective !== "static") {
           if (!grants) return json({ error: "minting is off" }, 501);
+          // A rotation keeps the stored config: without additions the allowlist has since dropped,
+          // which validate() below would refuse.
+          if (!config && prev) { pruned = grants.prunedNames(effective, prev.config); cfg = grants.pruned(effective, cfg); }
           if (value) value = grants.canonical(effective, value);
           // A static key the admin saved, read here and never returned: the nearest of the scope's chain.
           const setting = async (n: string) => {
@@ -419,6 +424,7 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         // with the retired revision. "system": a rotation must not block the next grant like a revoke.
         if (prev && prev.kind !== "static" && grants) await grants.closeStale(scope, name);
         await catalog.audit(who, "put", scope === GLOBAL ? null : scope, [name]);
+        if (pruned.length) await grants!.auditPruned(scope, name, pruned);
         return json({ ok: true });
       }
       if (m === "DELETE") {

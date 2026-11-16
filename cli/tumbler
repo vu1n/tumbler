@@ -377,8 +377,8 @@ function writeManifest(path, r, project) {
   const st = lstatSync(path, { throwIfNoEntry: false });
   if (st && !st.isFile()) throw new Error("not a regular file");
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, lines.join("\n") + "\n", { flag: "wx" });
-  renameSync(tmp, path);
+  try { writeFileSync(tmp, lines.join("\n") + "\n", { flag: "wx" }); renameSync(tmp, path); }
+  catch (e) { if (e.code !== "EEXIST") try { unlinkSync(tmp); } catch {} throw e; } // EEXIST: not ours to remove
   keepOutOfGit(path);
 }
 
@@ -564,12 +564,14 @@ function cleanEnv(pass) {
 // startup, git and ssh helpers, proxy and CA settings, tumbler's own). The broker refuses a caller
 // token that saves one (catalog.ts RESERVED, the same list); one that is there anyway never reaches
 // the command, so a token that writes a scope can't run code in, or reroute, another's commands.
-const RESERVED = /^(PATH|HOME|SHELL|IFS|ENV|BASH_ENV|PS4|PROMPT_COMMAND|LD_.*|DYLD_.*|NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|PYTHON(PATH|HOME|STARTUP)|PERL5(LIB|OPT)|RUBY(OPT|LIB)|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|GIT_(SSH|SSH_COMMAND|ASKPASS|EXEC_PATH|CONFIG.*|PROXY_COMMAND|EXTERNAL_DIFF|PAGER|EDITOR)|SSH_ASKPASS|EDITOR|VISUAL|PAGER|(HTTPS?|ALL|NO)_PROXY|SSL_CERT_(FILE|DIR)|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|TUMBLER_.*)$/;
-let warned = false;
+const RESERVED = /^(PATH|HOME|SHELL|IFS|ENV|BASH_ENV|ZDOTDIR|PS4|PROMPT_COMMAND|TMPDIR|XDG_.*|LD_.*|DYLD_.*|NODE_OPTIONS|NODE_PATH|NODE_EXTRA_CA_CERTS|NODE_REPL_EXTERNAL_MODULE|NPM_CONFIG_.*|PYTHON(PATH|HOME|STARTUP|WARNINGS|BREAKPOINT|INSPECT|USERBASE|EXECUTABLE|PYCACHEPREFIX)|PERL5(LIB|OPT|DB)|PERLLIB|RUBY(OPT|LIB)|GEM_(HOME|PATH)|BUNDLE_GEMFILE|JAVA_TOOL_OPTIONS|JDK_JAVA_OPTIONS|_JAVA_OPTIONS|JAVA_OPTS|MAVEN_OPTS|GRADLE_OPTS|DOTNET_(STARTUP_HOOKS|ADDITIONAL_DEPS|SHARED_STORE|ROOT.*)|(CORECLR|COR)_(ENABLE_PROFILING|PROFILER.*)|GOFLAGS|RUSTC|RUSTC_WRAPPER|RUSTFLAGS|GIT_(SSH|SSH_COMMAND|ASKPASS|EXEC_PATH|CONFIG.*|PROXY_COMMAND|EXTERNAL_DIFF|PAGER|EDITOR|TEMPLATE_DIR|DIR|WORK_TREE)|SSH_ASKPASS|EDITOR|VISUAL|PAGER|(HTTPS?|ALL|NO)_PROXY|SSL_CERT_(FILE|DIR)|CURL_CA_BUNDLE|CURL_HOME|REQUESTS_CA_BUNDLE|GLIBC_TUNABLES|GCONV_PATH|LESSOPEN|LESSCLOSE|BROWSER|MANPAGER|SHELLOPTS|BASHOPTS|OPENSSL_(CONF|MODULES)|SSLKEYLOGFILE|WGETRC|GIT_SEQUENCE_EDITOR|GIT_SSL_.*|NODE_TLS_REJECT_UNAUTHORIZED|PIP_(INDEX_URL|EXTRA_INDEX_URL|CONFIG_FILE|CERT|PROXY)|CLASSPATH|MAKEFLAGS|PHPRC|PHP_INI_SCAN_DIR|LUA_INIT|R_PROFILE(_USER)?|AWS_(CONFIG_FILE|SHARED_CREDENTIALS_FILE|CA_BUNDLE)|GH_(HOST|CONFIG_DIR|EDITOR|PAGER|BROWSER)|(CLOUDFLARE|CF)_API_BASE_URL|WRANGLER_.*|AWS_PAGER|GNUMAKEFLAGS|TAR_OPTIONS|FTP_PROXY|SSH_AUTH_SOCK|KUBECONFIG|DOCKER_HOST|TUMBLER_.*)$/;
+const warned = new Set(); // each name once, so a --watch reload that brings a new one still says so
 function withoutReserved(env) {
   const held = Object.keys(env).filter((k) => RESERVED.test(k));
   if (!held.length) return env;
-  if (!warned) { warned = true; say(`not passing ${held.join(", ")}: these names steer programs, so tumbler never sets them from a key`); }
+  const fresh = held.filter((k) => !warned.has(k));
+  for (const k of fresh) warned.add(k);
+  if (fresh.length) say(`not passing ${fresh.join(", ")}: these names steer programs, so tumbler never sets them from a key`);
   return Object.fromEntries(Object.entries(env).filter(([k]) => !held.includes(k)));
 }
 

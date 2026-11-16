@@ -104,6 +104,8 @@ test("github provider: validate keeps reads on :read scopes, an hour's TTL and r
   assert.throws(() => p.validate({ ...CONFIG, installation_id: "x" }), /installation_id/);
   for (const g of ["secrets:write", "variables:write", "variables:read", "actions_variables:write", "organization_secrets:read", "workflows:write", "secret_scanning_alerts:read", "administration:read"]) {
     assert.throws(() => p.validate({ ...CONFIG, extra: { "repo:write": [g] } }), /can't be added from the CLI/, g);
+    // One saved anyway is dropped on read, beside one that may stay.
+    assert.deepEqual(p.prune!({ ...CONFIG, extra: { "repo:write": [g, "contents:write"], "x:write": [g] } }).extra, { "repo:write": ["contents:write"] }, g);
   }
 });
 

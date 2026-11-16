@@ -56,11 +56,14 @@ const LEGACY_DEFAULTS: Record<string, string[]> = {
 // github.ts, because a denylist misses the ones that widen reach past this broker under other names:
 // Access apps, policies, identity providers and service tokens (the gate in front of /admin), Zero
 // Trust, SSO and SCIM, OAuth clients, the "Admin" role groups, Logs Write (ships logs elsewhere).
-const DELEGABLE = /^(workers (scripts|kv storage|r2 storage|r2 data catalog|r2 sql|routes|tail|containers|ai|ci|observability)|d1|queues|pages|cloudflare pages|hyperdrive|vectorize|cloudchamber|containers|secrets store|ai gateway|ai search|auto rag|browser run|images|stream|pipelines|artifacts|account analytics|turnstile sites)( [a-z0-9 -]+)? (read|write|edit|run)$/i;
+// Workers CI and Observability are read-only here: their writes set what a build runs and where
+// telemetry goes. Workers Scripts, D1 and Secrets Store writes stay addable though a child holding
+// one can replace this broker on its own account, as workers:write already can (see above).
+const DELEGABLE = /^((workers (scripts|kv storage|r2 storage|r2 data catalog|r2 sql|routes|tail|containers|ai)|d1|queues|pages|cloudflare pages|hyperdrive|vectorize|cloudchamber|containers|secrets store|ai gateway|ai search|auto rag|browser run|images|stream|pipelines|artifacts|account analytics)( [a-z0-9 -]+)? (read|write|edit|run)|workers (ci|observability) read)$/i;
 // Never, whatever the allowlist grows to hold: a child with one could make tokens, members or billing changes.
 const UNDELEGABLE = /api tokens|memberships?|account settings|billing/i;
 const delegable = (name: string) => DELEGABLE.test(name) && !UNDELEGABLE.test(name);
-const HELD = "only Workers, D1, KV, R2, Queues, Pages, Hyperdrive, Vectorize, Containers, Secrets Store, AI, Images, Stream, Pipelines and analytics groups can be added from the CLI, at read, write, edit or run";
+const HELD = "only Workers, D1, KV, R2, Queues, Pages, Hyperdrive, Vectorize, Containers, Secrets Store, AI Gateway, AI Search, Workers AI, Browser Run, Images, Stream, Pipelines, Artifacts and Account Analytics groups can be added from the CLI, and only at read, write, edit or run";
 const ACCOUNT_SCOPE = "com.cloudflare.api.account", BUCKET_SCOPE = "com.cloudflare.edge.r2.bucket";
 // A bucket-scoped group is named "GROUP@BUCKET" and reaches that one R2 bucket, never the account's others.
 const AT_BUCKET = /^(.+)@([a-z0-9][a-z0-9-]{1,61}[a-z0-9])$/;
@@ -170,6 +173,17 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       if (config.ip !== undefined && !(Array.isArray(config.ip) && config.ip.every((c) => typeof c === "string"))) {
         throw new Refused(400, "config.ip must be a list of CIDRs");
       }
+    },
+    // An addition saved while it was still allowed (before DELEGABLE was an allowlist) is dropped.
+    prune(config) {
+      const extra = (config.extra ?? {}) as Record<string, string[]>;
+      // An entry that isn't a list never passed validate(); it is left for validate() to refuse.
+      const lists = Object.entries(extra).filter(([, names]) => Array.isArray(names));
+      const kept = lists.map(([s, names]) => [s, names.filter((n) => delegable(atBucket(String(n))?.name ?? String(n)))] as const);
+      if (kept.every(([s, names]) => names.length === extra[s].length)) return config;
+      const { extra: _, ...rest } = config;
+      const left = [...kept.filter(([, names]) => names.length), ...Object.entries(extra).filter(([, names]) => !Array.isArray(names))];
+      return left.length ? { ...rest, extra: Object.fromEntries(left) } : rest;
     },
     async mint(parent, config, scopes, expiresAt, label) {
       const stored = (config.scopes ?? {}) as Record<string, string[]>;

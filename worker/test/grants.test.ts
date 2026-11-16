@@ -22,7 +22,6 @@ const CONFIG = { account_id: ACCT, ttl_minutes: 30, start: ["workers:read"], sco
 function fakeProvider() {
   const p = { minted: [] as { scopes: string[]; parent: string }[], configs: [] as any[], revoked: [] as string[], fail: false, n: 0 } as any;
   const provider: Provider = {
-    validate() {},
     async mint(parent, c, scopes) {
       if (p.fail) throw new Error("provider down");
       p.minted.push({ parent, scopes }); p.configs.push(c); p.n++;
@@ -33,6 +32,14 @@ function fakeProvider() {
       if (parent !== PARENT) throw new Error("groups got the wrong parent");
       const known: Record<string, string> = { "containers write": "Containers Write", "pages write": "Pages Write" };
       return names.map((n) => known[n.toLowerCase()] ?? (() => { throw new Refused(400, `no group ${n}`); })());
+    },
+    // Stands in for a provider's allowlist: "Zero Trust Write" and "Logs Write" are no longer addable.
+    validate(c) { if (JSON.stringify(c.extra ?? {}).match(/Zero Trust Write|Logs Write/)) throw new Refused(400, "can't be added from the CLI"); },
+    prune(c) {
+      const off = (n: string) => n === "Zero Trust Write" || n === "Logs Write";
+      if (!Object.values(c.extra ?? {}).flat().some(off)) return c;
+      const { extra, ...rest } = c, left = Object.entries(extra!).map(([s, n]) => [s, n.filter((x) => !off(x))] as const).filter(([, n]) => n.length);
+      return left.length ? { ...rest, extra: Object.fromEntries(left) } : rest;
     },
     async listGroups(parent) {
       if (parent !== PARENT) throw new Error("listGroups got the wrong parent");
@@ -1027,6 +1034,59 @@ test("an OIDC operator assertion that expires during group lookup saves no confi
   const r = await s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", jwt, { scope: "workers:write", add: ["containers write"] });
   assert.equal(r.status, 403);
   assert.equal((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.config, before!.config);
+});
+
+test("additions saved before their group left the allowlist stop minting, don't block the CLI or a rotation, and the sweep removes them", async () => {
+  const s = await setup();
+  const seeded = { ...CONFIG, extra: { "workers:write": ["Containers Write", "Zero Trust Write", "Logs Write"], "x:write": ["Logs Write"] } };
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: seeded });
+  await s.catalog.updateToken("dev", { operator: true });
+  const stored = async () => JSON.parse((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.config).extra;
+  const DROPPED = "CLOUDFLARE_API_TOKEN,workers:write,-Zero Trust Write,-Logs Write,x:write,-Logs Write";
+  const said = async () => (await (await s.call("GET", "/admin/api/audit", undefined, undefined, "vu@example.com")).json()).audit.filter((a: any) => a.actor === "system" && a.names === DROPPED).length;
+  // A mint never carries them, though the stored config still does.
+  await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  assert.deepEqual(s.fake.configs.at(-1).extra, { "workers:write": ["Containers Write"] });
+  assert.deepEqual(await stored(), seeded.extra);
+  const grant = (await adminGrants(s))[0];
+  // The sweep rewrites the config, ends the child minted from the old revision, and says so.
+  await s.grants.sweep();
+  assert.deepEqual(await stored(), { "workers:write": ["Containers Write"] });
+  assert.equal((await s.grants.get(grant.id))!.state, "revoked");
+  const audit = await (await s.call("GET", "/admin/api/audit", undefined, undefined, "vu@example.com")).json();
+  assert.ok(audit.audit.some((a: any) => a.actor === "system" && a.action === "mint-scope" && a.names === DROPPED), JSON.stringify(audit.audit.slice(0, 3)));
+  const rev = (await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev;
+  await s.grants.sweep();
+  assert.equal((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev, rev); // nothing left to remove
+
+  // Before any sweep: with one in each of two scopes, the CLI still changes the key, and what it saves has neither.
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: seeded });
+  const scope = (body: unknown) => s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", s.dev, body);
+  assert.equal((await scope({ scope: "workers:write", add: ["pages write"] })).status, 200);
+  assert.deepEqual(await stored(), { "workers:write": ["Containers Write", "Pages Write"] });
+  assert.equal(await said(), 2); // the sweep's row, and this save's
+  // And an admin rotates the parent with the config left as it is.
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: seeded });
+  const rotated = await s.call("PUT", "/admin/api/keys/dev/CLOUDFLARE_API_TOKEN", undefined, { value: PARENT }, "vu@example.com");
+  assert.equal(rotated.status, 200, await rotated.clone().text());
+  assert.deepEqual(await stored(), { "workers:write": ["Containers Write"] });
+  assert.equal(await said(), 3);
+
+  // A key whose stored config can't be read stops neither the sweep's pruning of the others nor its other cleanups.
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: seeded });
+  s.db.raw.prepare("INSERT INTO keys (scope, name, kind, config, rev, checked, description, owner, iv, ciphertext, created_at, rotated_at) SELECT scope, 'BROKEN_TOKEN', kind, '{not json', 'r', checked, description, owner, iv, ciphertext, created_at, rotated_at FROM keys WHERE name = 'CLOUDFLARE_API_TOKEN'").run();
+  await s.grants.sweep();
+  assert.deepEqual(await stored(), { "workers:write": ["Containers Write"] });
+});
+
+test("a delegate never stores its new token under a name that steers programs", async () => {
+  const s = await setup();
+  await s.catalog.updateToken("dev", { delegate: true, writes: ["dev"] });
+  const r = await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"], store: { scope: "dev", name: "TUMBLER_TOKEN" } });
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /steers programs/);
+  assert.equal(await s.catalog.tokenRow("vps"), null);
+  assert.equal(await s.catalog.keyRow("dev", "TUMBLER_TOKEN"), null);
 });
 
 test("cli: scope add/rm change a minted key's groups for an operator token; others are told who turns it on", async () => {
