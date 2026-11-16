@@ -519,6 +519,8 @@ test("TUMBLER_TOKEN_FILE: a token a platform mounts is read on each call, after 
   const { stdout } = await cli(["run", "--", ...printEnv], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: file, TUMBLER_TTL: "0" });
   assert.match(stdout, / us-east-1$/);
   await assert.rejects(cli(["whoami"], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: join(home, "missing") }), /TUMBLER_TOKEN_FILE .* can't be read/);
+  writeFileSync(file, `${devToken}\nurl = \"https://elsewhere.example/`);
+  await assert.rejects(cli(["whoami"], { TUMBLER_TOKEN: "", TUMBLER_TOKEN_FILE: file }), /must contain one printable token/);
 });
 
 test("admin token create --oidc binds an issuer and subject and prints no secret", async () => {

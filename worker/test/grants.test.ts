@@ -965,6 +965,95 @@ test("an operator token adds and removes groups on the minted key it reads; the 
   assert.equal((await s.call("GET", "/v1/mint/CLOUDFLARE_API_TOKEN/groups", s.other)).status, 403);
 });
 
+test("revoking operator power while its group lookup runs saves no config", async () => {
+  const s = await setup();
+  await s.catalog.updateToken("dev", { operator: true });
+  const groups = s.fake.provider.groups!;
+  s.fake.provider.groups = async (...args: Parameters<NonNullable<Provider["groups"]>>) => {
+    const out = await groups(...args);
+    await s.catalog.updateToken("dev", { operator: false });
+    return out;
+  };
+  const before = await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN");
+  const r = await s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", s.dev, { scope: "workers:write", add: ["containers write"] });
+  assert.equal(r.status, 403);
+  assert.match((await r.json()).error, /may no longer change mint scopes/);
+  const after = await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN");
+  assert.deepEqual([after!.rev, after!.config], [before!.rev, before!.config]);
+  assert.equal(await s.db.prepare("SELECT 1 FROM retired_keys WHERE rev = ?").bind(before!.rev).first(), null);
+});
+
+test("narrowing an operator's pin while its group lookup runs saves no config", async () => {
+  const s = await setup();
+  await s.catalog.updateToken("dev", { operator: true });
+  const groups = s.fake.provider.groups!;
+  s.fake.provider.groups = async (...args: Parameters<NonNullable<Provider["groups"]>>) => {
+    const out = await groups(...args);
+    await s.catalog.setPin("dev", ["kypp"]);
+    return out;
+  };
+  const before = await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN");
+  const r = await s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", s.dev, { scope: "workers:write", add: ["containers write"] });
+  assert.equal(r.status, 403);
+  assert.match((await r.json()).error, /may no longer change mint scopes/);
+  const after = await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN");
+  assert.deepEqual([after!.rev, after!.config], [before!.rev, before!.config]);
+  assert.equal(await s.db.prepare("SELECT 1 FROM retired_keys WHERE rev = ?").bind(before!.rev).first(), null);
+});
+
+test("a pin change that makes a project key shadow the global one cannot update the global config", async () => {
+  const s = await setup();
+  await s.catalog.put("global", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  await s.catalog.updateToken("dev", { operator: true, projects: ["dev", "kypp"] });
+  const groups = s.fake.provider.groups!;
+  s.fake.provider.groups = async (...args: Parameters<NonNullable<Provider["groups"]>>) => {
+    const out = await groups(...args);
+    await s.catalog.setPin("dev", ["dev"]);
+    return out;
+  };
+  const before = await s.catalog.keyRow("global", "CLOUDFLARE_API_TOKEN");
+  const r = await s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", s.dev, { scope: "workers:write", add: ["containers write"] });
+  assert.equal(r.status, 403);
+  assert.equal((await s.catalog.keyRow("global", "CLOUDFLARE_API_TOKEN"))!.config, before!.config);
+  assert.equal(await s.db.prepare("SELECT 1 FROM retired_keys WHERE rev = ?").bind(before!.rev).first(), null);
+});
+
+test("an OIDC operator assertion that expires during group lookup saves no config", async () => {
+  const s = await setup();
+  const iss = "https://token.actions.example.com", sub = "repo:vu1n/kypp:ref:refs/heads/main", jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln";
+  const exp = s.catalog.clock().getTime() / 1000 + 60;
+  s.catalog.oidc = { audience: "https://t.example", verify: async (t, trusts) => t === jwt && exp > s.catalog.clock().getTime() / 1000 && await trusts(iss) ? { iss, sub, exp } : null };
+  await s.catalog.updateToken("dev", { operator: true, oidc: { issuer: iss, subject: "repo:vu1n/kypp:*" } });
+  const groups = s.fake.provider.groups!;
+  s.fake.provider.groups = async (...args: Parameters<NonNullable<Provider["groups"]>>) => {
+    const out = await groups(...args);
+    s.tick(2);
+    return out;
+  };
+  const before = await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN");
+  const r = await s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", jwt, { scope: "workers:write", add: ["containers write"] });
+  assert.equal(r.status, 403);
+  assert.equal((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.config, before!.config);
+});
+
+test("the landing check never refuses a live operator, however its pin selects the key", async () => {
+  const s = await setup();
+  await s.catalog.put("global", "CF_SHARED_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  const patch = (name: string, q: string) => s.call("PATCH", `/v1/mint/${name}${q}`, s.dev, { scope: "workers:write", add: ["containers write"] });
+  const undo = (name: string, q: string) => s.call("PATCH", `/v1/mint/${name}${q}`, s.dev, { scope: "workers:write", remove: ["containers write"] });
+  const cases: [string[] | null, string, string][] = [
+    [["dev"], "CLOUDFLARE_API_TOKEN", ""], [["dev"], "CLOUDFLARE_API_TOKEN", "?project="], [["dev"], "CLOUDFLARE_API_TOKEN", "?project=dev"],
+    [["dev", "kypp"], "CLOUDFLARE_API_TOKEN", "?project=dev"], [["*"], "CLOUDFLARE_API_TOKEN", "?project=dev"],
+    [["dev", "kypp"], "CF_SHARED_TOKEN", ""], [["*"], "CF_SHARED_TOKEN", ""], [null, "CF_SHARED_TOKEN", ""], [["dev"], "CF_SHARED_TOKEN", ""], [["*"], "CF_SHARED_TOKEN", "?project=kypp"],
+  ];
+  for (const [pin, name, q] of cases) {
+    await s.catalog.updateToken("dev", { operator: true, projects: pin });
+    const label = `${JSON.stringify(pin)} ${name}${q}`;
+    assert.equal((await patch(name, q)).status, 200, label);
+    assert.equal((await undo(name, q)).status, 200, label);
+  }
+});
+
 test("additions saved before their group left the allowlist stop minting, don't block the CLI or a rotation, and the sweep removes them", async () => {
   const s = await setup();
   const seeded = { ...CONFIG, extra: { "workers:write": ["Containers Write", "Zero Trust Write", "Logs Write"], "x:write": ["Logs Write"] } };
