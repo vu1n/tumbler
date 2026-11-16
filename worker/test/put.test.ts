@@ -164,7 +164,7 @@ test("a key made minted between the check and the delete is not deleted", async 
 
 test("a caller token never saves a name that steers programs; an admin still may, and the token can delete it", async () => {
   const { catalog, tokens, put, admin, deps } = await setup();
-  for (const name of ["PATH", "NODE_OPTIONS", "LD_PRELOAD", "BASH_ENV", "GIT_SSH_COMMAND", "HTTPS_PROXY", "TUMBLER_URL", "PYTHONPATH", "JDK_JAVA_OPTIONS", "DOTNET_STARTUP_HOOKS", "NPM_CONFIG_REGISTRY", "CLOUDFLARE_API_BASE_URL", "GH_HOST", "AWS_CONFIG_FILE", "GIT_SSL_NO_VERIFY"]) {
+  for (const name of ["PATH", "NODE_OPTIONS", "LD_PRELOAD", "BASH_ENV", "GIT_SSH_COMMAND", "HTTPS_PROXY", "TUMBLER_URL", "PYTHONPATH", "JDK_JAVA_OPTIONS", "DOTNET_STARTUP_HOOKS", "NPM_CONFIG_REGISTRY", "CLOUDFLARE_API_BASE_URL", "CF_API_BASE_URL", "WRANGLER_DOCKER_HOST", "GH_HOST", "AWS_CONFIG_FILE", "GIT_SSL_NO_VERIFY"]) {
     const r = await put(name, tokens.dev, { scope: "huddles/dev", value: "x" });
     assert.equal(r.status, 400, name);
     assert.match((await r.json() as any).error, /steers programs/);

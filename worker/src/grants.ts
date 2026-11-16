@@ -259,17 +259,34 @@ export class Grants {
   // Saved configs holding an operator addition its provider no longer allows: rewritten without it
   // under a new revision, as an operator's own removal is. Run by the sweep just before its
   // closeStale(), which ends the children minted with it, so a narrowed allowlist reaches saved keys
-  // with no manual step.
+  // with no manual step. One key's failure (a config that never passed validate()) is logged by its
+  // class and skipped: the cleanups after this in the sweep must still run.
   async pruneSaved() {
     const { results } = await this.db.prepare("SELECT scope, name, kind, config, rev FROM keys WHERE kind != 'static'")
       .all<{ scope: string; name: string; kind: string; config: string; rev: string }>();
     for (const r of results) {
-      const stored: MintConfig = JSON.parse(r.config || "{}"), next = this.pruned(r.kind, stored);
-      if (next === stored) continue;
-      if (!await this.catalog.setConfig(r.scope, r.name, r.rev, next)) continue; // changed meanwhile: the next sweep sees it
-      const gone = Object.entries(stored.extra ?? {}).flatMap(([s, names]) => names.filter((n) => !next.extra?.[s]?.includes(n)).flatMap((n) => [s, `-${n}`]));
-      await this.catalog.audit("system", "mint-scope", r.scope === GLOBAL ? null : r.scope, [r.name, ...gone]);
+      try {
+        const gone = this.prunedNames(r.kind, r.config);
+        if (!gone.length) continue;
+        if (!await this.catalog.setConfig(r.scope, r.name, r.rev, this.config(r))) continue; // changed meanwhile: the next sweep sees it
+        await this.auditPruned(r.scope, r.name, gone);
+      } catch (e) { console.error("tumbler: prune failed", r.name, errorClass(e)); }
     }
+  }
+  // What config() leaves out of a stored config, as audit names: each scope, then `-GROUP` for each
+  // addition dropped from it. Empty when nothing is.
+  prunedNames(kind: string, stored: string): string[] {
+    const was: MintConfig = JSON.parse(stored || "{}"), now = this.pruned(kind, was);
+    if (now === was) return [];
+    return Object.entries(was.extra ?? {}).flatMap(([s, names]) => {
+      const gone = (Array.isArray(names) ? names : []).filter((n) => !now.extra?.[s]?.includes(n));
+      return gone.length ? [s, ...gone.map((n) => `-${n}`)] : [];
+    });
+  }
+  // Every save of a pruned config says what was dropped: the sweep's, an operator's change and an
+  // admin's rotation alike. "system": the allowlist dropped them, not whoever saved.
+  auditPruned(scope: string, name: string, gone: string[]) {
+    return this.catalog.audit("system", "mint-scope", scope === GLOBAL ? null : scope, [name, ...gone]);
   }
 
   // Expire every active grant past its child's expiry and delete the child at the provider.
@@ -310,8 +327,9 @@ export class Grants {
   // --- internals ---
 
   // Why pruned on every read: an addition saved before its group left the provider's allowlist must
-  // not mint, show as held, or block the key's next `tumbler scope` change (validate() judges the
-  // whole config). pruneSaved() then rewrites the stored config and ends the children that hold it.
+  // not mint, show in `tumbler scope`, or block the key's next change (validate() judges the whole
+  // config). Until the next sweep the stored config (and /admin's view of it) still holds it and a
+  // child already minted with it still works; pruneSaved() then rewrites the one and ends the other.
   config(row: { kind: string; config: string }): MintConfig { return this.pruned(row.kind, JSON.parse(row.config || "{}")); }
   pruned(kind: string, config: MintConfig): MintConfig {
     const p = kind.startsWith("mint:") ? this.providers[kind.slice(5)] : undefined;

@@ -292,6 +292,8 @@ test("cloudflare: an operator can't add token, member or billing groups, nor wri
   const fine = { ...cfg, extra: { "workers:write": ["Containers Write"] } };
   assert.equal(cf.prune!(fine), fine);
   assert.equal(cf.prune!(cfg), cfg);
+  const odd = { ...cfg, extra: { "x:write": null, "y:write": ["Logs Write"] } } as any; // never passed validate(): left for it to refuse
+  assert.deepEqual(cf.prune!(odd).extra, { "x:write": null });
   const id = (name: string) => GROUPS.find((g) => g.name === name)!.id;
   await cf.mint("good-parent", { ...cfg, extra: { "workers:write": ["Containers Write"] } }, ["workers:write"], new Date("2026-10-23T12:00:00Z"), "t");
   assert.deepEqual(posted[0].policies[0].permission_groups, [{ id: READ }, { id: id("Containers Write") }]);

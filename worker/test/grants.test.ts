@@ -967,10 +967,12 @@ test("an operator token adds and removes groups on the minted key it reads; the 
 
 test("additions saved before their group left the allowlist stop minting, don't block the CLI or a rotation, and the sweep removes them", async () => {
   const s = await setup();
-  const seeded = { ...CONFIG, extra: { "workers:write": ["Containers Write", "Zero Trust Write"], "x:write": ["Logs Write"] } };
+  const seeded = { ...CONFIG, extra: { "workers:write": ["Containers Write", "Zero Trust Write", "Logs Write"], "x:write": ["Logs Write"] } };
   await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: seeded });
   await s.catalog.updateToken("dev", { operator: true });
   const stored = async () => JSON.parse((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.config).extra;
+  const DROPPED = "CLOUDFLARE_API_TOKEN,workers:write,-Zero Trust Write,-Logs Write,x:write,-Logs Write";
+  const said = async () => (await (await s.call("GET", "/admin/api/audit", undefined, undefined, "vu@example.com")).json()).audit.filter((a: any) => a.actor === "system" && a.names === DROPPED).length;
   // A mint never carries them, though the stored config still does.
   await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
   assert.deepEqual(s.fake.configs.at(-1).extra, { "workers:write": ["Containers Write"] });
@@ -981,7 +983,7 @@ test("additions saved before their group left the allowlist stop minting, don't 
   assert.deepEqual(await stored(), { "workers:write": ["Containers Write"] });
   assert.equal((await s.grants.get(grant.id))!.state, "revoked");
   const audit = await (await s.call("GET", "/admin/api/audit", undefined, undefined, "vu@example.com")).json();
-  assert.ok(audit.audit.some((a: any) => a.actor === "system" && a.action === "mint-scope" && a.names === "CLOUDFLARE_API_TOKEN,workers:write,-Zero Trust Write,x:write,-Logs Write"), JSON.stringify(audit.audit.slice(0, 3)));
+  assert.ok(audit.audit.some((a: any) => a.actor === "system" && a.action === "mint-scope" && a.names === DROPPED), JSON.stringify(audit.audit.slice(0, 3)));
   const rev = (await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev;
   await s.grants.sweep();
   assert.equal((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev, rev); // nothing left to remove
@@ -991,10 +993,18 @@ test("additions saved before their group left the allowlist stop minting, don't 
   const scope = (body: unknown) => s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", s.dev, body);
   assert.equal((await scope({ scope: "workers:write", add: ["pages write"] })).status, 200);
   assert.deepEqual(await stored(), { "workers:write": ["Containers Write", "Pages Write"] });
+  assert.equal(await said(), 2); // the sweep's row, and this save's
   // And an admin rotates the parent with the config left as it is.
   await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: seeded });
   const rotated = await s.call("PUT", "/admin/api/keys/dev/CLOUDFLARE_API_TOKEN", undefined, { value: PARENT }, "vu@example.com");
   assert.equal(rotated.status, 200, await rotated.clone().text());
+  assert.deepEqual(await stored(), { "workers:write": ["Containers Write"] });
+  assert.equal(await said(), 3);
+
+  // A key whose stored config can't be read stops neither the sweep's pruning of the others nor its other cleanups.
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: seeded });
+  s.db.raw.prepare("INSERT INTO keys (scope, name, kind, config, rev, checked, description, owner, iv, ciphertext, created_at, rotated_at) SELECT scope, 'BROKEN_TOKEN', kind, '{not json', 'r', checked, description, owner, iv, ciphertext, created_at, rotated_at FROM keys WHERE name = 'CLOUDFLARE_API_TOKEN'").run();
+  await s.grants.sweep();
   assert.deepEqual(await stored(), { "workers:write": ["Containers Write"] });
 });
 

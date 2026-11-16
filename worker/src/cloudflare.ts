@@ -177,9 +177,12 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
     // An addition saved while it was still allowed (before DELEGABLE was an allowlist) is dropped.
     prune(config) {
       const extra = (config.extra ?? {}) as Record<string, string[]>;
-      const kept = Object.entries(extra).map(([s, names]) => [s, Array.isArray(names) ? names.filter((n) => delegable(atBucket(n)?.name ?? n)) : names] as const);
+      // An entry that isn't a list never passed validate(); it is left for validate() to refuse.
+      const lists = Object.entries(extra).filter(([, names]) => Array.isArray(names));
+      const kept = lists.map(([s, names]) => [s, names.filter((n) => delegable(atBucket(String(n))?.name ?? String(n)))] as const);
       if (kept.every(([s, names]) => names.length === extra[s].length)) return config;
-      const { extra: _, ...rest } = config, left = kept.filter(([, names]) => names.length);
+      const { extra: _, ...rest } = config;
+      const left = [...kept.filter(([, names]) => names.length), ...Object.entries(extra).filter(([, names]) => !Array.isArray(names))];
       return left.length ? { ...rest, extra: Object.fromEntries(left) } : rest;
     },
     async mint(parent, config, scopes, expiresAt, label) {
