@@ -63,6 +63,13 @@ const DELEGABLE = /^((workers (scripts|kv storage|r2 storage|r2 data catalog|r2 
 // Never, whatever the allowlist grows to hold: a child with one could make tokens, members or billing changes.
 const UNDELEGABLE = /api tokens|memberships?|account settings|billing/i;
 const delegable = (name: string) => DELEGABLE.test(name) && !UNDELEGABLE.test(name);
+// A `:read` scope is granted to every token on request (machine.ts autoApproved), so it carries reads
+// only, and not the reads OPTIONAL_DEFAULTS files under a write scope (Workers Tail Read, Secrets
+// Store Read): the name's " Read" suffix doesn't make them safe for every token.
+const WRITE_LEVEL_READS = new Set(Object.entries(OPTIONAL_DEFAULTS).filter(([s]) => !s.endsWith(":read"))
+  .flatMap(([, choices]) => choices.flat()).filter((n) => / read$/i.test(n)).map((n) => n.toLowerCase()));
+const fitsScope = (scope: string, name: string) =>
+  !scope.endsWith(":read") || / read$/i.test(name) && !WRITE_LEVEL_READS.has(name.toLowerCase());
 const HELD = "only Workers, D1, KV, R2, Queues, Pages, Hyperdrive, Vectorize, Containers, Secrets Store, AI Gateway, AI Search, Workers AI, Browser Run, Images, Stream, Pipelines, Artifacts and Account Analytics groups can be added from the CLI, and only at read, write, edit or run";
 const ACCOUNT_SCOPE = "com.cloudflare.api.account", BUCKET_SCOPE = "com.cloudflare.edge.r2.bucket";
 // A bucket-scoped group is named "GROUP@BUCKET" and reaches that one R2 bucket, never the account's others.
@@ -166,20 +173,23 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       for (const [s, names] of Object.entries((config.extra ?? {}) as Record<string, string[]>)) {
         const bad = names.filter((n) => !delegable(atBucket(n)?.name ?? n));
         if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (use permission names; ${HELD}; the rest stay with /admin)`);
-        // Why: a `:read` scope is granted to every token on request (machine.ts autoApproved), so it carries reads only.
-        const writes = s.endsWith(":read") ? names.filter((n) => !/ read$/i.test(atBucket(n)?.name ?? n)) : [];
-        if (writes.length) throw new Refused(400, `config.extra.${s}: ${writes.join(", ")} isn't a read, and every token gets ${s}; add it to a write scope instead`);
+        const writes = names.filter((n) => !fitsScope(s, atBucket(n)?.name ?? n));
+        if (writes.length) throw new Refused(400, `config.extra.${s}: ${writes.join(", ")} isn't a read every token may hold, and every token gets ${s}; add it to a write scope instead`);
       }
       if (config.ip !== undefined && !(Array.isArray(config.ip) && config.ip.every((c) => typeof c === "string"))) {
         throw new Refused(400, "config.ip must be a list of CIDRs");
       }
     },
-    // An addition saved while it was still allowed (before DELEGABLE was an allowlist) is dropped.
+    // An addition saved while it was still allowed (before DELEGABLE was an allowlist, or before a
+    // write-level read was kept off `:read` scopes) is dropped.
     prune(config) {
       const extra = (config.extra ?? {}) as Record<string, string[]>;
       // An entry that isn't a list never passed validate(); it is left for validate() to refuse.
       const lists = Object.entries(extra).filter(([, names]) => Array.isArray(names));
-      const kept = lists.map(([s, names]) => [s, names.filter((n) => delegable(atBucket(String(n))?.name ?? String(n)))] as const);
+      const kept = lists.map(([s, names]) => [s, names.filter((n) => {
+        const name = atBucket(String(n))?.name ?? String(n);
+        return delegable(name) && fitsScope(s, name);
+      })] as const);
       if (kept.every(([s, names]) => names.length === extra[s].length)) return config;
       const { extra: _, ...rest } = config;
       const left = [...kept.filter(([, names]) => names.length), ...Object.entries(extra).filter(([, names]) => !Array.isArray(names))];

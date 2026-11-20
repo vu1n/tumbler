@@ -273,6 +273,11 @@ test("cloudflare: an operator can't add token, member or billing groups, nor wri
   assert.throws(() => cf.validate({ ...cfg, extra: { "workers:read": ["Containers Write"] } }), /isn't a read/);
   assert.throws(() => cf.validate({ ...cfg, extra: { "x:write": ["Billing Write"] } }), /can't be added from the CLI/);
   cf.validate({ ...cfg, extra: { "workers:read": ["Containers Read"], "pages:write": ["Containers Write"] } });
+  // Reads the defaults file under a write scope stay off `:read` scopes, whatever their name says.
+  for (const g of ["Workers Tail Read", "secrets store read"]) {
+    assert.throws(() => cf.validate({ ...cfg, extra: { "workers:read": [g] } }), /isn't a read every token may hold/, g);
+    cf.validate({ ...cfg, extra: { "workers:write": [g] } });
+  }
   // An allowlist: the groups that reach past the broker under other names (the gate in front of /admin,
   // identities, role groups) are refused too, both when asked for and when a config is saved.
   for (const g of HELD) {
@@ -289,6 +294,9 @@ test("cloudflare: an operator can't add token, member or billing groups, nor wri
   const old = { ...cfg, extra: { "workers:write": ["Containers Write", "Zero Trust Write"], "x:write": ["Access: Service Tokens Write"], "r2:b": ["Workers R2 Storage Bucket Item Write@some-bucket"] } };
   assert.deepEqual(cf.prune!(old).extra, { "workers:write": ["Containers Write"], "r2:b": ["Workers R2 Storage Bucket Item Write@some-bucket"] });
   assert.equal(cf.prune!({ ...cfg, extra: { "x:write": ["Logs Write"] } }).extra, undefined);
+  // A write-level read saved on a `:read` scope before it was refused there is dropped too.
+  assert.deepEqual(cf.prune!({ ...cfg, extra: { "workers:read": ["Workers Tail Read", "Queues Read"], "workers:write": ["Secrets Store Read"] } }).extra,
+    { "workers:read": ["Queues Read"], "workers:write": ["Secrets Store Read"] });
   const fine = { ...cfg, extra: { "workers:write": ["Containers Write"] } };
   assert.equal(cf.prune!(fine), fine);
   assert.equal(cf.prune!(cfg), cfg);
