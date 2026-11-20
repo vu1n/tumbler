@@ -1069,6 +1069,7 @@ test("additions saved before their group left the allowlist stop minting, don't 
   const grant = (await adminGrants(s))[0];
   // The sweep rewrites the config, ends the child minted from the old revision, and says so.
   await s.grants.sweep();
+  assert.equal(await said(), 1);
   assert.deepEqual(await stored(), { "workers:write": ["Containers Write"] });
   assert.equal((await s.grants.get(grant.id))!.state, "revoked");
   const audit = await (await s.call("GET", "/admin/api/audit", undefined, undefined, "vu@example.com")).json();
@@ -1095,6 +1096,23 @@ test("additions saved before their group left the allowlist stop minting, don't 
   s.db.raw.prepare("INSERT INTO keys (scope, name, kind, config, rev, checked, description, owner, iv, ciphertext, created_at, rotated_at) SELECT scope, 'BROKEN_TOKEN', kind, '{not json', 'r', checked, description, owner, iv, ciphertext, created_at, rotated_at FROM keys WHERE name = 'CLOUDFLARE_API_TOKEN'").run();
   await s.grants.sweep();
   assert.deepEqual(await stored(), { "workers:write": ["Containers Write"] });
+});
+
+test("a child minted before its key's config lost a group is ended on the next read, not reused until the sweep", async () => {
+  const s = await setup();
+  await s.catalog.put("dev", "CLOUDFLARE_API_TOKEN", PARENT, { kind: "mint:cloudflare", config: CONFIG });
+  await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
+  const grant = (await adminGrants(s))[0];
+  // The saved config now holds a group the provider no longer allows, as one saved before a rule
+  // changed would; the grant above stands for a child minted from it.
+  const row = (await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!;
+  const seeded = { ...CONFIG, extra: { "workers:write": ["Logs Write"] } };
+  s.db.raw.prepare("UPDATE keys SET config = ? WHERE scope = 'dev' AND name = 'CLOUDFLARE_API_TOKEN'").run(JSON.stringify(seeded));
+  s.db.raw.prepare("UPDATE grants SET key_rev = ? WHERE id = ?").run(row.rev, grant.id);
+  const r = await s.call("GET", "/v1/env?keys=CLOUDFLARE_API_TOKEN", s.dev);
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.equal((await s.grants.get(grant.id))!.state, "revoked");
+  assert.equal(JSON.parse((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.config).extra, undefined);
 });
 
 test("a delegate never stores its new token under a name that steers programs", async () => {

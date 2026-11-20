@@ -265,13 +265,16 @@ export class Grants {
     const { results } = await this.db.prepare("SELECT scope, name, kind, config, rev FROM keys WHERE kind != 'static'")
       .all<{ scope: string; name: string; kind: string; config: string; rev: string }>();
     for (const r of results) {
-      try {
-        const gone = this.prunedNames(r.kind, r.config);
-        if (!gone.length) continue;
-        if (!await this.catalog.setConfig(r.scope, r.name, r.rev, this.config(r))) continue; // changed meanwhile: the next sweep sees it
-        await this.auditPruned(r.scope, r.name, gone);
-      } catch (e) { console.error("tumbler: prune failed", r.name, errorClass(e)); }
+      try { await this.pruneRow(r); } catch (e) { console.error("tumbler: prune failed", r.name, errorClass(e)); }
     }
+  }
+  // Rewrites one saved config without what its provider no longer allows; true when it did.
+  private async pruneRow(r: { scope: string; name: string; kind: string; config: string; rev: string }) {
+    const gone = this.prunedNames(r.kind, r.config);
+    if (!gone.length) return false;
+    if (!await this.catalog.setConfig(r.scope, r.name, r.rev, this.config(r))) return false; // changed meanwhile: the next sweep sees it
+    await this.auditPruned(r.scope, r.name, gone);
+    return true;
   }
   // What config() leaves out of a stored config, as audit names: each scope, then `-GROUP` for each
   // addition dropped from it. Empty when nothing is.
@@ -328,8 +331,8 @@ export class Grants {
 
   // Why pruned on every read: an addition saved before its group left the provider's allowlist must
   // not mint, show in `tumbler scope`, or block the key's next change (validate() judges the whole
-  // config). Until the next sweep the stored config (and /admin's view of it) still holds it and a
-  // child already minted with it still works; pruneSaved() then rewrites the one and ends the other.
+  // config). Until the key's next read (current()) or the next sweep, the stored config and /admin's
+  // view of it still hold it; either one rewrites the config and ends the child minted with it.
   config(row: { kind: string; config: string }): MintConfig { return this.pruned(row.kind, JSON.parse(row.config || "{}")); }
   pruned(kind: string, config: MintConfig): MintConfig {
     const p = kind.startsWith("mint:") ? this.providers[kind.slice(5)] : undefined;
@@ -358,6 +361,17 @@ export class Grants {
     // Another key row (a project key now overriding a global one) or an older revision of this one:
     // end it (close() finds the revision that minted it, retired or not) and start fresh.
     if (g.key_scope !== row.scope || g.key_rev !== row.rev) { await this.close(g, "revoked", "system", null, caller.hash); return null; }
+    // A child minted from a config that still holds what its provider no longer allows may carry it:
+    // prune the saved config now rather than at the next sweep, and end the child, so none is reused.
+    // The caller's row is refreshed in place, so the fresh grant its caller opens is on the new revision.
+    if (g.state === "active" && this.prunedNames(row.kind, row.config).length) {
+      if (await this.pruneRow(row)) {
+        const now = await this.catalog.keyRow(row.scope, row.name);
+        if (now) Object.assign(row, { config: now.config, rev: now.rev });
+      }
+      await this.close(g, "revoked", "system", null, caller.hash);
+      return null;
+    }
     return g;
   }
 
