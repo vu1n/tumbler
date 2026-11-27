@@ -289,3 +289,21 @@ test("migration 0007 carries over each token's live write approvals and active w
   const scopes = Object.fromEntries((db.prepare("SELECT name, scopes FROM tokens").all() as any[]).map((r) => [r.name, r.scopes && JSON.parse(r.scopes)]));
   assert.deepEqual(scopes, { approved: ["workers:write"], granted: ["Audit:Read", "d1:write", "workers:write"], reader: null, lapsed: null, gone: null, moved: null, wild: ["workers:write"], lookalike: null });
 });
+
+test("migration 0014 keys each grant by the hash of the token that holds its caller name", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { readdirSync } = await import("node:fs");
+  const dir = new URL("../migrations/", import.meta.url), files = readdirSync(dir).sort();
+  const db = new DatabaseSync(":memory:"), at = (f: string) => db.exec(readFileSync(new URL(f, dir), "utf8"));
+  for (const f of files.filter((f) => f < "0014")) at(f);
+  db.prepare("INSERT INTO tokens (name, hash, created_at) VALUES ('dev', 'h-dev', '2026-01-01')").run();
+  db.prepare("INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, created_at, updated_at) VALUES ('g1', 'dev', 'dev', 'dev', 'r', 'K', 'active', '[]', '2026-01-01', '2026-01-01')").run();
+  at(files.find((f) => f.startsWith("0014"))!);
+  assert.equal((db.prepare("SELECT token_hash FROM grants WHERE id = 'g1'").get() as any).token_hash, "h-dev");
+  // One live grant per token, project and key: by hash now, so another token may hold its own.
+  db.prepare("INSERT INTO grants (id, caller, token_hash, project, key_scope, key_rev, name, state, scopes, created_at, updated_at) VALUES ('g2', 'dev', 'h-new', 'dev', 'dev', 'r', 'K', 'active', '[]', '2026-01-01', '2026-01-01')").run();
+  assert.throws(() => db.prepare("INSERT INTO grants (id, caller, token_hash, project, key_scope, key_rev, name, state, scopes, created_at, updated_at) VALUES ('g3', 'dev', 'h-dev', 'dev', 'dev', 'r', 'K', 'pending', '[]', '2026-01-01', '2026-01-01')").run(), /UNIQUE/);
+  // A Worker still on the old code inserts with no hash during the deploy; the trigger fills it in.
+  db.prepare("INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, created_at, updated_at) VALUES ('g4', 'dev', 'dev', 'dev', 'r', 'L', 'active', '[]', '2026-01-01', '2026-01-01')").run();
+  assert.equal((db.prepare("SELECT token_hash FROM grants WHERE id = 'g4'").get() as any).token_hash, "h-dev");
+});

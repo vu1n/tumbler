@@ -417,8 +417,8 @@ test("after a rotation every older revision's grant is ended, not just the one t
 test("a read claim left by a dead request is dropped after a minute instead of blocking for a day", async () => {
   const s = await setup();
   const t = new Date(Date.parse("2026-10-20T12:00:00Z")).toISOString();
-  s.db.raw.prepare(`INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, requested, requested_at, created_at, updated_at)
-    VALUES ('g_dead', 'dev', 'dev', 'dev', ?, 'CLOUDFLARE_API_TOKEN', 'pending', '[]', '["workers:read"]', ?, ?, ?)`)
+  s.db.raw.prepare(`INSERT INTO grants (id, caller, token_hash, project, key_scope, key_rev, name, state, scopes, requested, requested_at, created_at, updated_at)
+    VALUES ('g_dead', 'dev', (SELECT hash FROM tokens WHERE name = 'dev'), 'dev', 'dev', ?, 'CLOUDFLARE_API_TOKEN', 'pending', '[]', '["workers:read"]', ?, ?, ?)`)
     .run((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev, t, t, t);
   assert.match((await (await s.env()).json()).error, /being minted by another request/);
   s.tick(2);
@@ -531,9 +531,9 @@ test("an old token's late request or late revoke cleanup never ends a reused nam
   assert.equal(await activeChild(), 1);
   assert.deepEqual(s.fake.revoked, []);
   // A revoke whose cleanup runs only after the name was reused and the new token minted.
-  const close = s.grants.closeCaller.bind(s.grants);
-  s.grants.closeCaller = async (...a: Parameters<typeof close>) => {
-    s.grants.closeCaller = close;
+  const close = s.grants.closeToken.bind(s.grants);
+  s.grants.closeToken = async (...a: Parameters<typeof close>) => {
+    s.grants.closeToken = close;
     await reuse();
     return close(...a);
   };
@@ -652,7 +652,7 @@ test("a crash between ending a grant and the provider delete is retried by the s
 test("the sweep ends live grants of a revoked caller nobody retried", async () => {
   const s = await setup();
   await s.env();
-  s.grants.closeCaller = async () => { throw new Error("worker died"); };
+  s.grants.closeToken = async () => { throw new Error("worker died"); };
   await s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com");
   assert.deepEqual(s.fake.revoked, []);
   await s.grants.sweep();
@@ -1237,8 +1237,8 @@ test("a delegate's revoke cut short is finished by a retry, children included", 
   const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"] })).json()).token;
   assert.equal((await s.env(vps)).status, 200);
   // The worker dies after the revoke's batch, before any grant is closed.
-  const close = s.grants.closeCaller.bind(s.grants);
-  s.grants.closeCaller = async () => { s.grants.closeCaller = close; throw new Error("worker died"); };
+  const close = s.grants.closeToken.bind(s.grants);
+  s.grants.closeToken = async () => { s.grants.closeToken = close; throw new Error("worker died"); };
   assert.equal((await admin("DELETE", "tokens/dev")).status, 500);
   assert.deepEqual(s.fake.revoked, []);
   assert.equal((await admin("DELETE", "tokens/dev")).status, 200);

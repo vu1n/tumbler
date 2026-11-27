@@ -364,7 +364,7 @@ export class Catalog {
     const conds = [...(parent ? [{ sql: `EXISTS (SELECT 1 FROM tokens p WHERE p.name = ? AND p.hash = ? AND p.delegate = 1 AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?)
         AND p.projects IS ? AND p.scopes IS ? AND p.writes IS ? AND p.expires_at IS ?)`,
       binds: [parent.name, parent.hash ?? null, this.clock().toISOString(), asJson(parent.projects), asJson(parent.scopes ?? null), asJson(parent.writes ?? null), parent.expires_at ?? null] }] : []), ...(ok ? [ok] : []),
-      ...(ended ? [{ sql: "NOT EXISTS (SELECT 1 FROM grants WHERE caller = ? AND state IN ('pending', 'active'))", binds: [name] }] : [])];
+      ...(ended ? [{ sql: "NOT EXISTS (SELECT 1 FROM grants WHERE token_hash = ? AND state IN ('pending', 'active'))", binds: [ended] }] : [])];
     const hashSql = conds.length ? `CASE WHEN ${conds.map((c) => c.sql).join(" AND ")} THEN ? END` : "?";
     return { token, insert: this.db.prepare(`INSERT INTO tokens (name, hash, projects, scopes, writes, operator, delegate, parent, created_at, expires_at) VALUES (?, ${hashSql}, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(name, ...conds.flatMap((c) => c.binds), hash, ...row) };

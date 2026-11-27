@@ -72,14 +72,17 @@ const bytes = (v: unknown) => v instanceof Uint8Array ? v : new Uint8Array(v as 
 const union = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort();
 const grantScope = (id: string) => `grant:${id}`; // AAD for the sealed child, apart from every key row
 const LIVE = "state IN ('pending', 'active')";
+// Which token a caller is, for keying its grants: every caller() result carries its row's hash.
+const tokenHash = (c: Caller) => c.hash ?? (() => { throw new Error(`caller ${c.name} has no token hash`); })();
 // Token row `a` is live and its pin and ceiling still reach the grant (binds: now, then the JSON list
 // of scopes beyond reads).
 const holds = (a: string) => `${a}.revoked_at IS NULL AND (${a}.expires_at IS NULL OR ${a}.expires_at > ?)
   AND (grants.project IS NULL OR EXISTS (SELECT 1 FROM json_each(${a}.projects) WHERE json_each.value IN (grants.project,
     CASE WHEN instr(grants.project, '/') > 0 THEN '*' || substr(grants.project, instr(grants.project, '/')) ELSE '*' END)))
   AND NOT EXISTS (SELECT 1 FROM json_each(?) j WHERE NOT EXISTS (SELECT 1 FROM json_each(COALESCE(${a}.scopes, '[]')) c WHERE c.value IN (j.value, '*')))`;
-// The grant's caller name is still held by the token with this hash (a generation of that name).
-const GEN = "EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND t.hash = ?)";
+// The grant belongs to the token with this hash: a token's grants are keyed by its hash, never its
+// name, so acting for one token never touches the grants of another that took the name.
+const GEN = "grants.token_hash = ?";
 
 export class Grants {
   catalog: Catalog; providers: Record<string, Provider>; now: () => Date;
@@ -185,41 +188,39 @@ export class Grants {
     await this.close(g, "revoked", who);
   }
 
-  // A revoked caller token: end its grants so their children stop working now, not at expiry.
-  // `gen`: only while the token with that hash holds the name, so a late cleanup of an old token
-  // never ends grants of a new one that reused its name.
-  async closeCaller(caller: string, who: string, gen?: string) {
-    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND ${LIVE}`).bind(caller).all<any>();
-    for (const r of results) await this.close(parse(r), "revoked", who, null, gen);
+  // A revoked caller token (by its hash): end its grants so their children stop working now, not at
+  // expiry. Never the grants of another token that took the name.
+  async closeToken(hash: string, who: string) {
+    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE token_hash = ? AND ${LIVE}`).bind(hash).all<any>();
+    for (const r of results) await this.close(parse(r), "revoked", who, null, hash);
   }
 
   // After a token's pin narrows: its children minted for a project it no longer reaches stop now.
-  // `gen` as for closeCaller().
-  async closeOutsidePin(caller: string, projects: string[] | null, who: string, gen?: string) {
-    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND project IS NOT NULL AND ${LIVE}`).bind(caller).all<any>();
-    for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who, null, gen);
+  async closeOutsidePin(hash: string, projects: string[] | null, who: string) {
+    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE token_hash = ? AND project IS NOT NULL AND ${LIVE}`).bind(hash).all<any>();
+    for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who, null, hash);
   }
 
   // After a token's scopes narrow: its children holding a scope it no longer allows stop now.
-  async closeOutsideCeiling(caller: string, scopes: string[] | null, who: string, gen?: string) {
-    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND ${LIVE}`).bind(caller).all<any>();
+  async closeOutsideCeiling(hash: string, scopes: string[] | null, who: string) {
+    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE token_hash = ? AND ${LIVE}`).bind(hash).all<any>();
     for (const r of results) {
       const g = parse(r);
-      if (!g.scopes.every((s) => allowedBy(scopes, s))) await this.close(g, "revoked", who, null, gen);
+      if (!g.scopes.every((s) => allowedBy(scopes, s))) await this.close(g, "revoked", who, null, hash);
     }
   }
 
   // Live grants read as a project their caller's pin no longer reaches: a narrowing whose cleanup was
   // cut short. Re-read every sweep, like closeOutsideCeilings.
   async closeOutsidePins() {
-    const { results } = await this.db.prepare(`SELECT g.*, t.projects AS pin FROM grants g JOIN tokens t ON t.name = g.caller WHERE g.project IS NOT NULL AND g.${LIVE}`).all<any>();
+    const { results } = await this.db.prepare(`SELECT g.*, t.projects AS pin FROM grants g JOIN tokens t ON t.hash = g.token_hash WHERE g.project IS NOT NULL AND g.${LIVE}`).all<any>();
     for (const { pin, ...r } of results) if (!pinReaches(pin ? JSON.parse(pin) : null, r.project)) await this.close(parse(r), "revoked", "system");
   }
 
   // Live grants holding a scope their caller's token no longer allows: a narrowing whose cleanup was
   // cut short, or grants from before ceilings. The sweep re-reads every time, so none is missed.
   async closeOutsideCeilings() {
-    const { results } = await this.db.prepare(`SELECT g.*, t.scopes AS ceiling FROM grants g JOIN tokens t ON t.name = g.caller WHERE g.${LIVE}`).all<any>();
+    const { results } = await this.db.prepare(`SELECT g.*, t.scopes AS ceiling FROM grants g JOIN tokens t ON t.hash = g.token_hash WHERE g.${LIVE}`).all<any>();
     for (const { ceiling, ...r } of results) {
       const g = parse(r), allows: string[] | null = ceiling ? JSON.parse(ceiling) : null;
       if (!g.scopes.every((s) => allowedBy(allows, s))) await this.close(g, "revoked", "system");
@@ -233,12 +234,12 @@ export class Grants {
     for (const r of results) await this.close(parse(r), "revoked", who);
   }
 
-  // Live grants whose caller token is revoked (closeCaller after the revoke was interrupted) or has
+  // Live grants whose caller token is revoked (closeToken after the revoke was interrupted) or has
   // expired. Expiry has no request to hang the cleanup on, so the sweep is where its grants end; it
   // re-reads every time, so a cleanup cut short is finished by the next one.
   async closeRevokedCallers() {
     const { results } = await this.db.prepare(
-      `SELECT g.*, t.revoked_at IS NOT NULL AS by_revoke FROM grants g JOIN tokens t ON t.name = g.caller
+      `SELECT g.*, t.revoked_at IS NOT NULL AS by_revoke FROM grants g JOIN tokens t ON t.hash = g.token_hash
          WHERE g.${LIVE} AND (t.revoked_at IS NOT NULL OR t.expires_at <= ?)`,
     ).bind(this.now().toISOString()).all<any>();
     for (const { by_revoke, ...r } of results) await this.close(parse(r), "revoked", by_revoke ? "system" : "token-expiry");
@@ -363,8 +364,8 @@ export class Grants {
   }
 
   async live(caller: Caller, project: string | null, name: string) {
-    const r = await this.db.prepare(`SELECT * FROM grants WHERE caller = ? AND project IS ? AND name = ? AND ${LIVE} ORDER BY created_at DESC LIMIT 1`)
-      .bind(caller.name, project, name).first<any>();
+    const r = await this.db.prepare(`SELECT * FROM grants WHERE token_hash = ? AND project IS ? AND name = ? AND ${LIVE} ORDER BY created_at DESC LIMIT 1`)
+      .bind(tokenHash(caller), project, name).first<any>();
     return r ? parse(r) : null;
   }
 
@@ -378,7 +379,7 @@ export class Grants {
     scopes = g.requested!; // sorted, as the first mint must match it
     // Why: the pending row claims the one live slot before anything is minted, so a concurrent
     // request finds it instead of minting a second child.
-    if (!await this.insert(g, e, caller.hash)) {
+    if (!await this.insert(g, e, tokenHash(caller))) {
       const other = await this.live(caller, project, row.name);
       if (other) return other;
       throw new Refused(409, `${row.name}: a grant changed meanwhile; run again`);
@@ -431,8 +432,7 @@ export class Grants {
   // The json_each test is pinReaches() in SQL: the scope itself, or `*` / `*/<env>` for it.
   // `ceiling`: the caller token's scopes as read before minting. Every scope beyond reads must still
   // be among the token's scopes when the child lands, so narrowing them mid-mint wins like a revoke.
-  // `hash`: the credential that asked; the name's token must still be that one, or a request by a
-  // revoked token whose name was reused would land a child for the new token.
+  // `hash`: the credential that asked, which must be the token the grant belongs to.
   async store(g: GrantRow, row: KeyRow, m: Minted & { expires_at: string }, scopes: string[], who: string, ceiling: string[] | null, hash?: string) {
     const { iv, ciphertext } = await seal(this.catalog.key, grantScope(g.id), row.name, m.value);
     const t = this.now().toISOString(), beyond = scopes.filter((s) => !autoApproved(s));
@@ -441,7 +441,7 @@ export class Grants {
       // The token, and the delegate that made it if any, must still be live and still reach the
       // grant's project and scopes: a narrowing or revoke of either that lands first wins.
       guard: `key_rev = ? AND EXISTS (SELECT 1 FROM keys WHERE scope = ? AND name = ? AND rev = ?)
-        AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = grants.caller AND (? IS NULL OR t.hash = ?) AND ${holds("t")}
+        AND EXISTS (SELECT 1 FROM tokens t WHERE t.hash = grants.token_hash AND (? IS NULL OR t.hash = ?) AND ${holds("t")}
           AND (t.parent IS NULL OR EXISTS (SELECT 1 FROM tokens p WHERE p.name = t.parent AND ${holds("p")})))`,
       binds: [row.rev, row.scope, row.name, row.rev, hash ?? null, hash ?? null, t, JSON.stringify(beyond), t, JSON.stringify(beyond)], store: { iv, ciphertext },
     }).catch(async (e: Error) => { await this.revokeChild(row, m.id, m.expires_at, { grant: g.id, value: m.value }); throw e; });
@@ -522,14 +522,15 @@ export class Grants {
 
   // A new grant and its `open` event. False when another live grant already holds the slot (the
   // unique index), and then neither is written.
-  // `gen`: opened only while the token with that hash holds the caller name (a 401 otherwise).
-  async insert(g: GrantRow, e: GrantEvent, gen?: string): Promise<boolean> {
+  // `hash`: the token opening it, which the grant belongs to; opened only while that token still
+  // holds the caller name (a 401 otherwise).
+  async insert(g: GrantRow, e: GrantEvent, hash: string): Promise<boolean> {
     try {
       const [r] = await this.db.batch([this.db.prepare(
-        `INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, requested, requested_at, created_at, updated_at)
-         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ? IS NULL OR EXISTS (SELECT 1 FROM tokens t WHERE t.name = ? AND t.hash = ?)`,
-      ).bind(g.id, g.caller, g.project, g.key_scope, g.key_rev, g.name, g.state, JSON.stringify(g.scopes),
-        asJson(g.requested), g.requested_at, g.created_at, g.updated_at, gen ?? null, g.caller, gen ?? null), this.event(g.id, g.created_at, e, g.state, true)]);
+        `INSERT INTO grants (id, caller, token_hash, project, key_scope, key_rev, name, state, scopes, requested, requested_at, created_at, updated_at)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM tokens t WHERE t.name = ? AND t.hash = ?)`,
+      ).bind(g.id, g.caller, hash, g.project, g.key_scope, g.key_rev, g.name, g.state, JSON.stringify(g.scopes),
+        asJson(g.requested), g.requested_at, g.created_at, g.updated_at, g.caller, hash), this.event(g.id, g.created_at, e, g.state, true)]);
       if (!r.meta.changes) throw new Refused(401, "unauthorized");
       return true;
     } catch (err) {
@@ -546,8 +547,8 @@ export class Grants {
   // `live`: match any live state instead of `g` exactly, for an event whose outcome doesn't depend on
   // the rest (expire, revoke), so a stream of step-ups or re-mints can't keep a revoke from landing.
   // Only the columns the event changes are written, and RETURNING reads the child actually ended.
-  // `gen`: the hash of the caller token acting; the change lands only while that token still holds the
-  // grant's caller name, so a request by a token whose name was reused never touches the new one's grants.
+  // `gen`: the hash of the caller token acting; the change lands only on that token's grants, so a
+  // request by a token whose name was reused never touches the new one's grants.
   async apply(g: GrantRow, e: GrantEvent, extra: { guard?: string; binds?: unknown[]; store?: Record<string, unknown>; live?: boolean; gen?: string } = {}): Promise<GrantRow | null> {
     const next = transition(g, e);
     if (!next) return null;
