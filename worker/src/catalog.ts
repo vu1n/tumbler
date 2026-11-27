@@ -121,9 +121,12 @@ export function pinReaches(projects: string[] | null, scope: string | null) {
 
 // The admin command that widens a token's list field by `add`: `token edit` replaces the list, so the
 // command carries the current entries too. Refusals name it, so nobody has to find the field in /admin.
+// The list is shell-quoted unless plainly safe: a scope name is any non-space text an operator may
+// have chosen, so a pasted command must never run part of it.
 export function widenCommand(token: string, flag: "--scopes" | "--writes" | "--pin", current: string[] | null | undefined, add: string[]) {
-  return `tumbler admin token edit ${token} ${flag} ${[...new Set([...(current ?? []), ...add])].join(",")}`;
+  return `tumbler admin token edit ${shellWord(token)} ${flag} ${shellWord([...new Set([...(current ?? []), ...add])].join(","))}`;
 }
+export const shellWord = (s: string) => /^[A-Za-z0-9_.,:\/@%+=-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 
 // Whether a token may write `scope`: global only when named, otherwise as a pin reaches it.
 export function writeReaches(writes: string[] | null | undefined, scope: string) {

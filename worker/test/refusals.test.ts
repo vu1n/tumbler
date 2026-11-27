@@ -10,3 +10,15 @@ test("no refusal or CLI message sends anyone to /admin instead of a command", ()
     .filter(({ line }) => !/^\s*\/\//.test(line) && /(in|with) \/admin\b/.test(line)));
   assert.deepEqual(offenders.map(({ f, i, line }) => `${f}:${i}: ${line.trim()}`), []);
 });
+
+test("a suggested command quotes what isn't plainly safe, so pasting it never runs part of a scope name", async () => {
+  const { widenCommand } = await import("../src/catalog.ts");
+  const { execFileSync } = await import("node:child_process");
+  assert.equal(widenCommand("dev", "--scopes", ["workers:write"], ["d1:write"]), "tumbler admin token edit dev --scopes workers:write,d1:write");
+  for (const hostile of ["$(touch /tmp/pwned)", "`id`", "a;b", "it's", "*", "x|y", "a'$(id)'b"]) {
+    const cmd = widenCommand("dev", "--scopes", null, [hostile]);
+    // What a shell passes as the argument is exactly the scope, with nothing run.
+    const argv = execFileSync("sh", ["-c", `printf '%s\\n' ${cmd.split(" --scopes ")[1]}`], { encoding: "utf8" });
+    assert.equal(argv, `${hostile}\n`, cmd);
+  }
+});
