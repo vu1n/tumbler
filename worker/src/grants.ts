@@ -6,7 +6,7 @@
 // Only `active` ever yields a credential. Every other state, and every failure, yields none.
 // Nothing waits for a person: the caller token's scopes are its ceiling. A request inside them is
 // minted at once and audited; one outside them is refused, and widening the token is how to allow it.
-import { type Caller, type Catalog, GLOBAL, pinReaches, Refused, scopeName } from "./catalog.ts";
+import { type Caller, type Catalog, GLOBAL, pinReaches, Refused, scopeName, widenCommand } from "./catalog.ts";
 import { open, seal } from "./crypto.ts";
 import { allowedBy, autoApproved, type GrantEvent, type GrantState, isLive, transition } from "./machine.ts";
 import type { Outcome } from "./verify.ts";
@@ -139,8 +139,9 @@ export class Grants {
   async issue(caller: Caller, project: string | null, row: KeyRow): Promise<string> {
     let g = await this.current(caller, project, row);
     if (!g) {
-      const start = (this.config(row).start ?? []).filter((s) => allowedBy(caller.scopes ?? null, s));
-      if (!start.length) throw new Refused(403, `${row.name}: token ${caller.name} may hold none of its start scopes. Refused; retrying won't help: ask a human to add one to this token's scopes in /admin`);
+      const all = this.config(row).start ?? [], start = all.filter((s) => allowedBy(caller.scopes ?? null, s));
+      if (!all.length) throw new Refused(400, `${row.name} has no start scopes; ask for one with tumbler run --scope SCOPE`);
+      if (!start.length) throw new Refused(403, `${row.name}: token ${caller.name} may hold none of its start scopes (${all.join(", ")}). Refused; retrying won't help: ask a human to run \`${widenCommand(caller.name, "--scopes", caller.scopes, all.slice(0, 1))}\``);
       g = await this.open(caller, project, row, start);
     }
     if (g.state !== "active") throw new Refused(409, `${row.name} is being minted by another request; run again`);
@@ -152,7 +153,7 @@ export class Grants {
     const known = scopeNames(this.config(row));
     for (const s of scopes) if (!known.includes(s)) throw new Refused(400, `${row.name} has no scope ${s}`);
     const outside = scopes.filter((s) => !allowedBy(caller.scopes ?? null, s));
-    if (outside.length) throw new Refused(403, `${row.name}: token ${caller.name} may not hold ${outside.join(", ")}. Refused; retrying won't help: ask a human to add it to this token's scopes in /admin`);
+    if (outside.length) throw new Refused(403, `${row.name}: token ${caller.name} may not hold ${outside.join(", ")}. Refused; retrying won't help: ask a human to run \`${widenCommand(caller.name, "--scopes", caller.scopes, outside)}\``);
   }
 
   // More scopes on a mint key: minted at once (a wider child) when the token allows them all,
