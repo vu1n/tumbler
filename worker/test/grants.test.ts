@@ -109,7 +109,7 @@ test("a token's scopes are its approval: a write inside them mints at once, outs
   // other reads only: a write start scope leaves it nothing to start with, and nothing is minted.
   const r = await s.env(s.other);
   assert.equal(r.status, 403);
-  assert.match((await r.json()).error, /may hold none of its start scopes\. Refused; retrying won't help: ask a human to add one to this token's scopes in \/admin/);
+  assert.match((await r.json()).error, /may hold none of its start scopes \(workers:write\)\. Refused; retrying won't help: ask a human to run `tumbler admin token edit other --scopes workers:write`/);
   assert.equal(s.fake.minted.length, 1);
   assert.equal((await adminGrants(s)).length, 1); // and no grant waits anywhere
 });
@@ -841,7 +841,7 @@ test("cli: run gets a read child; --scope for a write the token can't hold stops
   await s.catalog.setScopes("dev", null);
   const err = await cli(["run", "--scope", "workers:write", "--", ...printToken]).then(() => null, (e) => e);
   assert.ok(err, "the command must not start without the scope");
-  assert.match(err.stderr, /may not hold workers:write\. Refused; retrying won't help: ask a human to add it to this token's scopes in \/admin/);
+  assert.match(err.stderr, /may not hold workers:write\. Refused; retrying won't help: ask a human to run `tumbler admin token edit dev --scopes workers:write`/);
   assert.equal(err.stdout, "");
   await s.catalog.setScopes("dev", ["workers:write"]);
   assert.equal((await cli(["run", "--scope", "workers:write", "--", ...printToken])).stdout, "child-2");
@@ -1109,7 +1109,7 @@ test("a delegate never stores its new token under a name that steers programs", 
 
 test("cli: scope add/rm change a minted key's groups for an operator token; others are told who turns it on", async () => {
   const err = await cli(["scope", "add", "CLOUDFLARE_API_TOKEN", "workers:write", "Containers Write"]).then(() => null, (e) => e);
-  assert.match(err.stderr, /not an operator; an admin turns that on for it in \/admin or with `tumbler admin token edit dev --operator on`/);
+  assert.match(err.stderr, /not an operator; an admin turns that on with `tumbler admin token edit dev --operator on`/);
   await s.catalog.updateToken("dev", { operator: true });
   const add = await cli(["scope", "add", "CLOUDFLARE_API_TOKEN", "workers:write", "Containers Write"]);
   assert.match(add.stderr, /added Containers Write to CLOUDFLARE_API_TOKEN workers:write \(dev\)/);

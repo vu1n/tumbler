@@ -80,7 +80,7 @@ test("--retry doesn't rerun when nothing changed; the report names a key failing
   await catalog.put("dev", "ROT_KEY", "revoked-upstream"); // went bad without passing through a check
   const bad = await cli(["run", "-k", "ROT_KEY", "--", "node", "-e", "process.exit(1)"], { TUMBLER_TTL: "0" });
   assert.match(bad.stderr, /ROT_KEY fails its check: rejected \(401\)/);
-  assert.match(bad.stderr, /fails its check; rotate it in \/admin/);
+  assert.match(bad.stderr, /fails its check; rotate it with tumbler put NAME, or tumbler admin put NAME --scope SCOPE/);
   assert.ok(!/revoked-upstream/.test(bad.stderr));
   const quiet = await cli(["run", "-k", "ROT_KEY", "--", "node", "-e", "process.exit(1)"], { TUMBLER_TTL: "0", TUMBLER_DIAGNOSE: "off" });
   assert.equal(quiet.stderr, "");

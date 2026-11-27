@@ -25,7 +25,7 @@
 //                                    work out which keys this repo needs and write .tumbler
 //   tumbler reload                   drop the cache so the next run fetches fresh values
 //   tumbler put NAME [-p project | --global] [--from-file PATH | --clipboard] [-d description]
-//                                    save a static key, within the token's writes (set in /admin).
+//                                    save a static key, within the token's writes (tumbler admin token edit --writes).
 //                                    The value comes from the file, the clipboard, piped stdin, or a
 //                                    hidden prompt (pasting works there, newlines included); never
 //                                    from an argument. A single-line value loses its trailing newline;
@@ -41,8 +41,8 @@
 //                                    to use with scope add, never guesses from the docs
 //   tumbler scope add|rm NAME SCOPE GROUP... [-p project]
 //                                    add or remove permission groups on a minted key's scope (a new
-//                                    scope name makes a new scope), for an operator token (set in
-//                                    /admin). Only groups added this way can be removed; token,
+//                                    scope name makes a new scope), for an operator token (tumbler
+//                                    admin token edit NAME --operator on). Only groups added this way can be removed; token,
 //                                    member and billing groups are refused. Children holding the old
 //                                    groups are ended, so the next run mints with the new ones
 //   tumbler token create NAME [--pin a,b] [--scopes a,b] [--writes a,b] [--expires-hours N]
@@ -612,7 +612,8 @@ async function diagnose(how, used, q, load, retry) {
     if (parts.length) say(`  ${n} ${parts.join("; ")}`);
   }
   if (changed.length) say(retry ? "a key changed; running once more with the new values" : "a key changed; run again, or pass --retry to rerun automatically");
-  else if (failing.length) say(`${failing.join(", ")} ${failing.length === 1 ? "fails its check; rotate it" : "fail their checks; rotate them"} in /admin`);
+  // Names the commands, never the web page: `put` for a token that may write the key, `admin put` otherwise.
+  else if (failing.length) say(`${failing.join(", ")} ${failing.length === 1 ? "fails its check; rotate it" : "fail their checks; rotate them"} with tumbler put NAME, or tumbler admin put NAME --scope SCOPE`);
   // Only claimed when the refetch worked, so "no key changed" was actually compared.
   else if (fresh && checked.length && checked.every((n) => checks[n].status === "ok")) {
     say(`no key changed and every checked key passes, so the failure is probably not a key problem${checked.length < names.length ? " (keys without a check can't be ruled out)" : ""}`);

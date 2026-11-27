@@ -172,7 +172,7 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
       }
       for (const [s, names] of Object.entries((config.extra ?? {}) as Record<string, string[]>)) {
         const bad = names.filter((n) => !delegable(atBucket(n)?.name ?? n));
-        if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (use permission names; ${HELD}; the rest stay with /admin)`);
+        if (bad.length) throw new Refused(400, `config.extra.${s}: ${bad.join(", ")} can't be added from the CLI (use permission names; ${HELD}; an admin sets the rest with tumbler admin put --config)`);
         const writes = names.filter((n) => !fitsScope(s, atBucket(n)?.name ?? n));
         if (writes.length) throw new Refused(400, `config.extra.${s}: ${writes.join(", ")} isn't a read every token may hold, and every token gets ${s}; add it to a write scope instead`);
       }
@@ -247,7 +247,7 @@ export function cloudflare(fetcher: typeof fetch = fetch): Provider {
     async groups(parent, config, names) {
       // Only the group part is judged: a bucket may be named "billing-logs".
       const part = (n: string) => atBucket(n)?.name ?? n;
-      const refuse = (bad: string[]) => { if (bad.length) throw new Refused(403, `${bad.join(", ")} can't be added from the CLI: ${HELD}. An admin adds any other to the key's config in /admin`); };
+      const refuse = (bad: string[]) => { if (bad.length) throw new Refused(403, `${bad.join(", ")} can't be added from the CLI: ${HELD}. An admin adds any other to the key's config with \`tumbler admin put NAME --scope SCOPE --config JSON\``); };
       // Before the parent is used at all, then the allowlist on Cloudflare's own spelling of each name
       // (after a name Cloudflare doesn't list has been answered with the nearest ones it does).
       refuse(names.filter((n) => UNDELEGABLE.test(part(n))));

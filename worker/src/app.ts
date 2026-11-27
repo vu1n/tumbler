@@ -1,5 +1,5 @@
 // app.ts — routes, apart from index.ts so tests can drive them without Worker bindings.
-import { beyond, type Caller, Catalog, checkName, checkScope, checkWritableName, GLOBAL, isKeyName, Refused, tokenShape, writeReaches } from "./catalog.ts";
+import { beyond, type Caller, Catalog, checkName, checkScope, checkWritableName, GLOBAL, isKeyName, Refused, tokenShape, widenCommand, writeReaches } from "./catalog.ts";
 import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
@@ -128,7 +128,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     if (new TextEncoder().encode(value).length > MAX_VALUE) return json({ error: `a value is at most ${MAX_VALUE} bytes` }, 413);
     const prev = await catalog.keyRow(scope, name);
     // Why: a mint key's value is a parent credential; a caller token never sets or rotates one.
-    if (prev && prev.kind !== "static") return json({ error: `${scope}/${name} is a ${prev.kind} key; change it in /admin` }, 409);
+    if (prev && prev.kind !== "static") return json({ error: `${scope}/${name} is a ${prev.kind} key, so its value is a parent credential; an admin rotates it with \`tumbler admin put ${name} --scope ${scope} --from-file FILE\`` }, 409);
     const cfg = JSON.parse(prev?.config || "{}"), check = await checkKey("static", cfg, value, verifiers(deps));
     if (check.status === "invalid" || check.status === "error") {
       return json({ error: `${name}: the new value failed its check, ${check.detail}; nothing was saved and the old value stays` }, check.status === "invalid" ? 400 : 502);
@@ -148,7 +148,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
     const prev = await catalog.keyRow(scope, name);
     if (!prev) return json({ error: `no key ${scope}/${name}` }, 404);
     // Why: deleting a parent ends every child it minted; that stays an admin's call.
-    if (prev.kind !== "static") return json({ error: `${scope}/${name} is a ${prev.kind} key; delete it in /admin` }, 409);
+    if (prev.kind !== "static") return json({ error: `${scope}/${name} is a ${prev.kind} key; an admin deletes it with \`tumbler admin rm ${name} --scope ${scope}\`` }, 409);
     if (!await catalog.removeStatic(scope, name)) return json({ error: `${scope}/${name} changed while it was being deleted; nothing was deleted` }, 409);
     await catalog.auditBy(caller, "delete", scope === GLOBAL ? null : scope, [name]);
     return json({ scope, name, action: "deleted" });
@@ -156,7 +156,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
   // A minted key's scopes, and an operator's changes to them: what `tumbler scope` sends. Only for an
   // operator token, only on the key it reads, and only the groups the admin's config doesn't set.
   if (url.pathname.startsWith("/v1/mint/") && (request.method === "GET" || request.method === "PATCH")) {
-    if (!caller.operator) return json({ error: `token ${caller.name} is not an operator; an admin turns that on for it in /admin or with \`tumbler admin token edit ${caller.name} --operator on\`` }, 403);
+    if (!caller.operator) return json({ error: `token ${caller.name} is not an operator; an admin turns that on with \`tumbler admin token edit ${caller.name} --operator on\`` }, 403);
     if (!grants) return json({ error: "minting is off" }, 501);
     // GET /v1/mint/NAME/groups: every group the key's parent lists, names only, for `tumbler scope groups`.
     const [keyName, sub] = url.pathname.slice("/v1/mint/".length).split("/");
@@ -174,7 +174,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       const added = add.length ? await grants.groups(row.kind, await catalog.value(row), cfg, add) : [];
       const gone = new Set(remove.map((g) => g.toLowerCase()));
       const absent = remove.filter((g) => !(extra[scope] ?? []).some((e) => e.toLowerCase() === g.toLowerCase()));
-      if (absent.length) return json({ error: `${absent.join(", ")} isn't an addition on ${row.name} ${scope}; only groups added with tumbler scope can be removed there, the rest is the key's config in /admin` }, 400);
+      if (absent.length) return json({ error: `${absent.join(", ")} isn't an addition on ${row.name} ${scope}; only groups added with tumbler scope can be removed there; the rest is the key's config, which an admin sets with \`tumbler admin put ${row.name} --scope ${row.scope} --config JSON\`` }, 400);
       const next = [...new Set([...(extra[scope] ?? []), ...added])].filter((g) => !gone.has(g.toLowerCase()));
       if (next.length) extra[scope] = next; else delete extra[scope];
       cfg = { ...cfg, extra };
@@ -316,10 +316,8 @@ function writeScope(catalog: Catalog, caller: Caller, requested: string | null, 
   if (!scope) throw new Refused(400, "name a scope to write: global, a project or project/env");
   checkScope(scope);
   if (!writeReaches(caller.writes, scope)) {
-    // `token edit --writes` replaces the list, so the command carries the token's current writes too.
-    const widened = [...(caller.writes ?? []), scope].join(",");
     throw new Refused(403, `token ${caller.name} may not write ${scope}${caller.writes ? ` (it writes ${caller.writes.join(", ")})` : " (it writes nothing)"}. `
-      + `As the admin, ${verb} just this key with \`tumbler admin ${verb} ${key} --scope ${scope}\`, or let the token write there with \`tumbler admin token edit ${caller.name} --writes ${widened}\``);
+      + `As the admin, ${verb} just this key with \`tumbler admin ${verb} ${key} --scope ${scope}\`, or let the token write there with \`${widenCommand(caller.name, "--writes", caller.writes, [scope])}\``);
   }
   return scope;
 }

@@ -346,9 +346,10 @@ scope a key has, including ones added to a key later). You decide once, there. A
   shim a plain `wrangler deploy` (or `secret put`, `d1 migrations apply`, `containers push`...) asks
   for `workers:write` itself; a token that can't hold it runs the command on its read child and says
   so, instead of stopping it. `--local` and `--dry-run` stay on the read child.
-- A scope outside them is refused, and the command doesn't start: `CLOUDFLARE_API_TOKEN: token dev
-  may not hold workers:write. Refused; retrying won't help: ask a human to add it to this token's
-  scopes in /admin`. An agent stops and asks you; you click the token's scopes in `/admin`. Narrowing them ends the children holding what they no longer allow.
+- A scope outside them is refused, and the command doesn't start. The refusal names the exact fix:
+  ``CLOUDFLARE_API_TOKEN: token dev may not hold workers:write. Refused; retrying won't help: ask a
+  human to run `tumbler admin token edit dev --scopes workers:write` ``. An agent stops and asks you in
+  chat, and you run that command. Narrowing them ends the children holding what they no longer allow.
 - Every mint is in the audit log (token, key, scopes, time), and Grants lists the live children.
 
 Each caller holds one **grant** per minted key, and its state decides what the env var holds:

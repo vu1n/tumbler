@@ -205,7 +205,7 @@ export function github(fetcher: typeof fetch = fetch): Provider {
       const bad = lower.filter((n) => !GROUP.test(n));
       if (bad.length) throw new Refused(400, `${bad.join(", ")}: name a permission as name:read or name:write (contents:read)`);
       const held = lower.filter((n) => !DELEGABLE.test(n));
-      if (held.length) throw new Refused(403, `${held.join(", ")} can't be added from the CLI: only repository content, PR, issue and CI permissions can; an admin adds others to the key's config`);
+      if (held.length) throw new Refused(403, `${held.join(", ")} can't be added from the CLI: only repository content, PR, issue and CI permissions can; an admin adds others to the key's config with \`tumbler admin put NAME --scope SCOPE --config JSON\``);
       lacking(await installed(parent, config), lower);
       return lower;
     },

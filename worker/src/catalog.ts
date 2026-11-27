@@ -119,6 +119,12 @@ export function pinReaches(projects: string[] | null, scope: string | null) {
   return !!projects && (projects.includes(scope) || projects.includes(env ? `*/${env}` : "*"));
 }
 
+// The admin command that widens a token's list field by `add`: `token edit` replaces the list, so the
+// command carries the current entries too. Refusals name it, so nobody has to find the field in /admin.
+export function widenCommand(token: string, flag: "--scopes" | "--writes" | "--pin", current: string[] | null | undefined, add: string[]) {
+  return `tumbler admin token edit ${token} ${flag} ${[...new Set([...(current ?? []), ...add])].join(",")}`;
+}
+
 // Whether a token may write `scope`: global only when named, otherwise as a pin reaches it.
 export function writeReaches(writes: string[] | null | undefined, scope: string) {
   if (!writes) return false;
