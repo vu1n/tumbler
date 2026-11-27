@@ -377,7 +377,7 @@ export class Catalog {
   }
 
   // Changes which minted scopes a live token may hold. Narrowing ends the children it holds beyond
-  // the new scopes (Grants.closeOutsideCeiling, or the sweep if that is cut short); widening takes
+  // the new scopes (Grants.reconcile, or the sweep if that is cut short); widening takes
   // effect on its next request. Returns the ceiling as stored (trimmed, sorted, deduped; empty is null).
   async setScopes(name: string, scopes: string[] | null) {
     return (await this.updateToken(name, { scopes })).scopes ?? null;
