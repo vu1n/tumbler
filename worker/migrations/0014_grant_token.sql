@@ -8,3 +8,9 @@ ALTER TABLE grants ADD COLUMN token_hash TEXT;
 UPDATE grants SET token_hash = (SELECT hash FROM tokens t WHERE t.name = grants.caller);
 DROP INDEX grants_one_live;
 CREATE UNIQUE INDEX grants_one_live ON grants (token_hash, COALESCE(project, ''), name) WHERE state IN ('pending', 'active');
+-- The old Worker keeps serving between this migration and the deploy, and it inserts grants with no
+-- token_hash; every grant must carry its token's hash or revoking that token misses it.
+CREATE TRIGGER grants_token_hash AFTER INSERT ON grants WHEN NEW.token_hash IS NULL
+BEGIN
+  UPDATE grants SET token_hash = (SELECT hash FROM tokens t WHERE t.name = NEW.caller) WHERE id = NEW.id;
+END;

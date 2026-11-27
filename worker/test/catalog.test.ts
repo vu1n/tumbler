@@ -303,4 +303,7 @@ test("migration 0014 keys each grant by the hash of the token that holds its cal
   // One live grant per token, project and key: by hash now, so another token may hold its own.
   db.prepare("INSERT INTO grants (id, caller, token_hash, project, key_scope, key_rev, name, state, scopes, created_at, updated_at) VALUES ('g2', 'dev', 'h-new', 'dev', 'dev', 'r', 'K', 'active', '[]', '2026-01-01', '2026-01-01')").run();
   assert.throws(() => db.prepare("INSERT INTO grants (id, caller, token_hash, project, key_scope, key_rev, name, state, scopes, created_at, updated_at) VALUES ('g3', 'dev', 'h-dev', 'dev', 'dev', 'r', 'K', 'pending', '[]', '2026-01-01', '2026-01-01')").run(), /UNIQUE/);
+  // A Worker still on the old code inserts with no hash during the deploy; the trigger fills it in.
+  db.prepare("INSERT INTO grants (id, caller, project, key_scope, key_rev, name, state, scopes, created_at, updated_at) VALUES ('g4', 'dev', 'dev', 'dev', 'r', 'L', 'active', '[]', '2026-01-01', '2026-01-01')").run();
+  assert.equal((db.prepare("SELECT token_hash FROM grants WHERE id = 'g4'").get() as any).token_hash, "h-dev");
 });
