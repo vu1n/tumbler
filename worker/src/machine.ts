@@ -12,6 +12,7 @@
 // event. deny, step_up and lapse remain for grants written before that, which the sweep lapses.
 //
 // No I/O, no clock: the time an event happens is part of the event.
+import { pinReaches } from "./catalog.ts";
 
 export interface GrantState {
   state: string; scopes: string[]; requested: string[] | null; requested_at: string | null;
@@ -38,6 +39,19 @@ export const allowedBy = (ceiling: string[] | null, scope: string) =>
   autoApproved(scope) || !!ceiling && (ceiling.includes(scope) || ceiling.includes("*"));
 
 export const isLive = (state: string) => state === "pending" || state === "active";
+
+// Why a live grant may no longer stand, or null when it may: its token ended, the token's pin or
+// scopes no longer reach it, or its key moved on from the revision that minted it (`keyRev`: the
+// key row it should come from now, null when there is none). The one check every cleanup applies:
+// a request (Grants.current), a handler after a change, and the sweep (Grants.reconcile).
+export function unauthorized(g: { project: string | null; scopes: string[]; key_rev: string },
+  token: { live: boolean; projects: string[] | null; scopes: string[] | null } | null, keyRev: string | null): string | null {
+  if (!token?.live) return "token-ended";
+  if (g.project !== null && !pinReaches(token.projects, g.project)) return "outside-pin";
+  if (!g.scopes.every((s) => allowedBy(token.scopes, s))) return "outside-scopes";
+  if (keyRev !== g.key_rev) return "key-changed";
+  return null;
+}
 const sorted = (a: string[]) => [...new Set(a)].sort();
 const same = (a: string[], b: string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 const ended = (g: GrantState, state: string, who: string): GrantState =>

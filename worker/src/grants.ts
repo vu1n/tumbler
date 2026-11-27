@@ -8,7 +8,7 @@
 // minted at once and audited; one outside them is refused, and widening the token is how to allow it.
 import { type Caller, type Catalog, GLOBAL, pinReaches, Refused, scopeName, widenCommand } from "./catalog.ts";
 import { open, seal } from "./crypto.ts";
-import { allowedBy, autoApproved, type GrantEvent, type GrantState, isLive, transition } from "./machine.ts";
+import { allowedBy, autoApproved, type GrantEvent, type GrantState, isLive, transition, unauthorized } from "./machine.ts";
 import type { Outcome } from "./verify.ts";
 
 // What a log line may say about an error: a built-in class from this fixed list, or "other". Never
@@ -188,43 +188,29 @@ export class Grants {
     await this.close(g, "revoked", who);
   }
 
-  // A revoked caller token (by its hash): end its grants so their children stop working now, not at
-  // expiry. Never the grants of another token that took the name.
-  async closeToken(hash: string, who: string) {
-    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE token_hash = ? AND ${LIVE}`).bind(hash).all<any>();
-    for (const r of results) await this.close(parse(r), "revoked", who, null, hash);
-  }
-
-  // After a token's pin narrows: its children minted for a project it no longer reaches stop now.
-  async closeOutsidePin(hash: string, projects: string[] | null, who: string) {
-    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE token_hash = ? AND project IS NOT NULL AND ${LIVE}`).bind(hash).all<any>();
-    for (const r of results) if (!pinReaches(projects, r.project)) await this.close(parse(r), "revoked", who, null, hash);
-  }
-
-  // After a token's scopes narrow: its children holding a scope it no longer allows stop now.
-  async closeOutsideCeiling(hash: string, scopes: string[] | null, who: string) {
-    const { results } = await this.db.prepare(`SELECT * FROM grants WHERE token_hash = ? AND ${LIVE}`).bind(hash).all<any>();
-    for (const r of results) {
+  // End every live grant `unauthorized()` refuses: its token ended (revoked, expired, or a delegate's
+  // child whose parent did), its pin or scopes no longer reach it, or its key moved on. `token` (a
+  // hash) or `key` limits it to the grants a change just touched; with neither it is the sweep's pass,
+  // which finishes any cleanup a crash or an interrupted request cut short.
+  async reconcile(filter: { token?: string; key?: { scope: string; name: string } } = {}, who = "system") {
+    const t = this.now().toISOString(), { token = null, key = null } = filter;
+    const { results } = await this.db.prepare(
+      `SELECT g.*, t.projects AS pin, t.scopes AS ceiling, k.rev AS current_rev,
+         t.hash IS NOT NULL AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
+           AND (t.parent IS NULL OR EXISTS (SELECT 1 FROM tokens p WHERE p.name = t.parent AND p.revoked_at IS NULL AND (p.expires_at IS NULL OR p.expires_at > ?))) AS token_live,
+         t.revoked_at IS NULL AND t.expires_at <= ? AS token_expired
+       FROM grants g LEFT JOIN tokens t ON t.hash = g.token_hash LEFT JOIN keys k ON k.scope = g.key_scope AND k.name = g.name
+       WHERE g.${LIVE} AND (? IS NULL OR g.token_hash = ?) AND (? IS NULL OR (g.key_scope = ? AND g.name = ?))`,
+    ).bind(t, t, t, token, token, key?.scope ?? null, key?.scope ?? null, key?.name ?? null).all<any>();
+    let ended = 0;
+    for (const { pin, ceiling, current_rev, token_live, token_expired, ...r } of results) {
       const g = parse(r);
-      if (!g.scopes.every((s) => allowedBy(scopes, s))) await this.close(g, "revoked", who, null, hash);
+      const why = unauthorized(g, { live: !!token_live, projects: pin ? JSON.parse(pin) : null, scopes: ceiling ? JSON.parse(ceiling) : null }, current_rev ?? null);
+      if (!why) continue;
+      await this.close(g, "revoked", why === "token-ended" && token_expired ? "token-expiry" : who);
+      ended++;
     }
-  }
-
-  // Live grants read as a project their caller's pin no longer reaches: a narrowing whose cleanup was
-  // cut short. Re-read every sweep, like closeOutsideCeilings.
-  async closeOutsidePins() {
-    const { results } = await this.db.prepare(`SELECT g.*, t.projects AS pin FROM grants g JOIN tokens t ON t.hash = g.token_hash WHERE g.project IS NOT NULL AND g.${LIVE}`).all<any>();
-    for (const { pin, ...r } of results) if (!pinReaches(pin ? JSON.parse(pin) : null, r.project)) await this.close(parse(r), "revoked", "system");
-  }
-
-  // Live grants holding a scope their caller's token no longer allows: a narrowing whose cleanup was
-  // cut short, or grants from before ceilings. The sweep re-reads every time, so none is missed.
-  async closeOutsideCeilings() {
-    const { results } = await this.db.prepare(`SELECT g.*, t.scopes AS ceiling FROM grants g JOIN tokens t ON t.hash = g.token_hash WHERE g.${LIVE}`).all<any>();
-    for (const { ceiling, ...r } of results) {
-      const g = parse(r), allows: string[] | null = ceiling ? JSON.parse(ceiling) : null;
-      if (!g.scopes.every((s) => allowedBy(allows, s))) await this.close(g, "revoked", "system");
-    }
+    return ended;
   }
 
   // After a scope move: no token reads as `project` any more, so every grant read as it ends. By
@@ -234,33 +220,9 @@ export class Grants {
     for (const r of results) await this.close(parse(r), "revoked", who);
   }
 
-  // Live grants whose caller token is revoked (closeToken after the revoke was interrupted) or has
-  // expired. Expiry has no request to hang the cleanup on, so the sweep is where its grants end; it
-  // re-reads every time, so a cleanup cut short is finished by the next one.
-  async closeRevokedCallers() {
-    const { results } = await this.db.prepare(
-      `SELECT g.*, t.revoked_at IS NOT NULL AS by_revoke FROM grants g JOIN tokens t ON t.hash = g.token_hash
-         WHERE g.${LIVE} AND (t.revoked_at IS NOT NULL OR t.expires_at <= ?)`,
-    ).bind(this.now().toISOString()).all<any>();
-    for (const { by_revoke, ...r } of results) await this.close(parse(r), "revoked", by_revoke ? "system" : "token-expiry");
-    return results.length;
-  }
-
-  // After a mint key is rotated or deleted: end every live grant on it from a revision that is no
-  // longer current (any older one, not just the one this write replaced, so concurrent saves or a
-  // retry after a failed close still catch them). close() revokes with the minting revision.
-  async closeStale(scope: string | null = null, name: string | null = null) {
-    const { results } = await this.db.prepare(
-      `SELECT * FROM grants g WHERE ${LIVE} AND (? IS NULL OR (g.key_scope = ? AND g.name = ?))
-         AND g.key_rev IS NOT (SELECT rev FROM keys k WHERE k.scope = g.key_scope AND k.name = g.name)`,
-    ).bind(scope, scope, name).all<any>();
-    for (const r of results) await this.close(parse(r), "revoked", "system");
-    return results.length;
-  }
-
   // Saved configs holding an operator addition its provider no longer allows: rewritten without it
   // under a new revision, as an operator's own removal is. Run by the sweep just before its
-  // closeStale(), which ends the children minted with it, so a narrowed allowlist reaches saved keys
+  // reconcile(), which ends the children minted with it, so a narrowed allowlist reaches saved keys
   // with no manual step. One key's failure (a config that never passed validate()) is logged by its
   // class and skipped: the cleanups after this in the sweep must still run.
   async pruneSaved() {
@@ -296,12 +258,9 @@ export class Grants {
     const { results } = await this.db.prepare("SELECT * FROM grants WHERE state = 'active' AND expires_at <= ?")
       .bind(this.now().toISOString()).all<any>();
     for (const r of results) await this.close(parse(r), "expired", "system");
-    await this.pruneSaved(); // additions saved before their group left the allowlist
-    await this.closeStale(); // grants a missed post-rotation cleanup left behind
+    await this.pruneSaved(); // additions saved before their group left the allowlist (new revisions)
     await this.catalog.revokeOutgrown(); // a delegate's tokens an interrupted narrowing left wider than it
-    await this.closeRevokedCallers(); // grants an interrupted token revoke left behind
-    await this.closeOutsideCeilings(); // grants an interrupted narrowing left behind
-    await this.closeOutsidePins(); // grants an interrupted repin left behind
+    await this.reconcile(); // every grant a cleanup cut short left behind, whatever changed
     await this.retryRevokes();
     // Requests left by the approval flow before ceilings: a pending one lapses to denied, and a
     // waiting step-up is dropped.
@@ -349,17 +308,16 @@ export class Grants {
     const g = await this.live(caller, project, row.name);
     if (!g) return null;
     if (g.state === "active" && !this.fresh(g)) { await this.close(g, "expired", "system", null, caller.hash); return null; }
-    // A child wider than the token now allows (scopes narrowed, or minted before ceilings existed)
-    // ends here rather than at expiry; the caller gets a fresh one within its scopes.
-    if (g.state === "active" && !g.scopes.every((s) => allowedBy(caller.scopes ?? null, s))) { await this.close(g, "revoked", "system", null, caller.hash); return null; }
     // A read claim whose minting request died (evicted, crashed) before storing: drop it and retry.
     if (g.state === "pending" && !g.child_id && Date.parse(g.created_at) < this.now().getTime() - ABANDONED_MS) {
       await this.apply(g, { type: "abandon", who: "system" }, { gen: caller.hash });
       return null;
     }
-    // Another key row (a project key now overriding a global one) or an older revision of this one:
-    // end it (close() finds the revision that minted it, retired or not) and start fresh.
-    if (g.key_scope !== row.scope || g.key_rev !== row.rev) { await this.close(g, "revoked", "system", null, caller.hash); return null; }
+    // A child the token no longer allows (its scopes narrowed), or from another key row (a project key
+    // now overriding a global one) or an older revision of this one: end it here rather than at expiry
+    // (close() finds the revision that minted it) and start fresh within the token's scopes.
+    const why = unauthorized(g, { live: true, projects: caller.projects, scopes: caller.scopes ?? null }, g.key_scope === row.scope ? row.rev : null);
+    if (why) { await this.close(g, "revoked", "system", null, caller.hash); return null; }
     return g;
   }
 
@@ -428,7 +386,7 @@ export class Grants {
   // authenticating and storing).
   // Otherwise the new child is deleted at the provider and nothing is handed out.
   // Why the pin is rechecked here: a request authorized before an admin narrowed the token's pin
-  // may reach this after closeOutsidePin() scanned, and must not activate a child for a lost project.
+  // may reach this after reconcile() scanned, and must not activate a child for a lost project.
   // The json_each test is pinReaches() in SQL: the scope itself, or `*` / `*/<env>` for it.
   // `ceiling`: the caller token's scopes as read before minting. Every scope beyond reads must still
   // be among the token's scopes when the child lands, so narrowing them mid-mint wins like a revoke.

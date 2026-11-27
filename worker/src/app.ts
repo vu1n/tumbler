@@ -197,7 +197,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       const pruned = grants.prunedNames(row.kind, row.config);
       if (pruned.length) await grants.auditPruned(row.scope, row.name, pruned);
       // Its children carry the old groups: end them, so the next run mints with the new ones.
-      await grants.closeStale(row.scope, row.name);
+      await grants.reconcile({ key: { scope: row.scope, name: row.name } });
       await catalog.auditBy(caller, "mint-scope", row.scope === GLOBAL ? null : row.scope, [row.name, scope, ...added.map((g) => `+${g}`), ...remove.map((g) => `-${g}`)]);
     }
     const base = (cfg.scopes ?? {}) as Record<string, unknown[]>, extra = cfg.extra ?? {};
@@ -215,7 +215,7 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       const done = await catalog.revokeChildOf(caller, name);
       if (!done) return json({ error: `${caller.name} made no token ${name}; only an admin revokes others` }, 404);
       const { fresh, hash } = done;
-      await grants?.closeToken(hash, caller.name); // only the token revoked, never one that took the name
+      await grants?.reconcile({ token: hash }, caller.name); // only the token revoked, never one that took the name
       if (fresh) await catalog.auditBy(caller, "token-revoke", null, [name]);
       return json({ ok: true });
     }
@@ -306,7 +306,7 @@ async function endChildren(catalog: Catalog, grants: Grants | undefined, parent:
   for (const t of await catalog.tokenGens(parent)) {
     if (t.revoked_at || !beyond(p, t).length) continue;
     if (await catalog.revokeGen(t)) await catalog.audit(who, "token-revoke", null, [t.name, `beyond:${parent}`]);
-    await grants?.closeToken(t.hash, who);
+    await grants?.reconcile({ token: t.hash }, who);
     ended.push(t.name);
   }
   return ended;
@@ -424,7 +424,7 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
         // End the old revision's grants now, so their children stop working at once. If this is
         // missed (a crash, a concurrent save), current() ends each one on its next request, revoking
         // with the retired revision. "system": a rotation must not block the next grant like a revoke.
-        if (prev && prev.kind !== "static" && grants) await grants.closeStale(scope, name);
+        if (prev && prev.kind !== "static" && grants) await grants.reconcile({ key: { scope, name } });
         await catalog.audit(who, "put", scope === GLOBAL ? null : scope, [name]);
         if (pruned.length) await grants!.auditPruned(scope, name, pruned);
         return json({ ok: true });
@@ -432,7 +432,7 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       if (m === "DELETE") {
         const prev = await catalog.keyRow(scope, name);
         await catalog.remove(scope, name);
-        if (prev && prev.kind !== "static" && grants) await grants.closeStale(scope, name);
+        if (prev && prev.kind !== "static" && grants) await grants.reconcile({ key: { scope, name } });
         await catalog.audit(who, "delete", scope === GLOBAL ? null : scope, [name]);
         return json({ ok: true });
       }
@@ -443,8 +443,8 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     const b = await body(), from = String(b.from ?? ""), to = String(b.to ?? "");
     const { moved, repinned } = await catalog.moveScope(from, to);
     // The moved mint keys' children and every grant read as `from` stop now. A rerun after a crash
-    // repeats both; the sweep's closeStale() also catches moved keys a crash left behind.
-    for (const k of moved) if (k.kind !== "static") await grants?.closeStale(from, k.name);
+    // repeats both; the sweep's reconcile() also catches moved keys a crash left behind.
+    for (const k of moved) if (k.kind !== "static") await grants?.reconcile({ key: { scope: from, name: k.name } });
     await grants?.closeProject(from, "system");
     await catalog.audit(who, "scope-move", to, [from, ...moved.map((k) => k.name)]);
     return json({ from, to, moved: moved.map((k) => k.name), repinned: repinned.map((t) => t.name) });
@@ -456,7 +456,7 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       const projects = Array.isArray(b.projects) && b.projects.length ? b.projects.map(String) : null;
       // Reusing an ended token's name: its children end first, and only that token's (by its hash), so the create finds nothing live under the name it hands over.
       const name = String(b.name ?? ""), ended = await catalog.endedToken(name);
-      if (ended) await grants?.closeToken(ended, who);
+      if (ended) await grants?.reconcile({ token: ended }, who);
       const into = storeTarget(b.store);
       const args = [name, projects, b.expires_at == null || b.expires_at === "" ? null : String(b.expires_at), list(b.scopes), list(b.writes), b.operator === true] as const;
       const kin = { delegate: b.delegate === true, ended }, created = [name, ...(kin.delegate ? ["delegate"] : [])];
@@ -491,8 +491,7 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
       const done = await catalog.updateToken(parts[1], { ...("scopes" in b ? { scopes: list(b.scopes) } : {}), ...("writes" in b ? { writes: list(b.writes) } : {}), ...("operator" in b ? { operator: b.operator === true } : {}), ...("delegate" in b ? { delegate: b.delegate === true } : {}), ...("oidc" in b ? { oidc: b.oidc && typeof b.oidc === "object" ? { issuer: String((b.oidc as any).issuer ?? ""), subject: String((b.oidc as any).subject ?? "") } : null } : {}), ...(pin ? { projects: projects?.length ? projects : null } : {}) });
       // Both cleanups run before either audit; a cleanup cut short is finished by the sweep.
       // Only the edited token's grants (its hash), never those of a token that took the name meanwhile.
-      if ("projects" in done) await grants?.closeOutsidePin(done.hash!, done.projects!, who);
-      if ("scopes" in done) await grants?.closeOutsideCeiling(done.hash!, done.scopes!, who);
+      if ("projects" in done || "scopes" in done) await grants?.reconcile({ token: done.hash! }, who);
       if ("projects" in done) await catalog.audit(who, "token-pin", null, [parts[1], ...(done.projects ?? ["global-only"])]);
       if ("scopes" in done) await catalog.audit(who, "token-scopes", null, [parts[1], ...(done.scopes ?? ["reads-only"])]);
       if ("writes" in done) await catalog.audit(who, "token-writes", null, [parts[1], ...(done.writes ?? ["writes-nothing"])]);
@@ -505,10 +504,10 @@ async function adminRoute(request: Request, url: URL, deps: Deps) {
     }
     if (m === "DELETE" && parts.length === 2) {
       const { fresh, hash } = await catalog.revokeTokenGen(parts[1]); // and the tokens it made as a delegate
-      await grants?.closeToken(hash, who); // its children stop working now, not at expiry; never a reused name's
+      await grants?.reconcile({ token: hash }, who); // its children stop working now, not at expiry; never a reused name's
       // Every token it made, revoked earlier or not, read after the revoke: a retry of a cleanup cut
       // short still finds their grants, and so does a child created just before the revoke landed.
-      for (const c of await catalog.childGens(parts[1])) await grants?.closeToken(c.hash, who);
+      for (const c of await catalog.childGens(parts[1])) await grants?.reconcile({ token: c.hash }, who);
       if (fresh) await catalog.audit(who, "token-revoke", null, [parts[1]]);
       return json({ ok: true });
     }

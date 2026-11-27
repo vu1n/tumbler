@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { promisify } from "node:util";
+import { unauthorized } from "../src/machine.ts";
 import { handle } from "../src/app.ts";
 import { Catalog, Refused } from "../src/catalog.ts";
 import { cloudflare } from "../src/cloudflare.ts";
@@ -188,7 +189,7 @@ test("narrowing a token's scopes ends the children holding what it no longer all
 test("a live child wider than the token's scopes ends on the next request, even when the narrowing's cleanup never ran", async () => {
   const s = await setup();
   await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
-  await s.catalog.setScopes("dev", null); // as after migration 0007, or a PATCH cut short before closeOutsideCeiling
+  await s.catalog.setScopes("dev", null); // as after migration 0007, or a PATCH cut short before its cleanup
   assert.equal((await (await s.env()).json()).env.CLOUDFLARE_API_TOKEN, "child-2");
   assert.deepEqual(s.fake.revoked, ["id-1"]); // the write child
   assert.deepEqual(s.fake.minted.at(-1)!.scopes, ["workers:read"]);
@@ -198,7 +199,7 @@ test("a narrowing whose cleanup was cut short is finished by the sweep, for chil
   const s = await setup();
   await s.call("POST", "/v1/step-up", s.dev, { keys: ["CLOUDFLARE_API_TOKEN"], scopes: ["workers:write"] });
   await s.env(s.other);
-  await s.catalog.setScopes("dev", null); // closeOutsideCeiling never ran
+  await s.catalog.setScopes("dev", null); // its cleanup never ran
   await s.grants.sweep();
   assert.deepEqual(s.fake.revoked, ["id-1"]); // dev's write child; other's read child stays
 });
@@ -324,7 +325,7 @@ test("narrowing a token's pin ends the children it holds for projects it no long
 test("a repin whose cleanup was cut short is finished by the sweep", async () => {
   const s = await setup();
   await s.env();
-  await s.catalog.setPin("dev", ["kypp"]); // closeOutsidePin never ran
+  await s.catalog.setPin("dev", ["kypp"]); // its cleanup never ran
   await s.grants.sweep();
   assert.deepEqual(s.fake.revoked, ["id-1"]);
 });
@@ -531,9 +532,9 @@ test("an old token's late request or late revoke cleanup never ends a reused nam
   assert.equal(await activeChild(), 1);
   assert.deepEqual(s.fake.revoked, []);
   // A revoke whose cleanup runs only after the name was reused and the new token minted.
-  const close = s.grants.closeToken.bind(s.grants);
-  s.grants.closeToken = async (...a: Parameters<typeof close>) => {
-    s.grants.closeToken = close;
+  const close = s.grants.reconcile.bind(s.grants);
+  s.grants.reconcile = async (...a: Parameters<typeof close>) => {
+    s.grants.reconcile = close;
     await reuse();
     return close(...a);
   };
@@ -542,9 +543,9 @@ test("an old token's late request or late revoke cleanup never ends a reused nam
   assert.equal((await s.env(fresh)).status, 200);
   // A narrowing whose cleanup runs only after the name was reused and the new token minted.
   await admin("PATCH", "tokens/dev", { scopes: ["workers:write"] }); // the current token, then narrowed below
-  const ceiling = s.grants.closeOutsideCeiling.bind(s.grants);
-  s.grants.closeOutsideCeiling = async (...a: Parameters<typeof ceiling>) => {
-    s.grants.closeOutsideCeiling = ceiling;
+  const ceiling = s.grants.reconcile.bind(s.grants);
+  s.grants.reconcile = async (...a: Parameters<typeof ceiling>) => {
+    s.grants.reconcile = ceiling;
     await admin("DELETE", "tokens/dev");
     await reuse();
     return ceiling(...a);
@@ -652,7 +653,8 @@ test("a crash between ending a grant and the provider delete is retried by the s
 test("the sweep ends live grants of a revoked caller nobody retried", async () => {
   const s = await setup();
   await s.env();
-  s.grants.closeToken = async () => { throw new Error("worker died"); };
+  const reconcile = s.grants.reconcile.bind(s.grants);
+  s.grants.reconcile = async () => { s.grants.reconcile = reconcile; throw new Error("worker died"); };
   await s.call("DELETE", "/admin/api/tokens/dev", undefined, undefined, "vu@example.com");
   assert.deepEqual(s.fake.revoked, []);
   await s.grants.sweep();
@@ -1237,8 +1239,8 @@ test("a delegate's revoke cut short is finished by a retry, children included", 
   const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"] })).json()).token;
   assert.equal((await s.env(vps)).status, 200);
   // The worker dies after the revoke's batch, before any grant is closed.
-  const close = s.grants.closeToken.bind(s.grants);
-  s.grants.closeToken = async () => { s.grants.closeToken = close; throw new Error("worker died"); };
+  const close = s.grants.reconcile.bind(s.grants);
+  s.grants.reconcile = async () => { s.grants.reconcile = close; throw new Error("worker died"); };
   assert.equal((await admin("DELETE", "tokens/dev")).status, 500);
   assert.deepEqual(s.fake.revoked, []);
   assert.equal((await admin("DELETE", "tokens/dev")).status, 200);
@@ -1392,4 +1394,31 @@ test("an OIDC caller's mint and step-up name the subject it proved in the audit"
   const rows = (await s.catalog.recentAudit()).filter((a: any) => a.action.startsWith("grant-")) as any[];
   assert.deepEqual(rows.map((a) => a.action).sort(), ["grant-mint", "grant-mint", "grant-step-up"]);
   assert.ok(rows.every((a) => a.actor === "dev" && a.via === sub), JSON.stringify(rows));
+});
+
+test("unauthorized(): one reason per way a live grant stops standing, checked in order", () => {
+  const g = { project: "dev", scopes: ["workers:read", "workers:write"], key_rev: "r1" };
+  const token = { live: true, projects: ["dev"], scopes: ["workers:write"] };
+  assert.equal(unauthorized(g, token, "r1"), null);
+  assert.equal(unauthorized(g, null, "r1"), "token-ended");
+  assert.equal(unauthorized(g, { ...token, live: false }, "r1"), "token-ended");
+  assert.equal(unauthorized(g, { ...token, projects: ["kypp"] }, "r1"), "outside-pin");
+  assert.equal(unauthorized({ ...g, project: null }, { ...token, projects: null }, "r1"), null); // global reads need no pin
+  assert.equal(unauthorized(g, { ...token, scopes: null }, "r1"), "outside-scopes");
+  assert.equal(unauthorized(g, { ...token, scopes: ["*"] }, "r1"), null);
+  assert.equal(unauthorized(g, token, "r2"), "key-changed");
+  assert.equal(unauthorized(g, token, null), "key-changed");
+});
+
+test("the sweep ends the grants of a delegate's token once the delegate expires", async () => {
+  const s = await setup();
+  await s.call("PATCH", "/admin/api/tokens/dev", undefined, { delegate: true }, "vu@example.com");
+  const vps = (await (await s.call("POST", "/v1/tokens", s.dev, { name: "vps", projects: ["dev"] })).json()).token;
+  assert.equal((await s.env(vps)).status, 200);
+  const live = () => adminGrants(s).then((gs) => gs.filter((g: any) => g.caller === "vps" && g.state === "active").length);
+  assert.equal(await live(), 1);
+  s.db.raw.prepare("UPDATE tokens SET expires_at = ? WHERE name = 'dev'").run(new Date(s.catalog.clock().getTime() - 1000).toISOString());
+  assert.equal((await s.env(vps)).status, 401); // refused at once...
+  await s.grants.sweep();
+  assert.equal(await live(), 0); // ...and its child is ended by the next sweep, not at its own expiry
 });
