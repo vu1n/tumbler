@@ -402,7 +402,8 @@ tumbler scope add CLOUDFLARE_API_TOKEN r2:claude-session-logs \
 
 That needs an **operator** token, which you turn on once per token (`/admin`, or
 `tumbler admin token edit NAME --operator on`). An operator only adds or removes permission groups
-on the minted keys its token reads. Additions sit on top of the key's config, so your config stays
+on the minted keys its token reads, and only on scopes its own token may hold (a scope's groups are
+what every token allowed it mints, so an operator never widens another token's children). Additions sit on top of the key's config, so your config stays
 the base and only additions can be removed this way. It adds only developer-platform groups
 (Workers, D1, KV, R2, Queues, Pages, Hyperdrive, Vectorize, Containers, Secrets Store, AI Gateway,
 AI Search, Workers AI, Browser Run, Images, Stream, Pipelines, Artifacts, Account Analytics) at

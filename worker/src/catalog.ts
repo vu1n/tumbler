@@ -553,10 +553,11 @@ export class Catalog {
   // A mint key's new config under a new revision, only if it is still at `rev`: the old revision is
   // retired in the same batch (its parent revokes the children it minted), as a rotation does.
   async setConfig(scope: string, name: string, rev: string, config: Record<string, unknown>, caller?: Caller,
-    project: string | null = null, requested: string | null = null): Promise<boolean> {
+    project: string | null = null, requested: string | null = null, mintScope: string | null = null): Promise<boolean> {
     // An operator change may wait on a provider lookup. Its token must still be this generation,
-    // live, an operator and resolving this exact row when the config lands. The last part makes a
-    // pin/default change or a newly shadowing row win the race too.
+    // live, an operator, allowed to hold `mintScope` (the scope it changes) and resolving this exact
+    // row when the config lands. The last parts make a narrowed ceiling, a pin/default change or a
+    // newly shadowing row win the race too.
     const env = project?.split("/")[1], scopes = chain(project), more = scopes.slice(scopes.indexOf(scope) + 1);
     let selection: string, selectionBinds: (string | null)[];
     if (requested !== null) {
@@ -573,10 +574,12 @@ export class Catalog {
     const winnerBinds = more.length ? [name, ...more] : [];
     const auth = caller ? ` AND EXISTS (SELECT 1 FROM tokens t WHERE t.name = ? AND t.hash = ? AND t.operator = 1
       AND t.parent IS NULL AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > ?)
-      AND (? IS NULL OR ? > ?)${selection})${winner}` : "";
+      AND (? IS NULL OR ? > ?)${selection}
+      AND (substr(?, -5) = ':read' OR EXISTS (SELECT 1 FROM json_each(t.scopes) c WHERE c.value IN (?, '*'))))${winner}` : "";
     const until = caller?.until ?? null;
+    if (caller && mintScope === null) throw new Error("setConfig: an operator change names the scope it changes");
     const authBinds = caller ? [caller.name, caller.hash ?? null, this.clock().toISOString(), until, until, this.clock().getTime() / 1000,
-      ...selectionBinds, ...winnerBinds] : [];
+      ...selectionBinds, mintScope, mintScope, ...winnerBinds] : [];
     // Why retire by rev: a change that lost a race must not retire the winner's revision early.
     const [, r] = await this.db.batch([this.db.prepare(
       `INSERT OR IGNORE INTO retired_keys (scope, name, rev, kind, config, iv, ciphertext, retire_until)

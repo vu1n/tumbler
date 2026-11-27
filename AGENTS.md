@@ -23,7 +23,7 @@
   parent is revoked or expired; narrowing the parent ends the ones that no longer fit. Never let a
   delegate take over another token's name or widen what it made.
 - The one admin power a caller token can hold is `operator` (set by an admin): `tumbler scope` adds
-  or removes permission groups on the minted keys the token reads, on the person's word in chat.
+  or removes permission groups on the minted keys the token reads, only on scopes its own token may hold, on the person's word in chat.
   Additions live in the key's `config.extra`, on top of the admin's config, and come only from each
   provider's allowlist (cloudflare.ts and github.ts DELEGABLE): never token, member, account settings,
   billing, Access or identity groups, or writes on a `:read` scope. Keep it that narrow: no token,
