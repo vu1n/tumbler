@@ -4,6 +4,7 @@ import { ADMIN_HTML } from "./admin.ts";
 import { autoKeys, cleanSignals, type S1Client } from "./auto.ts";
 import { parseDotenv } from "./dotenv.ts";
 import { errorClass, MINTED_MAX_AGE_S, scopeNames, type GrantRow, type Grants } from "./grants.ts";
+import { allowedBy } from "./machine.ts";
 import { sha256hex } from "./crypto.ts";
 import { checkKey, type Verifiers } from "./verify.ts";
 
@@ -170,6 +171,9 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       const b = await request.json().catch(() => ({})) as Record<string, unknown>;
       const scope = String(b.scope ?? ""), add = list(b.add) ?? [], remove = list(b.remove) ?? [];
       if (!scope || (!add.length && !remove.length)) return json({ error: "name a scope and the groups to add or remove" }, 400);
+      // An operator reshapes only scopes its own token may hold: a scope's groups are what every token
+      // allowed that scope mints, so changing one it can't hold would widen other tokens, not itself.
+      if (!allowedBy(caller.scopes ?? null, scope)) return json({ error: `token ${caller.name} may not hold ${scope}, so it can't change what ${scope} mints; an admin lets it with \`${widenCommand(caller.name, "--scopes", caller.scopes, [scope])}\`` }, 403);
       const extra = { ...(cfg.extra ?? {}) };
       const added = add.length ? await grants.groups(row.kind, await catalog.value(row), cfg, add) : [];
       const gone = new Set(remove.map((g) => g.toLowerCase()));
@@ -180,10 +184,10 @@ async function agentRoute(request: Request, url: URL, deps: Deps) {
       cfg = { ...cfg, extra };
       if (!Object.keys(extra).length) delete cfg.extra;
       grants.validate(row.kind, cfg);
-      if (!await catalog.setConfig(row.scope, row.name, row.rev, cfg, caller, project, requested)) {
+      if (!await catalog.setConfig(row.scope, row.name, row.rev, cfg, caller, project, requested, scope)) {
         const live = await catalog.caller(token!);
         const lost = () => json({ error: `token ${caller.name} may no longer change mint scopes; nothing was saved` }, 403);
-        if (!live || live.hash !== caller.hash || !live.operator) return lost();
+        if (!live || live.hash !== caller.hash || !live.operator || !allowedBy(live.scopes ?? null, scope)) return lost();
         try {
           const current = await catalog.rowFor(live, requested, row.name);
           if (current.row.scope !== row.scope) return lost();

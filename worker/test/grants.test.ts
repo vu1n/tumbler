@@ -983,6 +983,36 @@ test("revoking operator power while its group lookup runs saves no config", asyn
   assert.equal(await s.db.prepare("SELECT 1 FROM retired_keys WHERE rev = ?").bind(before!.rev).first(), null);
 });
 
+test("an operator changes only scopes its own token may hold, so it can't widen what other tokens mint", async () => {
+  const s = await setup();
+  await s.catalog.updateToken("dev", { operator: true, scopes: null }); // reads only
+  const before = await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN");
+  const r = await s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", s.dev, { scope: "workers:write", add: ["containers write"] });
+  assert.equal(r.status, 403);
+  assert.match((await r.json()).error, /token dev may not hold workers:write, so it can't change what workers:write mints; an admin lets it with `tumbler admin token edit dev --scopes workers:write`/);
+  assert.equal((await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN"))!.rev, before!.rev);
+  // `*` holds any scope, so the same change then lands.
+  await s.catalog.updateToken("dev", { scopes: ["*"] });
+  assert.equal((await s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", s.dev, { scope: "workers:write", add: ["containers write"] })).status, 200);
+});
+
+test("narrowing an operator's scopes while its group lookup runs saves no config", async () => {
+  const s = await setup();
+  await s.catalog.updateToken("dev", { operator: true });
+  const groups = s.fake.provider.groups!;
+  s.fake.provider.groups = async (...args: Parameters<NonNullable<Provider["groups"]>>) => {
+    const out = await groups(...args);
+    await s.catalog.setScopes("dev", null);
+    return out;
+  };
+  const before = await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN");
+  const r = await s.call("PATCH", "/v1/mint/CLOUDFLARE_API_TOKEN", s.dev, { scope: "workers:write", add: ["containers write"] });
+  assert.equal(r.status, 403);
+  assert.match((await r.json()).error, /may no longer change mint scopes/);
+  const after = await s.catalog.keyRow("dev", "CLOUDFLARE_API_TOKEN");
+  assert.deepEqual([after!.rev, after!.config], [before!.rev, before!.config]);
+});
+
 test("narrowing an operator's pin while its group lookup runs saves no config", async () => {
   const s = await setup();
   await s.catalog.updateToken("dev", { operator: true });
